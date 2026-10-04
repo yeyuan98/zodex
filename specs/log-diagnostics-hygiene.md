@@ -96,9 +96,13 @@ now−updatedAt`（持久化 token 轮换时间；**永不输出 token 值**）�
 中 weixin send-outcome **失败**行（`ret=-2` 类，`tokenAgeMs` 已随行的同一行），
 新增三个字段：
 
-1. `burstOrdinal`：本次出站补发波内该 peer 的第几条发送尝试（1-based）。计数器为
-   per-peer lazy 内存状态，在**该 peer 的任意入站**与 **M2 token 失效**
-   （`invalidateWeixinContextTokenForPeer` 实际生效）时归零重开。
+1. `burstOrdinal`：当前出站波内该 peer 的第几条**发送尝试**（1-based）。波 = 两次归零
+   之间的连续出站尝试序列；**每次尝试都计入**——序言、保留积压逐条补发（force 边界
+   先补投再 flush 当前缓冲）、正文分块、失败通知，它们都打到同一发送 API（2026-10-04
+   实测 -2 正是补发波中段死亡，handoff §2f.1/§2f.10；排除补发会使位次判别在最需要的
+   事件类上失明——main-agent 裁定）。计数器为 per-peer lazy 内存状态，在**该 peer 的
+   任意入站**与 **M2 token 失效**（`invalidateWeixinContextTokenForPeer` 实际生效）时
+   归零重开。
 2. `sendCount10s`：该 peer trailing 10 秒窗口内的发送尝试数。由小时间戳环维护，
    发送时**惰性求值**（先裁剪 >10s 的旧戳再计数）——不设 timer/daemon（§5.12
    「无新 timer」先例）。
