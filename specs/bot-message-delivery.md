@@ -191,6 +191,13 @@ drops (handoff §2 telemetry defects). Full logging contract:
 - revival 补发前发送**一条**本地化序言（"断线期间积压的 N 条消息已补发" /
   "Delivered N messages queued during the outage"，zh/en）走存活通道，先于积压
   内容；`/status` 在保留缓冲非空期间显示待补发行（约 KB 数）。owner 决定 §7.20。
+- **多波补发为预期形态（alpha.4 rig 实测记录，2026-10-04）**：revival 过程中通道
+  再次死亡时，`deliverRetainedBacklog` 在首块 channel-dead 处停止并重新保留余量
+  ——积压会按 revival 边界分成多波（每波各带一条序言），用户看到"两波/多波"消息
+  属预期而非重复投递（实测 11/11 逐条恰好一次，无丢失无重复）。**空闲期零重试**：
+  无入站、无 force 边界时保留缓冲静默等待（实测整夜 01:06–07:29 零发送尝试）；
+  活跃流式阶段（终态前数分钟）每个 force 边界各做一次有界积压重试，可产生短时
+  密集的失败行（实测 4 分钟 ~191 次失败尝试，边界密集所致，终态后自止）。
 
 ## Acceptance scenarios
 
