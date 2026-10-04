@@ -43,6 +43,10 @@ const messages = {
     attachmentDownloadUnavailable:
       "无法下载附件。文件可能已过期、已撤回，或机器人没有读取权限。请重新发送附件后再试。",
     attachmentTooLarge: "附件超过 5MB，请压缩后重新发送。",
+    // 3.14.5 Alpha 6（specs/bot-file-delivery.md「Inbound attachment gates」§5.1/§5.2）：
+    // >4 附件的即时通知 + 逐文件超限跳过通知（单次检查语义）。
+    attachmentCountLimited: "一条消息最多处理前 {max} 个附件，已跳过其余 {count} 个附件。",
+    attachmentTooLargeSkipped: "附件 {filename} 超过 5MB 上限，已跳过。",
     fileCommandUnsupported: "该渠道暂不支持发送文件，会在后续版本提供。",
     // Phase C Alpha 2：远程取回失败（远端不可达/超时/超预算）的如实文案。
     fileRemoteUnavailable: "远程工作区当前不可用，请稍后重试或先 /重连。",
@@ -186,6 +190,11 @@ const messages = {
     attachmentDownloadUnavailable:
       "Could not download the attachment. The file may have expired, been removed, or the bot may not have permission to read it. Please send the attachment again and try once more.",
     attachmentTooLarge: "The attachment exceeds 5MB. Compress it and send it again.",
+    // 3.14.5 Alpha 6 (specs/bot-file-delivery.md "Inbound attachment gates" §5.1/§5.2):
+    // immediate >4-attachment notice + per-file oversize skip (single-check semantics).
+    attachmentCountLimited:
+      "At most the first {max} attachments in a message are processed; the remaining {count} were skipped.",
+    attachmentTooLargeSkipped: "Attachment {filename} exceeds the 5MB limit and was skipped.",
     fileCommandUnsupported:
       "This channel does not support sending files yet; coming in a later release.",
     // Phase C Alpha 2: honest wording for remote fetch failures (unreachable/timeout/budget).
