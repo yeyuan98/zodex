@@ -243,3 +243,15 @@ additive widen（optional 字段）。**End-state 诚实**：strip-at-source 使
 有意义）；**Track B 不能经 v3 消费 `fullAccessSupported`**，记录在案。契约测试
 矩阵钉 MAPPER OUTPUT vs host schema（当前 main 红）；schema 保持 strict——只
 widen + strip，从不放松。反向（desktop→CLI）不受影响。
+
+**值类漂移跟进（3.14.5-alpha.5，owner 决定 §7.24）**：CLI 远端链路实测发射**负数**
+`duration`/`elapsedMs`（2026-10-02 远端会话 sess_a39948fb 20 次整事件
+`too_small: expected number >=0` 丢弃，疑似远端主机时钟偏移）——key strip 不覆盖
+值类；修复 = CLI 发射端 clamp 非负（`Math.max(0,…)`）+ M3 契约矩阵补值类断言
+（mapper 输出数值字段 >=0）；schema 不放宽负值。
+
+**瞬态 -2 类样本补充（alpha.4 rig 2026-10-04，handoff §2f.10）**：revival 中段
+-2（tokenAge 3,547ms，10 连发后第 11 发失败；同 112B 消息 41s 后下一入站字节相同
+送达——内容因素排除）加入瞬态类观测，与 10-03 10:27 先例（~233s 健康条目上 -2、
+同未轮换条目 ≤2.6min 自愈）同型；服务端归因（burst 限速 vs 瞬态）n=1 未定，
+观测增强提案（-2 行附 burst 序号 + token 指纹）见 handoff §2f.10。

@@ -180,6 +180,9 @@ drops (handoff §2 telemetry defects). Full logging contract:
 - 权限提示**不进入**保留缓冲（alpha.3 的 stop-deny 语义不变）；
   `summary_changes`/`streaming_card` 模式无文本缓冲，不适用**缓冲保留**（终态
   文书直发缝隙的保留不受模式限制——共享的 change-summary 直发即 16:42 丢失类）。
+- **命令回复不保留（owner 决定 §7.23，2026-10-04 rig 后）**：命令是"即时"动作，
+  延迟到达的保留命令回复令人困惑——命令回复发送失败照旧（上抛/丢弃；/status 的
+  待补发行只在存活通道上可见）。保留面 = 任务回复正文 + 终态文书，二者之外不扩。
 - 服务进程 dispose 时保留缓冲静默丢失（接受的残余，与桌面会话一致）。
 - 保留缓冲 cap 为**字节**口径（~64KB 尾部 + 头部截断标记）；per-peer 串行化
   （promise chain，botId+peerKey）覆盖 streamEventQueue / 入站队列 / 出队 drain
