@@ -1,5 +1,47 @@
 # Changelog
 
+## [3.14.5-alpha.5](https://github.com/yeyuan98/zodex/compare/v3.14.5-alpha.4...v3.14.5-alpha.5) (2026-10-04)
+
+### Features
+
+* **bots:** weixin -2 失败行观测增强——burstOrdinal/sendCount10s/token 指纹（log-only） ([2ef0da8](https://github.com/yeyuan98/zodex/commit/2ef0da8fcd347bd3047b83cada5a04699dd28742))
+  * 失败行新增三字段：burstOrdinal（波内尝试位次）、sendCount10s（trailing 10s 惰性时间戳环计数，无 timer）、fp（token 值 SHA-256 前 8 hex）；成功行不变
+  * 语义裁定（main-agent checkpoint）：每次出站发送尝试都计入波内——序言/保留积压逐条补发/正文分块/失败通知都打同一发送 API；§2f.10 实测 -2 正是补发波中段死亡（10 连发后第 11 发），排除补发会使限速-vs-瞬态判别在最需要的事件类上失明；spec 同步收紧波定义
+  * token 指纹在 persist（值变化时独立 info 行）与发送读取（失败行 fp=）两站点记录；M2 失效实际生效时清除波上下文指纹；硬不变量=token 值永不入任何日志行（测试钉死）
+  * 入站与 M2 失效归零 burst 位次；sendCount10s 时间戳环不随波重置（事实计数）
+  * 测试：5 个 alpha.5 观测用例按行索引确定性断言（含补发重试计入位次、窗口滑出裁剪、指纹稳定性与缺席条件）
+
+
+### Bug Fixes
+
+* **cli:** 会话事件 duration/elapsedMs 发射端非负 clamp——修复远端链路负数整事件丢弃 ([54b1cb2](https://github.com/yeyuan98/zodex/commit/54b1cb295b4b7b1093aff4b5b6d3da5048f8883e))
+  * 2026-10-02 远端会话 sess_a39948fb 20 次整事件值校验丢弃（turn.completed×7 duration + tool.updated×13 elapsedMs，too_small: expected number >=0）；根因=同机 wall-clock 回拨（NTP 校正/VM 暂停恢复），所有发射点均为同进程 Date.now() 差值
+  * clamp 站点（评审穷尽核对）：turn.ts×4（含喂 turn-errors 的 durationMs×2）、rewind.ts×2、compact.ts×2、call-runner.ts:452（tool.updated result duration）、node-execution-adapter-run.ts×2（progress elapsedMs）；logger-only/常量 0/perf.totalMs 明确不动
+  * 红→绿测试：三类发射端时钟回拨单测（node:test mock Date.now）；矩阵补 turn.completed 用例（此前为零）+ 负数 fixture 被 host schema 拒绝的 strictness pin（schema 保持 strict 不放宽，specs/bot-provider-network.md alpha.5）
+
+
+### Chores
+
+* [ulw] 评审收口——fmt 修复 + 失败线取样锚定 + spec 回退语义补记 ([4fc5d9b](https://github.com/yeyuan98/zodex/commit/4fc5d9be7eb7118801985fdc69663c8f0e61ab80))
+  * oxfmt 两处超长断言行（services/core 测试）
+  * 观测用例 1/4 的失败线取样由 .at(-1) 改为按 fp= 字段锚定（后续边界的无条目补发线不得被误采，评审 MINOR-3）
+  * log-diagnostics-hygiene fp 字段补记 as-built 回退语义（同波 M2 删除后的最近读取指纹延续 + 20-peer 逐出角落，评审 NIT-4）
+
+
+### Documentation
+
+* **specs:** alpha.5 观测契约先行——负数 duration 根因更正 + clamp 设计；weixin -2 失败行观测增强字段 ([9226baa](https://github.com/yeyuan98/zodex/commit/9226baa009b7b93507dffda0acd96b0e77f414b6))
+  * bot-provider-network 值类漂移跟进：根因由跨机时钟偏移更正为同机 wall-clock 回拨（所有 schema 约束发射点均为同进程 Date.now() 差值，审计核实）；记录 clamp 站点清单与 per-class 红/矩阵 guard 测试设计
+  * 新增 bot-provider-network Alpha 5 amendment：token 指纹 fp=SHA-256 前 8 hex（persist + 发送读取两站点；token 值永不入日志硬不变量）
+  * 新增 log-diagnostics-hygiene Alpha 5 amendment：失败行 burstOrdinal（入站/M2 失效归零）+ sendCount10s（惰性时间戳环，无 timer）；两文互链；零行为变化
+
+* **specs:** rig 后裁定补记——命令回复不保留边界（§7.23）+ alpha.5 值类漂移跟进（§7.24）+ 瞬态 -2 类样本（§2f.10） ([35eb5a2](https://github.com/yeyuan98/zodex/commit/35eb5a26eeb74f223d05b731feb760bd22682c90))
+  * bot-message-delivery.md Retention buffer：命令回复不做 channel-dead 保留（owner 决定——命令是即时动作，保留的命令回复令人困惑）；保留面维持任务回复分块 + 终态文书
+  * bot-provider-network.md M3 amendment：负数 duration/elapsedMs 发射端 clamp 随 alpha.5（schema 保持 strict 不放宽负值）；07:30 revival 中段 -2（tokenAge 3.5s）加入瞬态类样本，服务端归因未定（n=1），观测增强提案记录于 handoff §2f.10
+
+* **specs:** 补记 alpha.4 rig 实测——多波补发为预期形态 + 空闲零重试 + 终态段有界重试噪声 ([c27f818](https://github.com/yeyuan98/zodex/commit/c27f8185c6ddbf3a04a1dd62e515c7d4887096dc))
+  * 2026-10-04 rig（handoff §2f）：revival 中途通道再死时积压按 revival 边界分波（11/11 逐条恰好一次，无丢失无重复）；空闲期保留缓冲零重试（整夜无发送尝试）；活跃流式段每 force 边界一次有界重试可产生短时密集失败行（4 分钟 191 次，终态后自止）——均为设计内行为，仅记录不改代码
+
 ## [3.14.5-alpha.4](https://github.com/yeyuan98/zodex/compare/v3.14.5-alpha.3...v3.14.5-alpha.4) (2026-10-03)
 
 ### Bug Fixes
