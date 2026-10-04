@@ -5,6 +5,7 @@ import {
   zcodePermissionRequestedEventPayloadSchema,
   zcodeSessionEventSchema,
   zcodeToolUpdatedEventPayloadSchema,
+  zcodeTurnCompletedEventPayloadSchema,
   zcodeTurnStartedEventPayloadSchema,
 } from "@zcode/shared";
 import { mapSessionEvent } from "../src/zcode-protocol/session-mapper.js";
@@ -253,6 +254,116 @@ test("回归（无漂移键 ⇒ 行为不变）：payload 输出与修复前逐�
   assert.equal(permPayload.reason, "network egress");
   assert.ok(!("fullAccessSupported" in permPayload));
   assert.ok(Array.isArray(permPayload.options));
+});
+
+// ---- alpha.5 值类 guard（specs/bot-provider-network.md「值类漂移跟进（3.14.5-alpha.5）」）----
+// turn.completed 此前在本矩阵中零用例——2026-10-02 远端链路两类整事件丢弃之一
+// （7× turn.completed duration 负值 + 13× tool.updated elapsedMs 负值，host strict
+// schema `too_small: expected number >=0`）。mapper 是纯透传（零数字变换），所以这里
+// 是回归 guard：真实形态的非负样例经 mapper 后数值字段原样非负且通过 host schema；
+// 负数 fixture 必须被 host schema 拒绝（schema 保持 strict 的 pin——修复在 CLI 发射端
+// clamp，绝不放宽 schema；红测试在发射端单测，见 core/adapters test）。
+
+const SAMPLE_TURN_COMPLETE_USAGE = {
+  inputTokens: 12_345,
+  outputTokens: 678,
+  cacheWriteTokens: 0,
+  cacheReadTokens: 2_048,
+  totalTokens: 15_071,
+} as const;
+
+function realisticTurnCompletePayload(duration: number): Record<string, unknown> {
+  // 形状对齐 core/src/runtime/methods/turn.ts:644-661 的成功分支发射。
+  return {
+    response: "任务已完成：负数 duration 发射端已 clamp。",
+    tokenCount: 678,
+    usage: SAMPLE_TURN_COMPLETE_USAGE,
+    toolCallCount: 3,
+    historyRoundCount: 2,
+    duration,
+    resultType: "success",
+    cacheStats: {
+      totalMessages: 12,
+      cachedMessages: 5,
+      lastCacheHit: true,
+      cacheReadTokens: 2_048,
+    },
+    inputId: "in_turn_completed_1",
+  };
+}
+
+test("turn.completed/success：真实形态非负样例经 mapper 透传，duration 原样非负且通过 host schema", () => {
+  const event = rawSessionEvent(
+    SessionEventType.TurnComplete,
+    realisticTurnCompletePayload(45_123),
+  );
+  const payload = mapPayload(event);
+  assert.equal(payload.duration, 45_123, "mapper 必须零数字变换（duration 原样透传）");
+  assert.ok(typeof payload.duration === "number" && payload.duration >= 0);
+  assert.ok(zcodeTurnCompletedEventPayloadSchema.safeParse(payload).success);
+  mapAndValidateEnvelope(event);
+});
+
+test("turn.completed/cancelled：duration=0 边界样例通过 host schema（用户中断复用 turn.completed 上报）", () => {
+  // 形状对齐 core/src/runtime/helpers/turn-errors.ts cancelled 分支的最小发射。
+  const event = rawSessionEvent(SessionEventType.TurnComplete, {
+    response: "",
+    tokenCount: 0,
+    toolCallCount: 0,
+    historyRoundCount: 0,
+    duration: 0,
+    resultType: "cancelled",
+    inputId: "in_turn_completed_2",
+  });
+  const payload = mapPayload(event);
+  assert.equal(payload.duration, 0);
+  assert.ok(zcodeTurnCompletedEventPayloadSchema.safeParse(payload).success);
+  mapAndValidateEnvelope(event);
+});
+
+test("strictness pin：负数 duration/elapsedMs fixture 被 host schema 拒绝（schema 保持 strict，防未来误放宽）", () => {
+  // (a) turn.completed 负 duration（10-02 实测丢弃类之一）。
+  const negativeTurnCompleted = zcodeSessionEventSchema.safeParse(
+    mapSessionEvent(
+      rawSessionEvent(SessionEventType.TurnComplete, realisticTurnCompletePayload(-45_123)),
+    ),
+  );
+  assert.equal(
+    negativeTurnCompleted.success,
+    false,
+    "负 duration 的 turn.completed 必须被 host schema 拒绝（放宽 = 丢弃防护失效）",
+  );
+  // (b) tool.updated(progress) 负 elapsedMs（10-02 实测丢弃类之二）。
+  const negativeProgress = zcodeSessionEventSchema.safeParse(
+    mapSessionEvent(
+      rawSessionEvent(SessionEventType.ToolCallProgress, {
+        toolCallId: "tc_neg_progress",
+        elapsedMs: -12_345,
+        stdoutBytes: 0,
+        stderrBytes: 0,
+      }),
+    ),
+  );
+  assert.equal(
+    negativeProgress.success,
+    false,
+    "负 elapsedMs 的 tool.updated(progress) 必须被 host schema 拒绝",
+  );
+  // (c) tool.updated(result) 负 duration（同类向量）。
+  const negativeResult = zcodeSessionEventSchema.safeParse(
+    mapSessionEvent(
+      rawSessionEvent(SessionEventType.ToolCallResult, {
+        toolCallId: "tc_neg_result",
+        result: { success: true, content: [] },
+        duration: -42,
+      }),
+    ),
+  );
+  assert.equal(
+    negativeResult.success,
+    false,
+    "负 duration 的 tool.updated(result) 必须被 host schema 拒绝",
+  );
 });
 
 // 冻结的 legacy key 白名单 = 各 payload schema 在 widen 前接受的键集（ widened 的
