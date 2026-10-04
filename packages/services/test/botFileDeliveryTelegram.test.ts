@@ -253,3 +253,44 @@ test("telegram syncCommands：allowedCommands.file === false → 菜单不含 /f
   // 其余命令不受 file 开关影响。
   assert.ok(payload.commands.some((command) => command.command === "bind"));
 });
+
+test("telegram sendAttachment：>5MB 本地文件读侧复检 → 报 5MB 上限且零上传请求", async () => {
+  // specs/bot-file-delivery.md「Inbound attachment gates (3.14.5 Alpha 6)」§5.4
+  // （计划 §5.4）：TG/飞书 sendAttachment 对齐 weixin 的读侧 ≤5MB 复检——文件在
+  // 服务层 stat 与 adapter readFile 之间可能变大，读取后、上传前必须再拦一次。
+  // 红点：今天 readFile 后直接构造 FormData 上传（stub 成功即成功），不抛任何
+  // 带上限的错误，超限文件会被硬传。
+  const bytes = Buffer.alloc(6 * 1024 * 1024, 0x61);
+  const dir = await mkdtemp(join(tmpdir(), "zcode-tg-attach-"));
+  const localPath = join(dir, "big.bin");
+  await writeFile(localPath, bytes);
+  const stub = installProviderStub(
+    () =>
+      new Response(JSON.stringify({ ok: true, result: { message_id: 9 } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+  );
+  try {
+    const provider = createTelegramBotProvider({
+      loadCredential: async () => TELEGRAM_TOKEN,
+      requester: createBotProviderRequester(),
+    });
+    const sendAttachment = provider.sendAttachment;
+    assert.ok(sendAttachment, "telegram adapter must implement sendAttachment");
+    await assert.rejects(
+      sendAttachment(buildTelegramBot(), buildOutboundMessage(), {
+        kind: "file",
+        filename: "big.bin",
+        mimeType: "application/octet-stream",
+        sizeBytes: bytes.length,
+        localPath,
+      }),
+      /5MB/u,
+    );
+    assert.equal(stub.calls.length, 0, "超限必须在任何上传请求之前拒绝");
+  } finally {
+    stub.restore();
+    await rm(dirname(localPath), { recursive: true, force: true });
+  }
+});
