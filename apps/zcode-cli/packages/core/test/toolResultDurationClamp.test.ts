@@ -85,7 +85,10 @@ test("tool.updated(result) duration：handler 执行中时钟回拨 ⇒ 发射 d
 
   const result = await executeToolCall(deps, backgroundTasks, toolCall);
 
-  assert.ok(result.success, `工具调用必须成功（测试只针对 duration 值）：${JSON.stringify(result.error)}`);
+  assert.ok(
+    result.success,
+    `工具调用必须成功（测试只针对 duration 值）：${JSON.stringify(result.error)}`,
+  );
   assert.ok(handlerStartedAtWallClock !== undefined, "handler 必须真实执行");
 
   const resultEvents = emittedEvents.filter(

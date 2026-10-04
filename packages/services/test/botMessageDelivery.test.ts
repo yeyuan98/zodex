@@ -912,14 +912,19 @@ test("alpha.5 观测：weixin ret=-2 失败行附带 burstOrdinal/sendCount10s/f
       await enqueue(chunkEvent("alpha5失败观测正文"));
       await enqueue(toolCallEvent("tool-alpha5-fields"));
       await waitForCondition(
-        () => weixinFailureLines(cap.warns).length >= 1,
+        () => weixinFailureLines(cap.warns).some((line) => line.includes("fp=")),
         2500,
-        "ret=-2 失败结果线必须出现",
+        "ret=-2 失败结果线必须出现（带 fp 的读取侧线）",
       );
 
-      const line = weixinFailureLines(cap.warns).at(-1)!;
+      // 按字段锚定取线（非 .at(-1)）：读取过持久化条目的失败线才带 fp/tokenAgeMs——
+      // 后续边界可能追加无条目的补发失败线，不得被误采。
+      const line = weixinFailureLines(cap.warns).find((l) => l.includes("fp="))!;
       assert.ok(line.includes("ret=-2"), `失败线必须带 ret=-2：${line}`);
-      assert.ok(line.includes("tokenAgeMs="), `读取过持久化 token 的失败线必须带 tokenAgeMs：${line}`);
+      assert.ok(
+        line.includes("tokenAgeMs="),
+        `读取过持久化 token 的失败线必须带 tokenAgeMs：${line}`,
+      );
       const burstOrdinal = failureFieldNumber(line, "burstOrdinal");
       assert.ok(
         typeof burstOrdinal === "number" && Number.isInteger(burstOrdinal) && burstOrdinal >= 1,
@@ -1101,15 +1106,16 @@ test("alpha.5 观测：ret=-2 触发 M2 token 失效后 burstOrdinal 归零；�
       const enqueue = await requireEnqueue(harness);
       harness.sendControl.failErrorFactory = () => createWeixinRetMinus2Error();
 
-      // 第 1 次 -2 失败：读到的持久化条目被 M2 失效（防复活竞态语义）。
+      // 第 1 次 -2 失败：读到的持久化条目被 M2 失效（防复活竞态语义）。按字段锚定
+      // 取线（非 .at(-1)）：带 fp 的线 = 读取过持久化条目的那次发送。
       await enqueue(chunkEvent("alpha5失效波次一"));
       await enqueue(toolCallEvent("tool-alpha5-m2-1"));
       await waitForCondition(
-        () => weixinFailureLines(cap.warns).length >= 1,
+        () => weixinFailureLines(cap.warns).some((line) => line.includes("fp=")),
         2500,
-        "第 1 条失败线必须出现",
+        "第 1 条失败线必须出现（带 fp）",
       );
-      const firstLine = weixinFailureLines(cap.warns).at(-1)!;
+      const firstLine = weixinFailureLines(cap.warns).find((line) => line.includes("fp="))!;
       assert.ok(firstLine.includes("fp="), `有持久化条目的失败线必须带 fp：${firstLine}`);
 
       // 第 2 个边界：先补投保留的波次一（无条目 ⇒ 无 fp/tokenAgeMs；M2 失效已归零
