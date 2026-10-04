@@ -449,7 +449,8 @@ async function executeToolCallImpl(
       executionAbortController,
       entry,
     );
-    const durationMs = Date.now() - startTime;
+    // 时钟回拨（NTP 校正/VM 暂停恢复）可使差值为负，host strict schema 对负数整事件丢弃（2026-10-02 sess_a39948fb 20 次 too_small），发射端 clamp 非负（specs/bot-provider-network.md alpha.5）
+    const durationMs = Math.max(0, Date.now() - startTime);
     if (isToolHandlerFailure(output)) {
       // handler 用返回值表达可预期业务失败；这里只转换到既有异常控制流，
       // 继续复用原来的 failure hook、事件和日志，不引入第二套执行生命周期。

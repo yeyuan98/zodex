@@ -256,7 +256,8 @@ export class NodeExecutionAdapterRun extends NodeExecutionAdapterProcess {
             (output, outputPreview) => {
               this.emit(options, {
                 type: "progress",
-                elapsedMs: Date.now() - startedAt.getTime(),
+                // 时钟回拨（NTP 校正/VM 暂停恢复）可使差值为负，host strict schema 对负数整事件丢弃（2026-10-02 sess_a39948fb 20 次 too_small），发射端 clamp 非负（specs/bot-provider-network.md alpha.5）
+                elapsedMs: Math.max(0, Date.now() - startedAt.getTime()),
                 pid: spawnedChild.pid,
                 stdoutBytes: output.bytes,
                 stderrBytes: 0,
@@ -289,7 +290,8 @@ export class NodeExecutionAdapterRun extends NodeExecutionAdapterProcess {
               (exited && internalOptions.shouldRetainExecutionAfterRootExit?.() !== true)
             )
               return;
-            const elapsedMs = Date.now() - startedAt.getTime();
+            // 时钟回拨（NTP 校正/VM 暂停恢复）可使差值为负，host strict schema 对负数整事件丢弃（2026-10-02 sess_a39948fb 20 次 too_small），发射端 clamp 非负（specs/bot-provider-network.md alpha.5）
+            const elapsedMs = Math.max(0, Date.now() - startedAt.getTime());
             if (elapsedMs < this.progressThresholdMs) return;
             this.emit(options, {
               type: "progress",

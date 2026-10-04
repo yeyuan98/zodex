@@ -89,3 +89,35 @@ now−updatedAt`（持久化 token 轮换时间；**永不输出 token 值**）�
   失败为 warn。凭据/token 值永不入日志；消息全文保留（D3）。
 - 不削减已证明证据价值的线（keep-list）：schema 丢弃 warn、bots 生命周期线、cua-pip
   turn-started/ended warn、provider callback（全文）、[memory] 行本身。
+
+## Amendment (3.14.5-alpha.5) — weixin -2 失败行观测增强（log-only，owner 已批准）
+
+仅日志，**零行为变化、无新 timer**（上方 Invariants 原样适用）。作用于「观测线契约」
+中 weixin send-outcome **失败**行（`ret=-2` 类，`tokenAgeMs` 已随行的同一行），
+新增三个字段：
+
+1. `burstOrdinal`：当前出站波内该 peer 的第几条**发送尝试**（1-based）。波 = 两次归零
+   之间的连续出站尝试序列；**每次尝试都计入**——序言、保留积压逐条补发（force 边界
+   先补投再 flush 当前缓冲）、正文分块、失败通知，它们都打到同一发送 API（2026-10-04
+   实测 -2 正是补发波中段死亡，handoff §2f.1/§2f.10；排除补发会使位次判别在最需要的
+   事件类上失明——main-agent 裁定）。计数器为 per-peer lazy 内存状态，在**该 peer 的
+   任意入站**与 **M2 token 失效**（`invalidateWeixinContextTokenForPeer` 实际生效）时
+   归零重开。
+2. `sendCount10s`：该 peer trailing 10 秒窗口内的发送尝试数。由小时间戳环维护，
+   发送时**惰性求值**（先裁剪 >10s 的旧戳再计数）——不设 timer/daemon（§5.12
+   「无新 timer」先例）。
+3. `fp`：peer token 条目**为发送而读取**时随行附带（token 值 SHA-256 前 8 hex）。
+   指纹规则与持久化侧独立行归 `specs/bot-provider-network.md` Alpha 5 amendment
+   （两文互链）。**回退语义（as-built）**：本次发送未读到条目时（如同波前一次 -2
+   已触发 M2 删除），失败线回退携带该 peer 当前波上下文的最近读取指纹——观测连续性
+   优先（判别「同指纹自愈 vs 轮换」需要跨失败线的指纹链）；M2 失效实际生效时清除该
+   上下文（条目已删，不得再携带旧指纹）。极端角落：持久化条目因 20-peer 上限被逐出
+   （非 M2 路径）时上下文可能短暂残留旧指纹，下一次真实读取即刷新——诊断值不受影响。
+   **硬不变量：token 值本身永不入任何日志行**（既有规则；测试钉死）。
+
+目的：下次 mid-burst -2 复发时可判别 限速（复发于一致 burst 位次 ≈10–12）vs 瞬态
+（随机位次）；入站后 同指纹自愈 vs 轮换。成功行不带上述字段（tokenAgeMs 语义不变）。
+测试（red-first）：失败行带 `burstOrdinal>=1`/`sendCount10s>=1`/`fp` 匹配
+`^[0-9a-f]{8}$`；不同 token 值指纹不同、同 token 指纹相同；捕获日志中无 token 原值；
+连续发送无入站时 burstOrdinal 递增、入站后归零（M2 失效同）；sendCount10s 只计
+trailing 10s 内的尝试。

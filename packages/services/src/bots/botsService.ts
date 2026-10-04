@@ -1337,6 +1337,14 @@ export function createBotsService(
   // （三个异步触点：streamEventQueue flush、入站队列 revival、队列外 drain）。
   const retainedReplyBuffers = new Map<string, string[]>();
   const retainedReplyBufferQueues = new Map<string, Promise<void>>();
+  // alpha.5 观测（specs/log-diagnostics-hygiene.md Amendment 3.14.5-alpha.5）：weixin per-peer
+  // 出站观测状态（burstOrdinal 波次序号 + sendCount10s 时间戳环 + lastReadTokenFp 波上下文
+  // token 指纹）。service 级惰性内存状态，与 retainedReplyBuffers 同生命周期模式；仅日志
+  // 用途（零行为变化），求值时惰性裁剪、无 timer。
+  const weixinSendObservationByPeer = new Map<
+    string,
+    { burstOrdinal: number; sendTimestamps: number[]; lastReadTokenFp: string | undefined }
+  >();
   let botStorageMigrationPromise: Promise<void> | null = null;
   const cachedWorkspaceRefsByKey = new Map<
     string,
@@ -1745,6 +1753,13 @@ export function createBotsService(
         ),
       };
       await repo.writeState(state);
+      // alpha.5 观测（specs/bot-provider-network.md Amendment 3.14.5-alpha.5）：持久化成功
+      // （token 值变化）时打独立 info 行携带指纹——-2 复发时判别「同指纹自愈」（入站后
+      // 同一 token 立即可用）vs「轮换」（入站写入新 token）。token 值永不入日志（硬不变量）。
+      botsLogger.info(
+        undefined,
+        `bot weixin context token persisted bot=${message.botId} peer=${peerKey} fp=${computeWeixinTokenFingerprint(message.actor.providerContextToken)}`,
+      );
     } catch (error) {
       botsLogger.warn(
         undefined,
@@ -3264,6 +3279,78 @@ export function createBotsService(
     });
   }
 
+  /** alpha.5 观测：token 值 SHA-256 前 8 hex 指纹（specs/bot-provider-network.md Amendment
+   * 3.14.5-alpha.5）——不可逆截断哈希；硬不变量：token 值本身永不入任何日志行。 */
+  function computeWeixinTokenFingerprint(token: string): string {
+    return createHash("sha256").update(token, "utf8").digest("hex").slice(0, 8);
+  }
+
+  function getWeixinSendObservation(
+    botId: string,
+    peerKey: string,
+  ): { burstOrdinal: number; sendTimestamps: number[]; lastReadTokenFp: string | undefined } {
+    const key = retainedBufferKey(botId, peerKey);
+    let observation = weixinSendObservationByPeer.get(key);
+    if (!observation) {
+      observation = { burstOrdinal: 0, sendTimestamps: [], lastReadTokenFp: undefined };
+      weixinSendObservationByPeer.set(key, observation);
+    }
+    return observation;
+  }
+
+  /** alpha.5 观测：记录一次 weixin 出站发送尝试（成功/失败都计）。**每次尝试都计入波内**
+   * ——序言、保留积压逐条补发、正文分块、失败通知都打到同一发送 API；2026-10-04 实测
+   * -2 复发正是补发波中段（10 连发后第 11 发，handoff §2f.1/§2f.10），位次信号必须
+   * 覆盖补发尝试，排除它们会使该判别在最需要的事件类上失明。
+   * burstOrdinal +1；时间戳环求值时惰性裁剪 trailing 10s 窗口（>10s 滑出）——无
+   * timer/daemon（§5.12 先例）。键与 sendOutbound 读持久化 token 的 peerKey 派生一致。 */
+  function recordWeixinSendAttempt(
+    botId: string,
+    peerKey: string,
+  ): { burstOrdinal: number; sendCount10s: number } {
+    const observation = getWeixinSendObservation(botId, peerKey);
+    observation.burstOrdinal += 1;
+    const now = Date.now();
+    observation.sendTimestamps = observation.sendTimestamps.filter(
+      (sentAt) => now - sentAt <= 10_000,
+    );
+    observation.sendTimestamps.push(now);
+    return {
+      burstOrdinal: observation.burstOrdinal,
+      sendCount10s: observation.sendTimestamps.length,
+    };
+  }
+
+  /** alpha.5 观测：归零该 peer 的 burst 计数（触发：该 peer 任意入站；M2 token 失效实际
+   * 生效）。sendCount10s 时间戳环不归零——trailing 窗口是事实计数，不随波次重置。 */
+  function resetWeixinSendBurstOrdinal(botId: string, peerKey: string): void {
+    const observation = weixinSendObservationByPeer.get(retainedBufferKey(botId, peerKey));
+    if (observation) {
+      observation.burstOrdinal = 0;
+    }
+  }
+
+  /** alpha.5 观测：记录「该 peer 当前出站波所骑的 token 指纹」——任何为发送而读取到持久化
+   * 条目的时刻刷新（含保留积压补发的读取：同一 peer 同一波语义）。失败行 fp= 优先取本次
+   * 读取，无读取时回退到该上下文（-2 复发判别「同指纹自愈 vs 轮换」的观测连续性）。 */
+  function noteWeixinPeerTokenRead(botId: string, peerKey: string, fp: string): void {
+    getWeixinSendObservation(botId, peerKey).lastReadTokenFp = fp;
+  }
+
+  function readWeixinPeerTokenFingerprint(botId: string, peerKey: string): string | undefined {
+    return weixinSendObservationByPeer.get(retainedBufferKey(botId, peerKey))?.lastReadTokenFp;
+  }
+
+  /** alpha.5 观测：波内发送的 ret=-2 使 M2 失效实际生效时，清除波上下文的 token 指纹
+   * （条目已删除，后续无读取的失败线不得再携带其旧指纹；下次为发送读取到新条目时重新
+   * 刷新——判别「同指纹自愈 vs 轮换」的观测连续性由此保持）。 */
+  function clearWeixinPeerTokenFingerprint(botId: string, peerKey: string): void {
+    const observation = weixinSendObservationByPeer.get(retainedBufferKey(botId, peerKey));
+    if (observation) {
+      observation.lastReadTokenFp = undefined;
+    }
+  }
+
   async function sendOutbound(
     bot: BotConfig,
     message: BotOutboundMessage,
@@ -3288,14 +3375,26 @@ export function createBotsService(
     // M2：本次发送实际尝试的持久化 token（与 tokenAgeMs 同点捕获）——ret=-2 失效的防复活
     // 竞态凭据；无持久化条目（未覆盖 captured token）时为 undefined，无可失效。
     let attemptedWeixinEntryToken: string | undefined;
+    // alpha.5 观测：与 tokenAgeMs 同点（读取过持久化条目才出现）的 token 指纹——失败行
+    // fp= 字段的首选数据源；token 值本身永不入日志（硬不变量，测试钉死）。
+    let attemptedWeixinTokenFp: string | undefined;
     if (bot.provider === "weixin") {
       const entry = await readPersistedWeixinPeerTokenEntry(bot.id, message.providerUserId);
       if (entry?.token) {
         outbound = { ...message, providerContextToken: entry.token };
         tokenAgeMs = Date.now() - entry.updatedAt;
         attemptedWeixinEntryToken = entry.token;
+        attemptedWeixinTokenFp = computeWeixinTokenFingerprint(entry.token);
+        noteWeixinPeerTokenRead(bot.id, message.providerUserId.trim(), attemptedWeixinTokenFp);
       }
     }
+    // alpha.5 观测：weixin 每次出站发送尝试（成功/失败都计，含积压补发——见
+    // recordWeixinSendAttempt 注释）记录 burst 序号与 trailing-10s 计数——成功行不带
+    // 这些字段（tokenAgeMs 语义不变），仅失败行随行输出（log-only）。
+    const weixinSendStats =
+      bot.provider === "weixin"
+        ? recordWeixinSendAttempt(bot.id, message.providerUserId.trim())
+        : undefined;
     const bytes = Buffer.byteLength(message.text ?? "", "utf8");
     const ageSuffix = tokenAgeMs !== undefined ? ` tokenAgeMs=${tokenAgeMs}` : "";
     try {
@@ -3317,9 +3416,21 @@ export function createBotsService(
       ]
         .filter(Boolean)
         .join(" ");
+      // alpha.5 观测：weixin 失败行附 burstOrdinal/sendCount10s；fp 优先取本次读取，
+      // 无读取时回退到该 peer 波上下文的最近读取指纹（观测连续性），波上下文为空
+      // （如 M2 失效已清除）则缺席。
+      const weixinFp =
+        bot.provider === "weixin"
+          ? (attemptedWeixinTokenFp ??
+            readWeixinPeerTokenFingerprint(bot.id, message.providerUserId.trim()))
+          : undefined;
+      const weixinObservationSuffix =
+        bot.provider === "weixin"
+          ? `${weixinSendStats ? ` burstOrdinal=${weixinSendStats.burstOrdinal} sendCount10s=${weixinSendStats.sendCount10s}` : ""}${weixinFp ? ` fp=${weixinFp}` : ""}`
+          : "";
       botsLogger.warn(
         undefined,
-        `bot outbound send provider=${bot.provider} peer=${message.providerUserId} bytes=${bytes} failed${ageSuffix}${fields ? ` ${fields}` : ""}: ${error instanceof Error ? error.message : String(error)}`,
+        `bot outbound send provider=${bot.provider} peer=${message.providerUserId} bytes=${bytes} failed${ageSuffix}${weixinObservationSuffix}${fields ? ` ${fields}` : ""}: ${error instanceof Error ? error.message : String(error)}`,
       );
       // Bugfix（M1 缝隙，specs/bot-message-delivery.md 3.14.5-alpha.4）：sendOutbound 是
       // 缓冲 flush 与终态文书直发（16:42 丢失类）的唯一汇合失败缝隙。channel-dead 类失败
@@ -3351,6 +3462,12 @@ export function createBotsService(
             attemptedWeixinEntryToken,
           );
           if (invalidated) {
+            // alpha.5 观测：M2 失效实际生效 ⇒ 该 peer 的 burst 计数归零重开，并清除波
+            // 上下文的 token 指纹（条目已删，后续无读取的失败线不得携带旧指纹；下次
+            // 读取到新条目时重新刷新）。specs/log-diagnostics-hygiene.md Amendment
+            // 3.14.5-alpha.5，log-only。
+            resetWeixinSendBurstOrdinal(bot.id, invalidationPeerKey);
+            clearWeixinPeerTokenFingerprint(bot.id, invalidationPeerKey);
             botsLogger.info(
               undefined,
               `bot weixin context token invalidated on ret=-2 bot=${bot.id} peer=${invalidationPeerKey}`,
@@ -7344,6 +7461,15 @@ export function createBotsService(
       return enqueueInboundProcessing(message.actor, async () => {
         // 微信出站媒体依赖新鲜 context_token；必须在任何 context 读改写之前落库，避免被后续 writeContext 覆盖。
         await persistWeixinContextToken(message);
+        // alpha.5 观测（specs/log-diagnostics-hygiene.md Amendment 3.14.5-alpha.5）：该 peer
+        // 的任意入站归零 weixin burst 计数——不依赖 token 存在（入站可以不带 token），
+        // 且必须先于 revival 补发，使 revival 的失败线从 1 重新计数。log-only。
+        if (message.actor.provider === "weixin") {
+          resetWeixinSendBurstOrdinal(
+            message.botId,
+            message.actor.chatId?.trim() || message.actor.providerUserId.trim(),
+          );
+        }
         // Bugfix（M1 revival，specs/bot-message-delivery.md 3.14.5-alpha.4）：触发 = 该
         // bot+peer 的任意 weixin 入站（不 key 于 token 值变化——实测存在不轮换的入站）；
         // 在入站队列内、命令处理前补发积压，保证积压先于新回合回复（dual-terminal

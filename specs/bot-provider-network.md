@@ -246,12 +246,45 @@ widen + strip，从不放松。反向（desktop→CLI）不受影响。
 
 **值类漂移跟进（3.14.5-alpha.5，owner 决定 §7.24）**：CLI 远端链路实测发射**负数**
 `duration`/`elapsedMs`（2026-10-02 远端会话 sess_a39948fb 20 次整事件
-`too_small: expected number >=0` 丢弃，疑似远端主机时钟偏移）——key strip 不覆盖
-值类；修复 = CLI 发射端 clamp 非负（`Math.max(0,…)`）+ M3 契约矩阵补值类断言
-（mapper 输出数值字段 >=0）；schema 不放宽负值。
+`too_small: expected number >=0` 丢弃）。**根因更正（代码审计核实）**：原文「疑似
+远端主机时钟偏移」不成立——所有 schema 约束的发射点都是**同进程**两次 `Date.now()`
+差值，跨主机时钟偏移在那里机制上不可能产生负数；真实成因 = **同机 wall-clock 回拨**
+（NTP 校正 / VM 暂停恢复 / 手动改时间）。key strip 不覆盖值类；修复 = CLI 发射端
+非负 clamp（`Math.max(0,…)` 风格；先例 core `tool/handlers/bash.ts:281`、
+`tool/executor/permission-flow.ts:295`、bootstrap `zcode-protocol/server-operations.ts` ×4；
+类型合适处复用 core `tool/handlers/tool-perf.ts` 的 `elapsedMsSince`/`roundNonNegativeMs`，
+已含 clamp+取整）。clamp 站点清单（v3 线可达 + schema 约束字段，评审穷尽核对）：
+core `runtime/methods/turn.ts:386,652`、`rewind.ts:119`、`compact.ts:108`
+（turn.completed `duration`）；喂给 `runtime/helpers/turn-errors.ts:174` 的
+`durationMs` 实参（调用点 `turn.ts:202,770`、`rewind.ts:160`、`compact.ts:157`，
+cancelled/error 分支）；`tool/executor/call-runner.ts:452`（喂
+`tool/executor/events.ts:84`，tool.updated(result) `duration`）；
+`tool/handlers/bash.ts:376` 透传源 adapters `exec/node-execution-adapter-run.ts:259,292`
+（tool.updated(progress) `elapsedMs`）。明确不动：常量 0 位点
+（control-only-turn/browser-turn-screenshot/task-output）、logger-only 字段
+（`turn.ts:689`、`runner-status.ts:381`）、`call-runner.ts:495` `perf.totalMs`
+（host 侧 result 为无约束 JSON，非丢弃向量）；host schema 保持 strict——负值按设计
+拒绝，不放宽。测试设计：per-class 红（发射端）测试用 node:test
+`mock.method(Date, "now", …)` 模拟运行中时钟回拨（起点 T1、完成时 T0 < T1），断言
+发射字段 >= 0，覆盖三类：turn.completed `duration` / tool.updated(result) `duration` /
+tool.updated(progress) `elapsedMs`；M3 契约矩阵补 **turn.completed 用例（此前为零——
+10-02 两类丢弃之一）** + 值类 guard（真实形态的非负样例经 mapper 透传仍非负；负数
+fixture 被 host schema 拒绝 = strictness pin，防未来误放宽）。
 
 **瞬态 -2 类样本补充（alpha.4 rig 2026-10-04，handoff §2f.10）**：revival 中段
 -2（tokenAge 3,547ms，10 连发后第 11 发失败；同 112B 消息 41s 后下一入站字节相同
 送达——内容因素排除）加入瞬态类观测，与 10-03 10:27 先例（~233s 健康条目上 -2、
 同未轮换条目 ≤2.6min 自愈）同型；服务端归因（burst 限速 vs 瞬态）n=1 未定，
 观测增强提案（-2 行附 burst 序号 + token 指纹）见 handoff §2f.10。
+
+## Amendment (3.14.5-alpha.5) — token 指纹观测（log-only，owner 已批准）
+
+Weixin peer context token 在**持久化**（`persistWeixinContextToken` 一带）与**发送
+读取**（`sendOutbound` 读 `readPersistedWeixinPeerTokenEntry`）两个站点记录指纹
+`fp=` = token **值**的 SHA-256 前 8 hex：同一 token 指纹稳定，不同 token 不同指纹。
+发送读取处随 send-outcome 失败行附带；持久化处打独立 info 行。用途：-2 复发时判别
+「同指纹自愈」（入站后同一 token 立即可用）vs「轮换」（入站写入新 token）。**硬
+不变量（既有规则，测试钉死）：token 值/明文永不入任何日志行**——指纹是不可逆截断
+哈希，不是脱敏。失败行上的 `burstOrdinal`/`sendCount10s` 字段定义归
+`specs/log-diagnostics-hygiene.md`（Alpha 5 amendment，两文互链）。本节零行为变化：
+不改 token 读取/写入/失效（M2）语义，无新 timer。

@@ -83,7 +83,11 @@ interface Harness {
   typingCalls: { op: "start" | "stop"; targetId: string }[];
   cardCalls: CardCall[];
   cardControl: { failNext: number };
-  sendControl: { failTextPattern: RegExp | undefined };
+  sendControl: {
+    failTextPattern: RegExp | undefined;
+    /** alpha.5 观测测试：注入失败错误（如打标 weixinRet=-2 的协议错误），优先于 failTextPattern 之外的发送。 */
+    failErrorFactory: ((message: BotOutboundMessage) => Error | undefined) | undefined;
+  };
   stopGenerationCalls: string[];
   snapshotControl: {
     status: "running" | "completed" | "error" | null;
@@ -179,7 +183,10 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
   const typingCalls: Array<{ op: "start" | "stop"; targetId: string }> = [];
   const cardCalls: CardCall[] = [];
   const cardControl = { failNext: 0 };
-  const sendControl: { failTextPattern: RegExp | undefined } = { failTextPattern: undefined };
+  const sendControl: {
+    failTextPattern: RegExp | undefined;
+    failErrorFactory: ((message: BotOutboundMessage) => Error | undefined) | undefined;
+  } = { failTextPattern: undefined, failErrorFactory: undefined };
   const stopGenerationCalls: string[] = [];
   const snapshotControl: {
     status: "running" | "completed" | "error" | null;
@@ -192,6 +199,10 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
     send: async (_bot, message) => {
       if (sendControl.failTextPattern?.test(message.text)) {
         throw new Error("provider send rejected (test)");
+      }
+      const failError = sendControl.failErrorFactory?.(message);
+      if (failError) {
+        throw failError;
       }
       sentMessages.push(message);
     },
@@ -825,5 +836,399 @@ test("alpha.2 观测：sendOutbound 每次调用一条结果线（成功含 toke
   } finally {
     console.log = realLog;
     console.warn = realWarn;
+  }
+});
+
+// ---- alpha.5 观测（specs/log-diagnostics-hygiene.md Amendment (3.14.5-alpha.5)）：weixin
+// -2 失败行的 burstOrdinal / sendCount10s / fp 三字段 + token 值永不落盘硬不变量。
+// 以下用例在字段实现前必红（红测试先行，W3 实现后转绿）；驱动方式与上方 alpha.2
+// 观测用例完全一致（console 捕获 + sendControl 注入失败）。ret=-2 错误由
+// failErrorFactory 构造（sendOutbound 读 weixinRet 打标；channel-dead 首败即停）。
+// 语义（main-agent 裁定）：每次出站发送尝试（序言/保留积压补发/正文分块/失败通知）
+// 都计入 burstOrdinal 与 sendCount10s——force 边界先补投积压再 flush 当前缓冲，
+// 故一个边界常产出多条失败线；§2f.10 实测 -2 正是补发波中段死亡，位次信号必须
+// 覆盖补发尝试。断言一律按行索引取线（确定性），不用 .at(-1) 采样。
+
+interface ConsoleCapture {
+  logs: string[];
+  warns: string[];
+  restore(): void;
+}
+
+function captureConsoleOutput(): ConsoleCapture {
+  const realLog = console.log;
+  const realWarn = console.warn;
+  const logs: string[] = [];
+  const warns: string[] = [];
+  console.log = (...args: unknown[]) => {
+    logs.push(args.map(String).join(" "));
+  };
+  console.warn = (...args: unknown[]) => {
+    warns.push(args.map(String).join(" "));
+  };
+  return {
+    logs,
+    warns,
+    restore() {
+      console.log = realLog;
+      console.warn = realWarn;
+    },
+  };
+}
+
+function createWeixinRetMinus2Error(): Error {
+  const error = new Error("weixin sendmessage rejected (test ret=-2)");
+  (error as { weixinRet?: number }).weixinRet = -2;
+  return error;
+}
+
+function weixinFailureLines(lines: readonly string[]): string[] {
+  return lines.filter(
+    (line) => line.includes("bot outbound send provider=weixin") && line.includes("failed"),
+  );
+}
+
+function failureFieldNumber(line: string, key: string): number | undefined {
+  const match = line.match(new RegExp(`\\b${key}=(-?\\d+)`, "u"));
+  return match ? Number(match[1]) : undefined;
+}
+
+function failureFieldValue(line: string, key: string): string | undefined {
+  const match = line.match(new RegExp(`\\b${key}=([^\\s]+)`, "u"));
+  return match ? match[1] : undefined;
+}
+
+test("alpha.5 观测：weixin ret=-2 失败行附带 burstOrdinal/sendCount10s/fp（token 值永不落盘）", async () => {
+  const cap = captureConsoleOutput();
+  const persistedToken = "wx-token-alpha5-probe-7f3d9a";
+  try {
+    const harness = await createHarness();
+    try {
+      await harness.triggerMessage();
+      await harness.overwritePersistedWeixinToken(persistedToken);
+      const enqueue = await requireEnqueue(harness);
+      harness.sendControl.failErrorFactory = () => createWeixinRetMinus2Error();
+
+      await enqueue(chunkEvent("alpha5失败观测正文"));
+      await enqueue(toolCallEvent("tool-alpha5-fields"));
+      await waitForCondition(
+        () => weixinFailureLines(cap.warns).some((line) => line.includes("fp=")),
+        2500,
+        "ret=-2 失败结果线必须出现（带 fp 的读取侧线）",
+      );
+
+      // 按字段锚定取线（非 .at(-1)）：读取过持久化条目的失败线才带 fp/tokenAgeMs——
+      // 后续边界可能追加无条目的补发失败线，不得被误采。
+      const line = weixinFailureLines(cap.warns).find((l) => l.includes("fp="))!;
+      assert.ok(line.includes("ret=-2"), `失败线必须带 ret=-2：${line}`);
+      assert.ok(
+        line.includes("tokenAgeMs="),
+        `读取过持久化 token 的失败线必须带 tokenAgeMs：${line}`,
+      );
+      const burstOrdinal = failureFieldNumber(line, "burstOrdinal");
+      assert.ok(
+        typeof burstOrdinal === "number" && Number.isInteger(burstOrdinal) && burstOrdinal >= 1,
+        `失败线必须带 1-based burstOrdinal（数字 >= 1）：${line}`,
+      );
+      const sendCount10s = failureFieldNumber(line, "sendCount10s");
+      assert.ok(
+        typeof sendCount10s === "number" && Number.isInteger(sendCount10s) && sendCount10s >= 1,
+        `失败线必须带 sendCount10s（数字 >= 1）：${line}`,
+      );
+      const fp = failureFieldValue(line, "fp");
+      assert.ok(
+        typeof fp === "string" && /^[0-9a-f]{8}$/u.test(fp),
+        `失败线必须带 fp= token SHA-256 前 8 hex（^[0-9a-f]{8}$）：${line}`,
+      );
+      // 硬不变量：token 值本身永不入任何日志行（info + warn 全量检查）。
+      assert.ok(
+        ![...cap.logs, ...cap.warns].some((logLine) => logLine.includes(persistedToken)),
+        "token 原值不得出现在任何捕获日志行中",
+      );
+    } finally {
+      harness.sendControl.failErrorFactory = undefined;
+      await harness.dispose();
+    }
+  } finally {
+    cap.restore();
+  }
+});
+
+test("alpha.5 观测：fp 随 token 值稳定（同 token 同指纹、不同 token 不同指纹）", async () => {
+  const cap = captureConsoleOutput();
+  const tokenA = "wx-token-alpha5-fp-stable-a11ce";
+  const tokenB = "wx-token-alpha5-fp-rotate-b22df";
+  try {
+    const harness = await createHarness();
+    try {
+      await harness.triggerMessage();
+      const enqueue = await requireEnqueue(harness);
+      harness.sendControl.failErrorFactory = () => createWeixinRetMinus2Error();
+
+      const fpForToken = async (token: string, label: string): Promise<string> => {
+        await harness.overwritePersistedWeixinToken(token);
+        await enqueue(chunkEvent(`alpha5指纹正文-${label}`));
+        await enqueue(toolCallEvent(`tool-alpha5-fp-${label}`));
+        // 语义修正（main-agent 裁定）：每个 force 边界先补投保留积压再 flush 当前缓冲 ⇒
+        // 一个边界可能产出多条失败线，其中补发线在条目被 M2 失效删除后不带 fp。只认
+        // **带 fp 的线**（本 label 自己的发送读取了刚覆写的条目），避免上一 label 的
+        // 无 fp 尾线被 .at(-1) 误采。
+        await waitForCondition(
+          () => weixinFailureLines(cap.warns).some((line) => line.includes("fp=")),
+          2500,
+          `${label} 失败结果线必须出现（带 fp）`,
+        );
+        const current = weixinFailureLines(cap.warns).find((line) => line.includes("fp="))!;
+        const fp = failureFieldValue(current, "fp");
+        assert.ok(
+          typeof fp === "string" && /^[0-9a-f]{8}$/u.test(fp),
+          `${label} 失败线必须带 fp：${current}`,
+        );
+        // 每次断言只看最新一条，取完清空避免行积累干扰。
+        cap.warns.length = 0;
+        return fp;
+      };
+
+      const fpA1 = await fpForToken(tokenA, "first");
+      const fpB = await fpForToken(tokenB, "rotate");
+      const fpA2 = await fpForToken(tokenA, "back");
+
+      assert.notEqual(fpA1, fpB, "不同 token 值必须产生不同 fp");
+      assert.equal(fpA2, fpA1, "同一 token 值必须产生稳定 fp");
+      assert.ok(
+        ![...cap.logs, ...cap.warns].some(
+          (logLine) => logLine.includes(tokenA) || logLine.includes(tokenB),
+        ),
+        "token 原值不得出现在任何捕获日志行中",
+      );
+    } finally {
+      harness.sendControl.failErrorFactory = undefined;
+      await harness.dispose();
+    }
+  } finally {
+    cap.restore();
+  }
+});
+
+test("alpha.5 观测：burstOrdinal 连续发送递增、该 peer 入站后归零重开", async () => {
+  const cap = captureConsoleOutput();
+  try {
+    const harness = await createHarness();
+    try {
+      await harness.triggerMessage();
+      const enqueue = await requireEnqueue(harness);
+      harness.sendControl.failErrorFactory = () => createWeixinRetMinus2Error();
+
+      // 连续 3 个 chunk（无入站间隔）：channel-dead 首败即停。语义修正（main-agent
+      // 裁定，specs Amendment）：force 边界先补投保留积压再 flush 当前缓冲，补发重试
+      // 也是对发送 API 的真实尝试、计入 burst——§2f.10 实测 -2 正是补发波中段死亡
+      // （10 连发后第 11 发），排除补发会使位次判别在最需要的事件类上失明。
+      // 故边界#1 产出 chunk1(序号1)；边界#2 产出 补发chunk1(2)+chunk2(3)；
+      // 边界#3 产出 补发(4)+chunk3(5)——每条失败线序号严格等于其在波内的尝试位次。
+      const expectedOrdinals = [1, 3, 5];
+      const cumulativeLines = [1, 3, 5];
+      for (const [index, text] of ["alpha5波次一", "alpha5波次二", "alpha5波次三"].entries()) {
+        await enqueue(chunkEvent(text));
+        await enqueue(toolCallEvent(`tool-alpha5-burst-${index}`));
+        await waitForCondition(
+          () => weixinFailureLines(cap.warns).length >= cumulativeLines[index]!,
+          2500,
+          `第 ${index + 1} 个边界的失败结果线必须全部出现（>= ${cumulativeLines[index]} 条）`,
+        );
+        const lines = weixinFailureLines(cap.warns);
+        assert.equal(
+          failureFieldNumber(lines.at(-1)!, "burstOrdinal"),
+          expectedOrdinals[index],
+          `无入站连续发送的第 ${index + 1} 个 chunk 的 burstOrdinal 必须为 ${expectedOrdinals[index]}（含补发重试计数）：${lines.at(-1)}`,
+        );
+        if (index > 0) {
+          // 补发重试线（本边界第一条）必须同样计入波内位次（紧排在 chunk 线之前）。
+          assert.equal(
+            failureFieldNumber(lines[cumulativeLines[index]! - 2]!, "burstOrdinal"),
+            expectedOrdinals[index]! - 1,
+            `边界 ${index + 1} 的保留积压补发线必须计入 burst 位次 ${expectedOrdinals[index]! - 1}：${lines[cumulativeLines[index]! - 2]}`,
+          );
+        }
+      }
+
+      // 该 peer 任意入站（不带 token，避免触发持久化）：保留积压 revival 在死通道上
+      // 失败（preamble/首条 channel-dead 即停），失败线的 burstOrdinal 必须从 1 重新计数。
+      const linesBeforeInbound = weixinFailureLines(cap.warns).length;
+      await harness.triggerMessage({ text: "ping" });
+      await waitForCondition(
+        () => weixinFailureLines(cap.warns).length > linesBeforeInbound,
+        2500,
+        "入站后的 revival 失败线必须出现",
+      );
+      assert.equal(
+        failureFieldNumber(weixinFailureLines(cap.warns).at(-1)!, "burstOrdinal"),
+        1,
+        "该 peer 入站后 burstOrdinal 必须归零重开（下一条失败线为 1）",
+      );
+
+      // 入站之后的下一次 force 边界：补发重试(序号 2)+新 chunk(序号 3)——两条都
+      // 递增计位，验证归零后的连续发送位次语义。
+      await enqueue(chunkEvent("alpha5波次四"));
+      await enqueue(toolCallEvent("tool-alpha5-burst-4"));
+      await waitForCondition(
+        () => weixinFailureLines(cap.warns).length > linesBeforeInbound + 2,
+        2500,
+        "入站后的下两条失败线必须出现",
+      );
+      const postInboundLines = weixinFailureLines(cap.warns).slice(linesBeforeInbound);
+      assert.equal(
+        failureFieldNumber(postInboundLines[1]!, "burstOrdinal"),
+        2,
+        `归零后的波内第 2 次尝试（补发重试）必须为 2：${postInboundLines[1]}`,
+      );
+      assert.equal(
+        failureFieldNumber(postInboundLines[2]!, "burstOrdinal"),
+        3,
+        `归零后的波内第 3 次尝试（新 chunk）必须为 3：${postInboundLines[2]}`,
+      );
+    } finally {
+      harness.sendControl.failErrorFactory = undefined;
+      await harness.dispose();
+    }
+  } finally {
+    cap.restore();
+  }
+});
+
+test("alpha.5 观测：ret=-2 触发 M2 token 失效后 burstOrdinal 归零；无条目时失败线不带 fp/tokenAgeMs", async () => {
+  const cap = captureConsoleOutput();
+  const persistedToken = "wx-token-alpha5-m2-invalidate-c4d1";
+  try {
+    const harness = await createHarness();
+    try {
+      await harness.triggerMessage();
+      await harness.overwritePersistedWeixinToken(persistedToken);
+      const enqueue = await requireEnqueue(harness);
+      harness.sendControl.failErrorFactory = () => createWeixinRetMinus2Error();
+
+      // 第 1 次 -2 失败：读到的持久化条目被 M2 失效（防复活竞态语义）。按字段锚定
+      // 取线（非 .at(-1)）：带 fp 的线 = 读取过持久化条目的那次发送。
+      await enqueue(chunkEvent("alpha5失效波次一"));
+      await enqueue(toolCallEvent("tool-alpha5-m2-1"));
+      await waitForCondition(
+        () => weixinFailureLines(cap.warns).some((line) => line.includes("fp=")),
+        2500,
+        "第 1 条失败线必须出现（带 fp）",
+      );
+      const firstLine = weixinFailureLines(cap.warns).find((line) => line.includes("fp="))!;
+      assert.ok(firstLine.includes("fp="), `有持久化条目的失败线必须带 fp：${firstLine}`);
+
+      // 第 2 个边界：先补投保留的波次一（无条目 ⇒ 无 fp/tokenAgeMs；M2 失效已归零
+      // ⇒ 位次重开为 1），再 flush 波次二（位次 2，同样无条目）。
+      await enqueue(chunkEvent("alpha5失效波次二"));
+      await enqueue(toolCallEvent("tool-alpha5-m2-2"));
+      await waitForCondition(
+        () => weixinFailureLines(cap.warns).length >= 3,
+        2500,
+        "第 2 个边界的两条失败线必须出现",
+      );
+      const secondBoundaryLines = weixinFailureLines(cap.warns).slice(1);
+      const secondLine = secondBoundaryLines[0]!;
+      assert.ok(
+        !secondLine.includes("fp=") && !secondLine.includes("tokenAgeMs="),
+        `条目失效后无 token 可读，失败线不得带 fp/tokenAgeMs：${secondLine}`,
+      );
+      assert.equal(
+        failureFieldNumber(secondLine, "burstOrdinal"),
+        1,
+        `M2 token 失效必须归零 burstOrdinal（下一失败线为 1 而非 2）：${secondLine}`,
+      );
+      const thirdLine = secondBoundaryLines[1]!;
+      assert.equal(
+        failureFieldNumber(thirdLine, "burstOrdinal"),
+        2,
+        `归零后继续递增（同边界第 2 条 = 2）：${thirdLine}`,
+      );
+      assert.ok(
+        ![...cap.logs, ...cap.warns].some((logLine) => logLine.includes(persistedToken)),
+        "token 原值不得出现在任何捕获日志行中",
+      );
+    } finally {
+      harness.sendControl.failErrorFactory = undefined;
+      await harness.dispose();
+    }
+  } finally {
+    cap.restore();
+  }
+});
+
+test("alpha.5 观测：sendCount10s 只计 trailing 10s 窗口内的发送尝试（无 timer）", async (t) => {
+  const cap = captureConsoleOutput();
+  const realNow = Date.now.bind(Date);
+  let clockOffsetMs = 0;
+  t.mock.method(Date, "now", () => realNow() + clockOffsetMs);
+  try {
+    const harness = await createHarness();
+    try {
+      await harness.triggerMessage();
+      const enqueue = await requireEnqueue(harness);
+      harness.sendControl.failErrorFactory = () => createWeixinRetMinus2Error();
+
+      // 语义修正：每个 force 边界产出 补发重试+当前 chunk 两条尝试（均计数）。
+      // L1=chunk1@t0(计数1) → 时钟 +11s → L2=补发@t2（L1 滑出 trailing 10s 窗口 ⇒ 1）
+      // → L3=chunk2@t2（窗口内 L2+自身 ⇒ 2）→ L4=补发（L2,L3+自身 ⇒ 3）
+      // → L5=chunk3（L2,L3,L4+自身 ⇒ 4）。
+      const runBoundary = async (text: string, toolId: string, label: string) => {
+        await enqueue(chunkEvent(text));
+        await enqueue(toolCallEvent(toolId));
+        await waitForCondition(
+          () => weixinFailureLines(cap.warns).length > 0,
+          2500,
+          `${label} 失败线必须出现`,
+        );
+      };
+      const waitLines = async (count: number, label: string) =>
+        waitForCondition(
+          () => weixinFailureLines(cap.warns).length >= count,
+          2500,
+          `${label} 需要至少 ${count} 条失败线`,
+        );
+
+      await runBoundary("alpha5窗口正文一", "tool-alpha5-win-1", "首条");
+      await waitLines(1, "首条");
+      const firstLine = weixinFailureLines(cap.warns)[0]!;
+      assert.equal(
+        failureFieldNumber(firstLine, "sendCount10s"),
+        1,
+        `首条尝试的 sendCount10s 必须为 1：${firstLine}`,
+      );
+
+      // 时钟前进 11s：L1 滑出 trailing 10s 窗口。
+      clockOffsetMs += 11_000;
+      await runBoundary("alpha5窗口正文二", "tool-alpha5-win-2", "滑出窗口后");
+      await waitLines(3, "滑出窗口后");
+      const slidRetry = weixinFailureLines(cap.warns)[1]!;
+      assert.equal(
+        failureFieldNumber(slidRetry, "sendCount10s"),
+        1,
+        `滑出窗口后的首条尝试（补发）计数必须为 1（>10s 的旧尝试被惰性裁剪）：${slidRetry}`,
+      );
+      const inWindowChunk = weixinFailureLines(cap.warns)[2]!;
+      assert.equal(
+        failureFieldNumber(inWindowChunk, "sendCount10s"),
+        2,
+        `紧随其后的尝试（同窗口）计数必须为 2：${inWindowChunk}`,
+      );
+
+      // 紧接着（窗口内）再一个边界：窗口内 4 条尝试 ⇒ 计数 4。
+      await runBoundary("alpha5窗口正文三", "tool-alpha5-win-3", "窗口内第二边界");
+      await waitLines(5, "窗口内第二边界");
+      const lastLine = weixinFailureLines(cap.warns)[4]!;
+      assert.equal(
+        failureFieldNumber(lastLine, "sendCount10s"),
+        4,
+        `窗口内第 5 次尝试的计数必须为 4：${lastLine}`,
+      );
+    } finally {
+      harness.sendControl.failErrorFactory = undefined;
+      await harness.dispose();
+    }
+  } finally {
+    cap.restore();
   }
 });

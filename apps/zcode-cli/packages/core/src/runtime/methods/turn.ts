@@ -199,7 +199,8 @@ export async function executeTurnCommand(
         await appendTurnOutcomeEvent(this, {
           coreError,
           events,
-          durationMs: Date.now() - turnStartedAtMs,
+          // 时钟回拨（NTP 校正/VM 暂停恢复）可使差值为负，host strict schema 对负数整事件丢弃（2026-10-02 sess_a39948fb 20 次 too_small），发射端 clamp 非负（specs/bot-provider-network.md alpha.5）
+          durationMs: Math.max(0, Date.now() - turnStartedAtMs),
           turnPhase: "model_creation",
           inputId: options?.inputId,
           traceContext: turnTraceContext,
@@ -383,7 +384,8 @@ export async function executeTurnCommand(
               tokenCount: 0,
               usage: turnUsage,
               toolCallCount: 0,
-              duration: Date.now() - turnMachine.state.startedAt.getTime(),
+              // 时钟回拨（NTP 校正/VM 暂停恢复）可使差值为负，host strict schema 对负数整事件丢弃（2026-10-02 sess_a39948fb 20 次 too_small），发射端 clamp 非负（specs/bot-provider-network.md alpha.5）
+              duration: Math.max(0, Date.now() - turnMachine.state.startedAt.getTime()),
               resultType: "success",
               cacheStats: this.messageHistory.getCacheStats(),
               inputId: options?.inputId,
@@ -649,7 +651,8 @@ export async function executeTurnCommand(
             usage: turnUsage,
             toolCallCount: loopState.toolCallCount,
             historyRoundCount: loopState.historyRoundCount,
-            duration: Date.now() - turnMachine.state.startedAt.getTime(),
+            // 时钟回拨（NTP 校正/VM 暂停恢复）可使差值为负，host strict schema 对负数整事件丢弃（2026-10-02 sess_a39948fb 20 次 too_small），发射端 clamp 非负（specs/bot-provider-network.md alpha.5）
+            duration: Math.max(0, Date.now() - turnMachine.state.startedAt.getTime()),
             resultType: "success",
             ...(loopState.backgroundSubagentResultConsumed
               ? { backgroundSubagentResultConsumed: true }
@@ -767,7 +770,8 @@ export async function executeTurnCommand(
         await appendTurnOutcomeEvent(this, {
           coreError,
           events,
-          durationMs: Date.now() - turnMachine.state.startedAt.getTime(),
+          // 时钟回拨（NTP 校正/VM 暂停恢复）可使差值为负，host strict schema 对负数整事件丢弃（2026-10-02 sess_a39948fb 20 次 too_small），发射端 clamp 非负（specs/bot-provider-network.md alpha.5）
+          durationMs: Math.max(0, Date.now() - turnMachine.state.startedAt.getTime()),
           turnPhase: turnMachine.state.phase,
           inputId: options?.inputId,
           traceContext: turnTraceContext,

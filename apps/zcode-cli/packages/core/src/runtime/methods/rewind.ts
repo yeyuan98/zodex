@@ -116,7 +116,8 @@ export async function executeRewindCommand(
           tokenCount: 0,
           usage: turnUsage,
           toolCallCount: 0,
-          duration: Date.now() - startedAt,
+          // 时钟回拨（NTP 校正/VM 暂停恢复）可使差值为负，host strict schema 对负数整事件丢弃（2026-10-02 sess_a39948fb 20 次 too_small），发射端 clamp 非负（specs/bot-provider-network.md alpha.5）
+          duration: Math.max(0, Date.now() - startedAt),
           resultType: "success",
           cacheStats: this.messageHistory.getCacheStats(),
           inputId,
@@ -157,7 +158,8 @@ export async function executeRewindCommand(
       await appendTurnOutcomeEvent(this, {
         coreError,
         events,
-        durationMs: Date.now() - startedAt,
+        // 时钟回拨（NTP 校正/VM 暂停恢复）可使差值为负，host strict schema 对负数整事件丢弃（2026-10-02 sess_a39948fb 20 次 too_small），发射端 clamp 非负（specs/bot-provider-network.md alpha.5）
+        durationMs: Math.max(0, Date.now() - startedAt),
         turnPhase: "rewind",
         inputId,
         traceContext: turnTraceContext,
