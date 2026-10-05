@@ -85,3 +85,12 @@ test("§5.6 staging 段预算（trace 80 / nonce 64 / filename 160）：ASCII �
   assert.equal(sanitizeByteBudgetedFilename("trace-abc", { byteBudget: 80 }), "trace-abc");
   assert.equal(sanitizeByteBudgetedFilename("notes.txt", { byteBudget: 160 }), "notes.txt");
 });
+
+test("§5.6 纯点号输入（./../…）→ fallback（[ulw] MINOR-1：无前缀段防 join 折叠）", () => {
+  assert.equal(sanitizeByteBudgetedFilename(".", { byteBudget: 120 }), "attachment");
+  assert.equal(sanitizeByteBudgetedFilename("..", { byteBudget: 120 }), "attachment");
+  assert.equal(sanitizeByteBudgetedFilename("...", { byteBudget: 120 }), "attachment");
+  assert.equal(sanitizeByteBudgetedFilename("  ..  ", { byteBudget: 120 }), "attachment");
+  // 带正常 stem 的点号形态不受影响（扩展名语义保持）。
+  assert.equal(sanitizeByteBudgetedFilename("..hidden", { byteBudget: 120 }), "..hidden");
+});

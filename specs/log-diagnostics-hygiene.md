@@ -143,10 +143,14 @@ trailing 10s 内的尝试。
    计数不发射。下一条件（30s 到期后的新失败线，或下方汇总行）携带
    `suppressed=<自上一条发射线以来合并的条数>`。
 3. **汇总行**：死窗结束时输出一条 info 汇总
-   `bot outbound dead-window summary provider=… peer=… suppressed=<total>` 并清零。
-   死窗结束的判定 = 该 peer 的 revival（任意入站触发的保留积压补发开始投递）
-   或分类窗口变化（下一次发送结果不再判 channel-dead）。仅在确有 suppressed
-   计数时输出。
+   `bot outbound dead-window summary provider=… peer=… suppressed=<total>`（total =
+   整窗累计被合并条数，含已在发射线上分段披露的部分——[ulw] 评审 NIT-2 语义
+   钉死）并清零。死窗结束的判定 = 该 peer 的 revival（任意入站触发的保留积压
+   补发开始投递）或分类窗口变化（下一次发送结果不再判 channel-dead）。仅在
+   确有 suppressed 计数时输出。**已知残余（[ulw] NIT-3，接受）**：revival 触发
+   点当前仅覆盖"有保留积压的 weixin peer"——非 weixin 或空积压 peer 的死窗
+   汇总顺延到下一次发送成功/poison 失败时点（仅影响汇总行时点，不影响限频
+   与计数本身）。
 4. **不动的线**：`bot retained backlog delivery stopped channel-dead` info 线维持
    once-per-revival-attempt（本就低频）；`bot retained backlog revival attempted`、
    M1/M2 生命周期线、发送成功线全部不变。

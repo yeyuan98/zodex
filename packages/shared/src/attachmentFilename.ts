@@ -121,5 +121,11 @@ export function sanitizeByteBudgetedFilename(
   if (!budgeted) {
     return fallback;
   }
+  // [ulw] 评审修复（MINOR-1）：纯点输出（"."、".."、"…"）不得放行——出站临时
+  // 物化与缓存 messageKey 段无前缀，join() 会把 ".." 折叠成父目录（EISDIR/
+  // 目录塌缩）。整段仅剩点号时按契约兜底名处理。
+  if (/^\.+$/.test(budgeted)) {
+    return fallback;
+  }
   return neutralizeWindowsReservedName(budgeted, byteBudget);
 }

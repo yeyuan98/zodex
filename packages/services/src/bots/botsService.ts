@@ -1392,7 +1392,7 @@ export function createBotsService(
   // content-poison 失败线永不限频，逐条保全。
   const deadWindowFailureLogStates = new Map<
     string,
-    { lastEmitAtMs: number; suppressedSinceLastEmit: number }
+    { lastEmitAtMs: number; suppressedSinceLastEmit: number; suppressedTotal: number }
   >();
   let botStorageMigrationPromise: Promise<void> | null = null;
   const cachedWorkspaceRefsByKey = new Map<
@@ -3623,10 +3623,16 @@ export function createBotsService(
     const state = deadWindowFailureLogStates.get(key);
     if (!state || nowMs - state.lastEmitAtMs >= BOT_DEAD_WINDOW_FAILURE_LOG_MIN_INTERVAL_MS) {
       const suppressed = state?.suppressedSinceLastEmit ?? 0;
-      deadWindowFailureLogStates.set(key, { lastEmitAtMs: nowMs, suppressedSinceLastEmit: 0 });
+      // suppressedTotal 在每条被合并线时已同步自增，这里不得重复累加（仅复位分段计数）。
+      deadWindowFailureLogStates.set(key, {
+        lastEmitAtMs: nowMs,
+        suppressedSinceLastEmit: 0,
+        suppressedTotal: state?.suppressedTotal ?? 0,
+      });
       return { emit: true, suppressed };
     }
     state.suppressedSinceLastEmit += 1;
+    state.suppressedTotal += 1;
     return { emit: false };
   }
 
@@ -3640,10 +3646,12 @@ export function createBotsService(
       return;
     }
     deadWindowFailureLogStates.delete(key);
-    if (state.suppressedSinceLastEmit > 0) {
+    // [ulw] 评审修复（NIT-2）：汇总行报**整窗累计**（spec suppressed=<total> 语义）；
+    // 逐条发射线上的 suppressed= 仍是"自上一条发射线以来"的分段计数，两者分工。
+    if (state.suppressedTotal > 0) {
       botsLogger.info(
         undefined,
-        `bot outbound dead-window summary provider=${bot.provider} peer=${peerKey} suppressed=${state.suppressedSinceLastEmit}`,
+        `bot outbound dead-window summary provider=${bot.provider} peer=${peerKey} suppressed=${state.suppressedTotal}`,
       );
     }
   }
@@ -8780,6 +8788,8 @@ export function createBotsService(
       streamSubscriptions.clear();
       taskDeliveryRegistry.clear();
       transientInteractionCards.clear();
+      // [ulw] 评审修复（NIT-4）：死窗限频状态随 dispose 清空（与相邻 per-peer 映射对齐）。
+      deadWindowFailureLogStates.clear();
       for (const intervalId of typingIntervals.values()) {
         clearInterval(intervalId);
       }

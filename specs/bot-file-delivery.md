@@ -1031,11 +1031,16 @@ live in specs/log-diagnostics-hygiene.md.
   sanitizers change.
 - Zero drift: for ASCII filenames already within budget, every affected output (cache
   paths, temp paths, staging paths, audit lines, reply texts) is byte-identical to
-  3.14.5-alpha.6.
+  3.14.5-alpha.6. **Disclosed micro-drift ([ulw] NIT-5，接受）**：desktop staging
+  旧消毒的 ASCII 连字符折叠（`a--b`→`a-b`）与前导横线剥离随 ASCII-strip 一并
+  消亡（安全字符原样保留）；`:` 的替换字符由 `-` 改为 `_`；空 nonce 兜底名
+  `attachment`→`nonce`。三者在真实 UUID trace/nonce 下不可达。
 - Reserved-name neutralization is a property of the helper output itself, not of call
   sites' prefixes (the inbound-cache file segment is incidentally reserved-safe via its
   digest prefix today; the outbound temp file is NOT — a remote `CON.txt` currently
-  materializes as a literally invalid Windows temp name).
+  materializes as a literally invalid Windows temp name). **纯点号输出（`.`/`..`/
+  `…`）同样在 helper 内兜底替换**（[ulw] MINOR-1：无前缀段经 join() 会折叠成
+  父目录）。
 
 ### Acceptance scenarios (red-first on 3.14.5-alpha.6)
 
