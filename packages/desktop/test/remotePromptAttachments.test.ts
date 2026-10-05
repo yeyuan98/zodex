@@ -256,3 +256,39 @@ test("dataBase64-only 附件（无 localPath）：原样透传，不上传", asy
   assert.equal(result.attachments?.[0].dataBase64, attachments[0].dataBase64);
   assert.equal(result.attachments?.[0].localPath, undefined);
 });
+
+// ---- Alpha 7（specs/bot-file-delivery.md「Outbound attachment naming & inline kinds」§5.6）：
+// staging 段消毒保留 Unicode 基名——红测先行。依据：handoff §2h 发现②（owner rig
+// 2026-10-04 实测：`程曦简历.pdf` 远端落 `01-.pdf`——sanitizePathSegment 的
+// `[^A-Za-z0-9._-]+`→`-` 把 CJK 基名整体清光）+ ../ZCode-alpha6-plan.md 附录 C §5.6。
+
+test("A7 §5.6 CJK 基名保留：staging `程曦简历.pdf` 不得塌缩成 `.pdf`", async () => {
+  const fake = createFakeBackend();
+  const localPath = "/tmp/desktop-cache/zcode/bot-attachments/b/m/程曦简历.pdf";
+  const attachments: ZCodePromptAttachment[] = [
+    {
+      kind: "pdf",
+      filename: "程曦简历.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: 2048,
+      localPath,
+    },
+  ];
+  const content = `请阅读简历\n\n附件：程曦简历.pdf (application/pdf, 2.0KB)，已保存到：${localPath}`;
+  const result = await materializeRemotePromptAttachments(
+    { taskId: "task-a7-cjk", content, traceId: "trace-a7-cjk", attachments },
+    { backend: fake.backend },
+  );
+  assert.equal(result.uploadedCount, 1);
+  assert.equal(fake.control.uploads.length, 1);
+  // 红点：今天远端路径是 `.../01-.pdf`（CJK 基名被清光）；新契约要求 CJK 基名
+  // 在远端 staging 路径尾部原样保留（字节预算截断只作用于超预算的超长名）。
+  assert.ok(
+    fake.control.uploads[0].remotePath.endsWith("程曦简历.pdf"),
+    `远端 staging 路径必须保留 CJK 基名（今天塌缩为 01-.pdf）：${fake.control.uploads[0].remotePath}`,
+  );
+  // 附件与 prompt 行的路径改写照常（改写后的远端路径同样含 CJK 基名）。
+  assert.equal(result.attachments?.[0].localPath, fake.control.uploads[0].remotePath);
+  assert.ok(result.content.includes(fake.control.uploads[0].remotePath));
+  assert.ok(!result.content.includes(localPath));
+});

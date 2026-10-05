@@ -1232,3 +1232,89 @@ test("alpha.5 观测：sendCount10s 只计 trailing 10s 窗口内的发送尝试
     cap.restore();
   }
 });
+
+// ---- alpha.7 §5.12a：死窗失败行限频（specs/log-diagnostics-hygiene.md
+// Amendment (3.14.5-alpha.7)）。红测先行，W3 实现后转绿；计数语义（burstOrdinal/
+// sendCount10s/fp 每次尝试仍计数）不变，仅行的发射密度变化（该 amendment 的迁移
+// 注记：上方 alpha.5 观测用例的逐线计数断言由实现 PR 按新密度改写）。
+
+test("alpha.7 §5.12a 死窗限频：channel-dead 失败线 30s 内合并为 1 条 + revival 汇总行；content-poison 永不限频", async () => {
+  const cap = captureConsoleOutput();
+  const isDeadWindowSummary = (line: string) => line.includes("bot outbound dead-window summary");
+  try {
+    const harness = await createHarness();
+    try {
+      await harness.triggerMessage();
+      const enqueue = await requireEnqueue(harness);
+
+      // 守护钉（实现前后都绿）：content-poison 失败线永不限频——
+      // 一个分块 2 次尝试 = 恰 2 条失败线（alpha.1 预算语义不变）。
+      harness.sendControl.failTextPattern = /alpha7毒丸正文/u;
+      await enqueue(chunkEvent("alpha7毒丸正文"));
+      await enqueue(toolCallEvent("tool-alpha7-poison"));
+      await waitForCondition(
+        () => weixinFailureLines(cap.warns).length >= 2,
+        4000,
+        "content-poison 两次尝试的失败线必须逐条输出（永不限频）",
+      );
+      const poisonLineCount = weixinFailureLines(cap.warns).length;
+      assert.equal(
+        poisonLineCount,
+        2,
+        `content-poison 失败线必须逐条输出（2 次尝试 2 条）：\n${weixinFailureLines(cap.warns).join("\n")}`,
+      );
+      harness.sendControl.failTextPattern = undefined;
+
+      // 死窗突发：3 个 force 边界（边界2/3 先补投保留积压再 flush，alpha.5 语义）
+      // 共 5 次 channel-dead 发送尝试，全部落在 30s 窗口内。
+      harness.sendControl.failErrorFactory = () => createWeixinRetMinus2Error();
+      for (const [index, text] of ["alpha7死窗一", "alpha7死窗二", "alpha7死窗三"].entries()) {
+        await enqueue(chunkEvent(text));
+        await enqueue(toolCallEvent(`tool-alpha7-dead-${index}`));
+      }
+      // 等第一条（合并后唯一一条）失败线出现，再短 settle 兜底后续边界的尝试收尾。
+      await waitForCondition(
+        () => weixinFailureLines(cap.warns).length > poisonLineCount,
+        4000,
+        "死窗第一条失败线必须照常输出（首条不限频）",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const deadWindowLines = weixinFailureLines(cap.warns).slice(poisonLineCount);
+      assert.equal(
+        deadWindowLines.length,
+        1,
+        `死窗内 5 次 channel-dead 失败尝试必须合并为恰 1 条失败线（specs §5.12a 最小间隔 30s）——今天逐条输出 ${deadWindowLines.length} 条：\n${deadWindowLines.join("\n")}`,
+      );
+
+      // revival：清除失败注入 + 该 peer 任意入站 → 保留积压补发开始投递（全部成功）
+      // → 恰一条汇总行，带 suppressed>=1（今天无任何汇总行 → 红）。
+      harness.sendControl.failErrorFactory = undefined;
+      await harness.triggerMessage({ text: "ping" });
+      const revivalDeadline = Date.now() + 2500;
+      while (Date.now() < revivalDeadline && !cap.logs.some((line) => isDeadWindowSummary(line))) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const summaryLine = cap.logs.find((line) => isDeadWindowSummary(line));
+      assert.ok(
+        summaryLine,
+        `revival（积压补发开始）后必须恰一条 dead-window summary 汇总行：\n${cap.logs.join("\n")}`,
+      );
+      const suppressed = summaryLine ? failureFieldNumber(summaryLine, "suppressed") : undefined;
+      assert.ok(
+        suppressed !== undefined && suppressed >= 1,
+        `汇总行必须携带 suppressed>=1（被合并掉的失败线计数）：${summaryLine}`,
+      );
+      assert.equal(
+        cap.logs.filter((line) => isDeadWindowSummary(line)).length,
+        1,
+        "汇总行只输出一次",
+      );
+    } finally {
+      harness.sendControl.failTextPattern = undefined;
+      harness.sendControl.failErrorFactory = undefined;
+      await harness.dispose();
+    }
+  } finally {
+    cap.restore();
+  }
+});
