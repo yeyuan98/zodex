@@ -1,6 +1,10 @@
 import type { IRemoteBackend, RemoteUploadOptions } from "@zcode/server/remote";
 import { quotePosixPathArg } from "@zcode/server/remote/posixShell.js";
-import type { TraceId, ZCodePromptAttachment } from "@zcode/shared";
+import {
+  sanitizeByteBudgetedFilename,
+  type TraceId,
+  type ZCodePromptAttachment,
+} from "@zcode/shared";
 import { randomUUID } from "node:crypto";
 
 const REMOTE_PROMPT_ATTACHMENT_ROOT = "~/.zcode/tmp/prompt-attachments";
@@ -134,12 +138,26 @@ function buildRemotePromptAttachmentPath(params: {
   root?: string;
   traceId: TraceId | string;
 }): string {
-  const traceSegment = sanitizePathSegment(String(params.traceId)).slice(0, 80) || "trace";
-  const nonceSegment = sanitizePathSegment(params.nonce ?? createAttachmentNonce()).slice(0, 64);
-  const filename = sanitizePathSegment(basenameFromPathLike(params.filename)) || "attachment";
+  // §5.6（specs/bot-file-delivery.md「Outbound attachment naming & inline kinds
+  // (3.14.5 Alpha 7)」）：staging 段消毒统一改走 packages/shared 的共享字节预算
+  // helper——旧的 sanitizePathSegment `[^A-Za-z0-9._-]+ → "-"` 会把 CJK 基名整体清光
+  //（handoff §2h rig 实测：`程曦简历.pdf` 塌缩成 `01-.pdf`）。段预算沿用旧上限的字节
+  // 等价（trace 80 / nonce 64 / filename 160）；`01-` 序号前缀在预算段之外；路径结构
+  // `<root>/<trace>/<nonce>/<index>-<filename>` 与权限收紧（700/600、私有根）不变。
+  const traceSegment = sanitizeByteBudgetedFilename(String(params.traceId), {
+    byteBudget: 80,
+    fallback: "trace",
+  });
+  const nonceSegment = sanitizeByteBudgetedFilename(params.nonce ?? createAttachmentNonce(), {
+    byteBudget: 64,
+    fallback: "nonce",
+  });
+  const filename = sanitizeByteBudgetedFilename(basenameFromPathLike(params.filename), {
+    byteBudget: 160,
+  });
   const indexSegment = String(params.index + 1).padStart(2, "0");
   const root = params.root ?? REMOTE_PROMPT_ATTACHMENT_ROOT;
-  return `${root}/${traceSegment}/${nonceSegment}/${indexSegment}-${filename.slice(0, 160)}`;
+  return `${root}/${traceSegment}/${nonceSegment}/${indexSegment}-${filename}`;
 }
 
 async function ensureRemotePromptAttachmentDirectory(
@@ -270,15 +288,6 @@ function replaceContentPaths(content: string, replacements: Map<string, string>)
 function basenameFromPathLike(pathLike: string): string {
   const segments = pathLike.split(/[\\/]/u).filter(Boolean);
   return segments.at(-1) ?? pathLike;
-}
-
-function sanitizePathSegment(value: string): string {
-  const sanitized = value
-    .replaceAll("\0", "-")
-    .replace(/[^A-Za-z0-9._-]+/gu, "-")
-    .replace(/^-+/u, "")
-    .replace(/-+$/u, "");
-  return sanitized || "attachment";
 }
 
 export function createRemotePromptAttachmentTaskService<T extends object>(

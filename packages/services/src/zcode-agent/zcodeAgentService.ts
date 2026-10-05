@@ -313,6 +313,14 @@ const SESSION_COMPACT_REQUEST_TIMEOUT_MS = 5 * 60_000;
 interface PendingPermissionRequest {
   client: ZCodeProtocolClient;
   protocolRequestId: ZCodeProtocolRequestId;
+  /**
+   * §5.14 墓碑（specs/log-diagnostics-hygiene.md Amendment 3.14.5-alpha.7）：交互被
+   * 解决后标记 resolved——退出 pendingPermissions/pendingUserInputs gauge 计数，但
+   * 保留键使 wasPending 去重继续生效（agent 为找回 protocol id 重发同一业务
+   * requestId 时不得重新广播给 UI）；刷新重发只更新 protocolRequestId、继承墓碑标记。
+   * 墓碑随既有 client 断连（invalidateWorkspaceClient）与 disposeAll 清理一并清除。
+   */
+  resolved?: true;
 }
 
 // P4：provider runtime headers 请求协议方法与 Host 侧快速失败 handler 已整体删除
@@ -757,6 +765,17 @@ function userInputRequestKey(params: ZCodeAgentSessionTarget & { requestId: stri
   return `${sessionEventKey(params)}\u0000${params.requestId}`;
 }
 
+/** §5.14（Alpha 7）：gauge 只数 UNRESOLVED 交互提示——墓碑（resolved 条目）退出计数。 */
+function countUnresolvedInteractions(pending: Map<string, PendingPermissionRequest>): number {
+  let unresolved = 0;
+  for (const entry of pending.values()) {
+    if (!entry.resolved) {
+      unresolved += 1;
+    }
+  }
+  return unresolved;
+}
+
 /**
  * 进程级 Provider Registry 的只读选择投影。
  *
@@ -1047,11 +1066,12 @@ export function createZCodeAgentService(
   const pendingPermissions = new Map<string, PendingPermissionRequest>();
   const pendingUserInputs = new Map<string, PendingPermissionRequest>();
   // 内存诊断计数器：只读各 per-session 镜像表的 size。
+  // §5.14：pendingPermissions/pendingUserInputs 只计 UNRESOLVED 条目（墓碑退出计数）。
   const memoryDiagnostics = registerMemoryDiagnosticsProvider("agent", () => ({
     sessionEmitters: sessionEmitters.size,
     seqStates: sessionEventSequenceStates.size,
-    pendingPermissions: pendingPermissions.size,
-    pendingUserInputs: pendingUserInputs.size,
+    pendingPermissions: countUnresolvedInteractions(pendingPermissions),
+    pendingUserInputs: countUnresolvedInteractions(pendingUserInputs),
   }));
   const pendingSessionRuntimePreferences = new Map<
     string,
@@ -1562,10 +1582,58 @@ export function createZCodeAgentService(
     return rememberBoundedEventId(state.liveEventIds, state.liveEventIdOrder, event.eventId);
   }
 
+  /**
+   * §5.14 归约契约路径 b（specs/log-diagnostics-hygiene.md Amendment 3.14.5-alpha.7）：
+   * permission.resolved / userInput.resolved 会话事件到达 host——交互被系统侧解决
+   *（deny-on-stop / deadline 类：没有 UI 应答也有终局）。只打墓碑（保留键供 wasPending
+   * 去重），不删除；幂等（重复/迟到事件重复打标无副作用）。permission.resolved 的
+   * requestId 可选缺失——缺失时无从定位条目，不动作（不比今天更糟）。session event
+   * schema 的 payload 经 zcodeSessionEventEnvelopeFor 的 ZodTypeAny 丢失具体类型，
+   * 与 adapter 同款 asRecord/stringValue 安全读取。
+   */
+  function markPendingInteractionsResolvedFromSessionEvent(
+    workspace: ZCodeAgentWorkspaceTarget,
+    event: ZCodeSessionEvent,
+  ): void {
+    if (event.type === "permission.resolved" || event.type === "userInput.resolved") {
+      const payload = event.payload;
+      const requestId =
+        typeof payload === "object" && payload !== null
+          ? (payload as { requestId?: unknown }).requestId
+          : undefined;
+      if (typeof requestId === "string" && requestId) {
+        markPendingInteractionResolved(workspace, event.sessionId, requestId);
+      }
+    }
+  }
+
+  /** §5.14：把 (workspace, sessionId, requestId) 对应的待决交互标记为 resolved（墓碑）。 */
+  function markPendingInteractionResolved(
+    workspace: ZCodeAgentWorkspaceTarget,
+    sessionId: string,
+    requestId: string,
+  ): void {
+    if (!requestId) {
+      return;
+    }
+    const permissionKey = permissionRequestKey({ ...workspace, sessionId, requestId });
+    const permissionPending = pendingPermissions.get(permissionKey);
+    if (permissionPending && !permissionPending.resolved) {
+      pendingPermissions.set(permissionKey, { ...permissionPending, resolved: true });
+    }
+    const userInputKey = userInputRequestKey({ ...workspace, sessionId, requestId });
+    const userInputPending = pendingUserInputs.get(userInputKey);
+    if (userInputPending && !userInputPending.resolved) {
+      pendingUserInputs.set(userInputKey, { ...userInputPending, resolved: true });
+    }
+  }
+
   function handleSessionEvent(
     workspace: ZCodeAgentWorkspaceTarget,
     event: ZCodeSessionEvent,
   ): void {
+    // §5.14 路径 b：resolved 事件先于 live 去重记账（同一 eventId 重复投递幂等）。
+    markPendingInteractionsResolvedFromSessionEvent(workspace, event);
     const normalizedEvent = normalizeSessionEventSeq(workspace, event);
     if (!shouldDeliverLiveSessionEvent(workspace, normalizedEvent)) {
       return;
@@ -1897,10 +1965,14 @@ export function createZCodeAgentService(
             sessionId: parsed.data.sessionId,
             requestId: parsed.data.requestId,
           });
+          // §5.14：wasPending 去重按"键存在"判定（墓碑键也算已广播——解决后 agent 重发
+          // 同一业务 requestId 不得重新广播）；刷新 protocolRequestId 但继承墓碑标记，
+          // 使已解决条目不会被重发复活回 gauge 计数。
           const wasPending = pendingPermissions.has(key);
           pendingPermissions.set(key, {
             client,
             protocolRequestId: request.id,
+            ...(pendingPermissions.get(key)?.resolved ? { resolved: true } : {}),
           });
           if (!wasPending) {
             emitSessionEvent(workspace, parsed.data.sessionId, {
@@ -1943,8 +2015,13 @@ export function createZCodeAgentService(
             sessionId: parsed.data.sessionId,
             requestId: parsed.data.requestId,
           });
+          // §5.14：与 permission 请求同款墓碑语义（见上）。
           const wasPending = pendingUserInputs.has(key);
-          pendingUserInputs.set(key, { client, protocolRequestId: request.id });
+          pendingUserInputs.set(key, {
+            client,
+            protocolRequestId: request.id,
+            ...(pendingUserInputs.get(key)?.resolved ? { resolved: true } : {}),
+          });
           if (!wasPending) {
             // agent 为恢复丢失的 protocol id 会重发同一业务 requestId。
             // host 需要刷新可响应的 protocolRequestId，但不能重复广播给 UI，
@@ -4634,6 +4711,27 @@ export function createZCodeAgentService(
         }
       }
       const ack: CommandAck = await client.request(V4_METHODS.command, envelope, commandAckSchema);
+      // §5.14 归约契约路径 a（specs/log-diagnostics-hygiene.md Amendment 3.14.5-alpha.7）：
+      // resolveInteraction ACK 成功（accepted/duplicate/noop——与 adapter
+      // assertV4CommandAckOk 同口径，晚到应答 noop 也是终局）= 交互应答成功。
+      // respondPermission / respondElicitation 都经由这里收敛——直接在服务侧 map 打
+      // 墓碑（只改 adapter 不清服务侧 map 不算修复），adapter 无需额外接缝。
+      const resolveInteractionPayload =
+        envelope.type === "resolveInteraction"
+          ? (envelope.payload as { interactionId?: unknown })
+          : undefined;
+      if (
+        resolveInteractionPayload &&
+        typeof resolveInteractionPayload.interactionId === "string" &&
+        envelope.sessionId &&
+        (ack.status === "accepted" || ack.status === "duplicate" || ack.status === "noop")
+      ) {
+        markPendingInteractionResolved(
+          params,
+          envelope.sessionId,
+          resolveInteractionPayload.interactionId,
+        );
+      }
       // Prompt command 在 committed TurnStarted 或 committed WorkspaceHookReviewRequested
       // 任一 authority 到达后即返回；人工审核不能占用 Host RPC，因此继续使用统一默认
       // timeout/watchdog。放宽到审核领域 deadline 只会掩盖串行协议队列死锁。

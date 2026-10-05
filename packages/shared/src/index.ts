@@ -242,6 +242,10 @@ export * from "./botWorkspaceFilePolicy.js";
 // 入站附件容器 sniff（3.14.5 Alpha 6 §5.15）：按文件头 magic 指纹识别，
 // 纯函数零 IO，供 botsService 缓存无名附件时补扩展名/修正 mimeType。
 export * from "./attachmentContainerSniff.js";
+// 出站/入站文件名的共享字节预算消毒（3.14.5 Alpha 7 §5.6）：Unicode 基名保留 +
+// UTF-8 字节预算截断 + Windows 保留名中和；供 botsService 缓存/出站临时物料化与
+// desktop remotePromptAttachments staging 三站点共用。
+export * from "./attachmentFilename.js";
 export * from "./assistant-message-parts.js";
 export * from "./zcodePersistedMessageMerge.js";
 export * from "./assistant-presentation.js";
