@@ -121,3 +121,80 @@ now−updatedAt`（持久化 token 轮换时间；**永不输出 token 值**）�
 `^[0-9a-f]{8}$`；不同 token 值指纹不同、同 token 指纹相同；捕获日志中无 token 原值；
 连续发送无入站时 burstOrdinal 递增、入站后归零（M2 失效同）；sendCount10s 只计
 trailing 10s 内的尝试。
+
+## Amendment (3.14.5-alpha.7) — 死窗失败行限频（§5.12a）
+
+仅日志密度变化，**零行为变化**（上方 Invariants 原样适用：发送/重试/补发/保留/
+通知语义一个字不变；§5.12(b) 补发延时维持 §7.25 封锁，不做）。依据：owner rig
+实测微信断线窗内任务仍输出时，`bot outbound send … failed` 每分钟约 82 行、可持续
+数小时，淹没有用信号（plan Part 1 item 9）。作用对象是 botsService 内两条高频
+失败 warn：
+
+1. **合并对象与判死口径**：(a) `sendOutbound` catch 的发送结果失败线
+   （`bot outbound send … failed`）与 (b) 任务流事件串行队列 catch 的
+   `bot task stream event failed …`。死窗判定复用既有
+   `classifyBotSendFailure` === `channel-dead`（weixinRet=-2 / HTTP 5xx /
+   AbortError/TimeoutError/ETIMEDOUT / 网络超时文本形状）——**仅死窗内限频**；
+   content-poison 失败线（4xx、业务拒绝等）**永不限频**，逐条保全。
+2. **限频语义**：per (botId, peerKey) 惰性时间戳比较，最小间隔 30s，**无 timer**
+   （先例：weixin typing warn 30s 限频、zcodeTaskIndexSyncer topic-subscribe 60s）。
+   窗口内第一条失败线照常输出（alpha.5 的 burstOrdinal/sendCount10s/fp 随行——
+   计数语义不变，每次尝试仍计入，只是行的发射被合并）；30s 内的后续失败线合并
+   计数不发射。下一条件（30s 到期后的新失败线，或下方汇总行）携带
+   `suppressed=<自上一条发射线以来合并的条数>`。
+3. **汇总行**：死窗结束时输出一条 info 汇总
+   `bot outbound dead-window summary provider=… peer=… suppressed=<total>` 并清零。
+   死窗结束的判定 = 该 peer 的 revival（任意入站触发的保留积压补发开始投递）
+   或分类窗口变化（下一次发送结果不再判 channel-dead）。仅在确有 suppressed
+   计数时输出。
+4. **不动的线**：`bot retained backlog delivery stopped channel-dead` info 线维持
+   once-per-revival-attempt（本就低频）；`bot retained backlog revival attempted`、
+   M1/M2 生命周期线、发送成功线全部不变。
+5. **迁移注记**：上方 alpha.5 观测测试中「每次尝试一行」的逐线断言在实现落地时
+   按新密度改写（burstOrdinal/sendCount10s 计数语义不变，仅行的发射数变化）——
+   由实现 PR 一并更新，不视为回归。
+
+测试（red-first，`botMessageDelivery.test.ts`，console 捕获 + ret=-2 failErrorFactory
+注入，与 alpha.5 观测用例同款 seam）：死窗内 N 次 channel-dead 失败尝试（30s 内）→
+捕获 warn 中该 peer 的失败线恰 1 条；revival（清除失败注入 + 入站 ping）后恰一条
+`dead-window summary` 汇总行且 `suppressed>=1`；content-poison 失败线不受限频影响
+（守护钉，实现前后都绿）。
+
+## Amendment (3.14.5-alpha.7) — pending 仪表归零（§5.14：agent.pendingPermissions / agent.pendingUserInputs）
+
+归属：D2 心跳诊断键 `agent.pendingPermissions` / `agent.pendingUserInputs` 的**取值
+语义**修正（D2 的键集合、节奏与写盘触发不变）。这两个 gauge 计数的是
+**UNRESOLVED 交互提示**（zcodeAgentService 内 pendingPermissions / pendingUserInputs
+map 的条目数），但今天的 map 只增不减——仅在 client 断连（invalidateWorkspaceClient）
+与 disposeAll 清理，交互解决后从不移除；owner 实证：权限全部应答、任务结束半小时后
+心跳仍显示 pendingPermissions=3 / pendingUserInputs=2。
+
+1. **归约契约**：交互被解决时，对应条目必须退出 gauge 计数，两条路径都要覆盖：
+   (a) **交互应答成功**——`respondPermission` / `respondElicitation` 成功（adapter
+   接缝必须触达服务侧 map 的清理；只改 adapter 不清服务侧 map 不算修复）；
+   (b) **系统侧解决**——`permission.resolved` / `userInput.resolved` 会话事件到达
+   host（覆盖 deny-on-stop / deadline 类：没有 UI 应答也有终局）。
+2. **不得复活已广播提示（tombstone 决定）**：`wasPending` 去重（agent 为找回
+   protocol id 重发同一业务 requestId 时不重复广播给 UI）依赖 map 键的存在性。
+   **裁定：墓碑而非删除**——条目解决后标记 resolved：退出 gauge 计数、不再参与
+   应答路由，但保留键使 wasPending 去重继续生效（解决后同 requestId 重发不得
+   重新广播）。墓碑随既有 client 断连与 dispose 清理一并清除（这两条清理语义
+   不变）。红测守护钉：解决后重发同 requestId → 恰一次广播。
+3. **止损条款**（handoff §5.14 / plan Part 1 item 10 保险）：若实现中发现需要跨
+   host 重新设计记账所有权（例如手机远控与桌面对同一 prompt 各持一份待决状态），
+   立即停下找 owner 拍板，不擅自动。
+4. **心跳/UI 零改动**：D2 的诊断键写盘谓词、15 分钟心跳节奏、「诊断键为 0 也输出」
+   规则全部不变；唯一变化是这些键在交互解决后回到 0（B2 测试表验证）。
+
+测试（red-first，`packages/services/test/agentPendingGauge.test.ts`：真
+createZCodeAgentService + 真 zcodeTaskServiceAdapter（真服务 + 最小 repo/syncer 桩）
+
+- 假 Agent 子进程（stdio ndjson，offPeak wiring harness 同款））：
+
+* 应答路径：agent 反向 `interaction/requestPermission` → 广播 permission.request、
+  `collectServiceMemoryDiagnostics()["agent.pendingPermissions"] === 1` → adapter
+  `respondPermission` 成功 → 归零（今天恒 1 → 红）。
+* deny-on-stop 变体：agent 推送 `permission.resolved` 会话事件（decision=deny）→
+  同样归零（今天恒 1 → 红）。
+* 墓碑守护钉：解决后 agent 重发同 requestId → 不再广播（今天即绿——钉住
+  tombstone 语义，裁定 tombstone vs delete）。
