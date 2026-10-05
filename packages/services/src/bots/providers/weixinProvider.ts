@@ -631,7 +631,8 @@ function readWeixinAttachmentItem(item: unknown, index: number): BotInboundAttac
     return null;
   }
   const kind = inferWeixinAttachmentKind({ ...item, ...mediaSource });
-  // §5.15（§7.32）：兜底命名打标——容器 sniff 只允许改写兜底名，provider 给过的名不动。
+  // Alpha 8（§7.33）：兜底命名打标随 sniff 门放宽退役——无扩展名附件一律
+  // content-positive-only sniff，provider 给过的名仅在带扩展名时才受保护。
   const providedFilename =
     readString(mediaSource, "filename") ||
     readString(mediaSource, "file_name") ||
@@ -666,7 +667,6 @@ function readWeixinAttachmentItem(item: unknown, index: number): BotInboundAttac
     kind,
     filename,
     mimeType,
-    ...(!providedFilename ? { filenameIsFallback: true } : {}),
     ...(sizeBytes ? { sizeBytes } : {}),
     ...(providerFileId ? { providerFileId } : {}),
     ...(downloadUrl ? { downloadUrl } : {}),

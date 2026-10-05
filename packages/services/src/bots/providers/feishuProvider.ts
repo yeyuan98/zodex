@@ -630,7 +630,8 @@ function readFeishuAttachment(
     return null;
   }
   const kind = inferFeishuAttachmentKind(msgType);
-  // §5.15（§7.32）：兜底命名打标——容器 sniff 只允许改写兜底名，provider 给过的名不动。
+  // Alpha 8（§7.33）：兜底命名打标随 sniff 门放宽退役——无扩展名附件一律
+  // content-positive-only sniff，provider 给过的名仅在带扩展名时才受保护。
   const providedFilename = readString(content, "file_name") || readString(content, "filename");
   const filename = providedFilename ?? `${msgType}-${providerFileId.slice(0, 8)}`;
   const mimeType =
@@ -642,7 +643,6 @@ function readFeishuAttachment(
     kind,
     filename,
     mimeType,
-    ...(!providedFilename ? { filenameIsFallback: true } : {}),
     ...(typeof content.size === "number" ? { sizeBytes: content.size } : {}),
     providerFileId,
   };
@@ -2041,9 +2041,14 @@ export function createFeishuBotProvider(deps: FeishuProviderDeps): BotProviderAd
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), FEISHU_ATTACHMENT_DOWNLOAD_TIMEOUT_MS);
       try {
+        // 修复原因：飞书 messages-resources API 的 type 参数仅接受 image|file
+        // （file 覆盖 文件/音频/视频，见官方文档）；此前 audio→audio /
+        // video→media 均为契约外取值，导致飞书音频/视频下载 100% 失败
+        // （rig 2026-10-05 §2i.3）。
+        const resourceType = attachment.kind === "image" ? "image" : "file";
         // 修复原因：飞书资源下载此前走裸 fetch，绕过应用代理；统一改走注入的 requester。
         const response = await deps.requester.fetch(
-          `${getFeishuBaseUrl(bot)}/open-apis/im/v1/messages/${encodeURIComponent(actor.providerMessageId)}/resources/${encodeURIComponent(attachment.providerFileId)}?type=${attachment.kind === "image" ? "image" : attachment.kind === "video" ? "media" : attachment.kind}`,
+          `${getFeishuBaseUrl(bot)}/open-apis/im/v1/messages/${encodeURIComponent(actor.providerMessageId)}/resources/${encodeURIComponent(attachment.providerFileId)}?type=${resourceType}`,
           {
             headers: {
               authorization: `Bearer ${token}`,
@@ -2052,7 +2057,13 @@ export function createFeishuBotProvider(deps: FeishuProviderDeps): BotProviderAd
           },
         );
         if (!response.ok) {
-          throw new Error(`Feishu attachment download failed: HTTP ${response.status}`);
+          // 修复原因：下载失败此前不落任何 HTTP 状态/trace-id，2026-10-05 复查中
+          // 首例失败无法归因；失败文本经既有 catch→warn 路径入日志（响应头可能
+          // 缺 x-tt-log-id，判空兜底；错误文本只追加不改动前缀，下游正则不受影响）。
+          const logId = response.headers.get("x-tt-log-id");
+          throw new Error(
+            `Feishu attachment download failed: HTTP ${response.status}${logId ? ` (logid: ${logId})` : ""}`,
+          );
         }
         return {
           attachment,

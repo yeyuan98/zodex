@@ -2306,14 +2306,15 @@ export function createBotsService(
     attachment: BotInboundAttachment;
     data: Uint8Array;
   }): Promise<BotInboundAttachment> {
-    // Alpha 6（§5.15，§7.32 owner 裁定）：无扩展名的**兜底命名**（微信
-    // weixin-attachment-N 等 provider 生成名）按内存字节的容器指纹补扩展名 +
-    // 修正兜底 mimeType；provider 给过文件名的原样不动（filenameIsFallback
-    // 门控，[ulw] 评审 MINOR-2 修复）；识别不出维持无扩展名（不比今天更糟）。
+    // Alpha 8（§5.15 修订，§7.33 owner 裁定）：sniff 门从「仅兜底命名」放宽为
+    // 「任意来源的无扩展名」。根因（rig 2026-10-05 §2i.1）：微信视频以 provider
+    // 给定的 base64url token 名（无扩展名）到达，旧的 fallback-only 门控跳过
+    // sniff，AI 只能手动复制改名再读。修复依据（§7.33）：无扩展名一律做
+    // content-positive-only sniff——字节正向命中已知容器（固定偏移的精确
+    // magic）才补扩展名 + 修正 mimeType；带扩展名的 provider 名永不改写
+    // （走 else 分支原样落盘）；识别不出维持无扩展名（不比今天更糟）。
     const sniffed =
-      extname(params.attachment.filename) === "" && params.attachment.filenameIsFallback === true
-        ? sniffAttachmentContainer(params.data)
-        : {};
+      extname(params.attachment.filename) === "" ? sniffAttachmentContainer(params.data) : {};
     const cachedFilename = sniffed.extension
       ? `${params.attachment.filename}${sniffed.extension}`
       : params.attachment.filename;
