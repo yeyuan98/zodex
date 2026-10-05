@@ -1,5 +1,36 @@
 # Changelog
 
+## [3.14.5-alpha.6](https://github.com/yeyuan98/zodex/compare/v3.14.5-alpha.5...v3.14.5-alpha.6) (2026-10-05)
+
+### Features
+
+* **bots:** alpha.6 入站附件 gate——>4 通知、per-file 单次大小检查、无名附件 sniff、缓存懒清理、TG/飞书读侧复检 ([f4276b9](https://github.com/yeyuan98/zodex/commit/f4276b9a5e683ba2ddacd70dbe527f02ed576ab1))
+  * §5.1 >4 通知：slice 保持前 4 个不变，但静默丢弃死亡——立即回复
+  * §5.2 per-file 超限（单次检查语义）：sizeBytes 已知超限 → 下载前 typed
+  * §5.15 无名附件容器 sniff：packages/shared 新增纯函数
+  * §5.3 缓存惰性修剪：无 daemon/timer；per-service 24h 内存门，
+  * §5.4 TG/飞书读侧复检：sendAttachment readFile 后、任何上传请求前
+
+
+### Chores
+
+* **bots:** [ulw] 评审收口——通知随失败送达 + sniff 门控回兜底名 + mp3 保留位校验 ([6c69271](https://github.com/yeyuan98/zodex/commit/6c692717fb6a2c7c11783129e53236eef1767226))
+  * MINOR-1 修复：prepare/下载/缓存中途 throw 与后续流程失败时，已累积的附件通知
+  * MINOR-2 修复：BotInboundAttachment 新增 filenameIsFallback（三家 provider 兜底
+  * NIT：删除失去唯一消费者的 attachmentTooLarge 文案 key；mp3 帧同步增加
+  * R8 fixture 补 filenameIsFallback 标记（断言不变，仅对齐 provider 契约）
+
+
+### Documentation
+
+* **specs:** alpha.6 入站附件 gate 语义 + 缓存生命周期 + 无名附件格式识别 spec 先行 ([0273433](https://github.com/yeyuan98/zodex/commit/0273433a4119009ad50581ab92af5cb54cac2ee2))
+  * specs/bot-file-delivery.md 新增「Inbound attachment gates (3.14.5 Alpha 6)」：
+  * per-file 超限拒绝单次检查语义（§7.32）：sizeBytes 已知超限→下载前 typed reject；
+  * 无名附件容器 sniff（sniffAttachmentContainer magic 表：mp4/mov/webm/mkv/m4a/
+  * 缓存惰性修剪：24h 内存门 piggyback cacheResolvedAttachment（不 await）+ 启动
+  * Phase C Alpha 5 第 4-5 项修订：TG/飞书 sendAttachment 读侧 ≤5MB 复检（对齐
+  * Alpha 0 入站 invariant 改指向新章节；Status 头标注 Alpha 6 spec'd 2026-10-04
+
 ## [3.14.5-alpha.5](https://github.com/yeyuan98/zodex/compare/v3.14.5-alpha.4...v3.14.5-alpha.5) (2026-10-04)
 
 ### Features
