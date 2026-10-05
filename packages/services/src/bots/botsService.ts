@@ -1,7 +1,17 @@
 /* eslint-disable max-lines -- Bots 服务仍复用原 RPC 文件名，先把鉴权、命令路由、ZCode Agent 桥接收口集中在同一服务内。 */
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  rmdir,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { IDisposable } from "@zcode/rpc";
@@ -59,6 +69,7 @@ import {
   type SelectionPrompt,
   type BotShareFileFailureReason,
   type BotShareFileResult,
+  sniffAttachmentContainer,
 } from "@zcode/shared";
 import type { IZCodeTaskService } from "../session/zcodeTaskService.js";
 import type { IBotWorkspaceFileService } from "./botWorkspaceFileService.js";
@@ -395,6 +406,16 @@ interface BotRemoteWorkspaceService {
 interface PreparedBotMessageContent {
   content: string;
   zcodeAttachments: ZCodePromptAttachment[];
+  /**
+   * Alpha 6（§5.1/§5.2）：随正常处理一起返回给用户的即时本地化通知
+   * （>4 附件通知 + 逐文件超限跳过通知）。
+   */
+  noticeReplies: BotOutboundMessage[];
+  /**
+   * Alpha 6（§5.2）边界：全部附件被拒且消息无文字 → 调用方必须整条拒绝
+   * （绝不创建空任务），直接返回 noticeReplies。
+   */
+  wholeRejection: boolean;
 }
 
 type BotAuthorizedCommand =
@@ -763,6 +784,10 @@ const BOT_TASK_META_RETRY_DELAYS_MS = [80, 160, 320] as const;
 const BOT_WORKSPACE_REFS_CACHE_TTL_MS = 5_000;
 const BOT_MAX_ATTACHMENTS_PER_MESSAGE = 4;
 const BOT_MAX_ATTACHMENT_SIZE_BYTES = 5 * 1024 * 1024;
+// Alpha 6（§5.3）：附件缓存惰性修剪——无 daemon、无 timer；24h 内存门内最多一趟，
+// 每趟删 mtime > 7 天的缓存文件并移除清空的目录。
+const BOT_ATTACHMENT_CACHE_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const BOT_ATTACHMENT_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const BOT_ATTACHMENT_DOWNLOAD_TIMEOUT_MS = 30_000;
 // Phase C Alpha 2（specs/bot-file-delivery.md Phase C §1）：远端文件分块读取的时限与预算。
 const BOT_REMOTE_FILE_CHUNK_DEADLINE_MS = 20_000;
@@ -1283,6 +1308,9 @@ export function createBotsService(
   deps: BotsServiceDeps,
 ): IBotsService & { disposeAll(): void; disposeAllAndWait(): Promise<void> } {
   const runStartupBackgroundTasks = deps.runStartupBackgroundTasks !== false;
+  // Alpha 6（§5.3）：附件缓存修剪的 24h 内存门——per-service（每个服务实例生命期内
+  // 首次触发即开门），无 timer/daemon。
+  let lastAttachmentCachePruneAtMs = 0;
   const repo = new BotsRepo();
   const bindCodes = new Map<string, BindCodeRecord>();
   const automationDeliveryWarningAtByKey = new Map<string, number>();
@@ -1713,9 +1741,8 @@ export function createBotsService(
 
   function formatAttachmentRejectedReason(error: unknown, locale: Locale | undefined): string {
     const message = error instanceof Error ? error.message : String(error);
-    if (/exceeds 5MB/i.test(message)) {
-      return msg(locale, "attachmentTooLarge");
-    }
+    // Alpha 6（§5.2）：`/exceeds 5MB/i` 正则耦合随整条 throw 消亡——超限现在是
+    // typed 逐文件结果（attachmentTooLargeSkipped 通知），不再经过本函数。
     if (
       /attachment download failed/i.test(message) ||
       /file download failed/i.test(message) ||
@@ -2176,24 +2203,133 @@ export function createBotsService(
     return fromUrl ? { attachment, data: fromUrl } : null;
   }
 
+  /**
+   * Alpha 6（§5.3）：惰性修剪——24h 内存门 + fire-and-forget（绝不 await，
+   * 入站延迟不得等待清理）；删除 bot-attachments 根下 mtime > 7 天的文件并
+   * 移除清空的目录；错误 warn+swallow（修剪失败绝不能让消息失败）。
+   */
+  function maybePruneAttachmentCache(): void {
+    const now = Date.now();
+    if (now - lastAttachmentCachePruneAtMs < BOT_ATTACHMENT_CACHE_PRUNE_INTERVAL_MS) {
+      return;
+    }
+    lastAttachmentCachePruneAtMs = now;
+    void pruneBotAttachmentCache().catch((error: unknown) => {
+      botsLogger.warn(
+        undefined,
+        `bot attachment cache prune failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+  }
+
+  async function pruneBotAttachmentCache(): Promise<void> {
+    const root = join(getAppConfigDir(), "bot-attachments");
+    const expireBefore = Date.now() - BOT_ATTACHMENT_CACHE_MAX_AGE_MS;
+    let entries;
+    try {
+      entries = await readdir(root, { withFileTypes: true });
+    } catch {
+      // 根目录不存在 = 无可清理；静默返回（首次使用前的正常状态）。
+      return;
+    }
+    for (const entry of entries) {
+      const entryPath = join(root, entry.name);
+      if (entry.isDirectory()) {
+        await pruneBotAttachmentCacheDir(entryPath, expireBefore);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      const info = await stat(entryPath).catch(() => null);
+      if (info && info.mtimeMs < expireBefore) {
+        await unlink(entryPath).catch(() => undefined);
+      }
+    }
+  }
+
+  /** 递归删除目录内过期文件；整目录清空后连同目录本身移除（§5.3 空目录清理）。 */
+  async function pruneBotAttachmentCacheDir(dirPath: string, expireBefore: number): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(dirPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const entryPath = join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        await pruneBotAttachmentCacheDir(entryPath, expireBefore);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      const info = await stat(entryPath).catch(() => null);
+      if (info && info.mtimeMs < expireBefore) {
+        await unlink(entryPath).catch(() => undefined);
+      }
+    }
+    // 目录清空（或本就为空）则移除；非空目录的 ENOTEMPTY/EPERM 忽略——留到下一趟。
+    await rmdir(dirPath).catch(() => undefined);
+  }
+
   async function cacheResolvedAttachment(params: {
     bot: BotConfig;
     message: BotInboundMessage;
     attachment: BotInboundAttachment;
     data: Uint8Array;
   }): Promise<BotInboundAttachment> {
+    // Alpha 6（§5.15，§7.32 owner 裁定）：无扩展名的**兜底命名**（微信
+    // weixin-attachment-N 等 provider 生成名）按内存字节的容器指纹补扩展名 +
+    // 修正兜底 mimeType；provider 给过文件名的原样不动（filenameIsFallback
+    // 门控，[ulw] 评审 MINOR-2 修复）；识别不出维持无扩展名（不比今天更糟）。
+    const sniffed =
+      extname(params.attachment.filename) === "" && params.attachment.filenameIsFallback === true
+        ? sniffAttachmentContainer(params.data)
+        : {};
+    const cachedFilename = sniffed.extension
+      ? `${params.attachment.filename}${sniffed.extension}`
+      : params.attachment.filename;
     const localPath = buildAttachmentCachePath({
       botId: params.bot.id,
       providerMessageId: params.message.actor.providerMessageId,
-      attachment: params.attachment,
+      attachment: { ...params.attachment, filename: cachedFilename },
     });
     await mkdir(dirname(localPath), { recursive: true });
     await writeFile(localPath, params.data);
+    // Alpha 6（§5.3）：写缓存后顺路修剪（24h 门 + fire-and-forget，绝不 await）。
+    maybePruneAttachmentCache();
     return {
       ...params.attachment,
+      ...(sniffed.extension
+        ? { filename: cachedFilename, mimeType: sniffed.mimeType ?? params.attachment.mimeType }
+        : {}),
       localPath,
       sizeBytes: params.data.byteLength,
     };
+  }
+
+  /**
+   * [ulw] 评审修复（MINOR-1）：附件通知（>4 提示 / 逐文件超限拒绝）随正常处理送达，
+   * 中途失败不得让其蒸发。throw 前把已累积通知挂在错误对象上；各 catch 漏斗用
+   * takeBotNoticeRepliesFrom 取出并前置到失败回复之前。
+   */
+  function tagBotNoticeRepliesOn(error: unknown, replies: BotOutboundMessage[]): void {
+    if (error instanceof Error && replies.length > 0) {
+      (error as Error & { botNoticeReplies?: BotOutboundMessage[] }).botNoticeReplies = replies;
+    }
+  }
+
+  function takeBotNoticeRepliesFrom(error: unknown): BotOutboundMessage[] {
+    if (error instanceof Error) {
+      const replies = (error as Error & { botNoticeReplies?: BotOutboundMessage[] })
+        .botNoticeReplies;
+      if (Array.isArray(replies)) {
+        return replies;
+      }
+    }
+    return [];
   }
 
   async function prepareBotMessageContent(
@@ -2201,26 +2337,93 @@ export function createBotsService(
     message: BotInboundMessage,
     locale: Locale | undefined,
   ): Promise<PreparedBotMessageContent> {
+    const totalAttachmentCount = message.attachments?.length ?? 0;
     const rawAttachments = (message.attachments ?? []).slice(0, BOT_MAX_ATTACHMENTS_PER_MESSAGE);
+    const skippedAttachmentCount = totalAttachmentCount - rawAttachments.length;
     const zcodeAttachments: ZCodePromptAttachment[] = [];
     const fileLines: string[] = [];
+    // Alpha 6（§5.1/§5.2）：即时本地化通知回复，随正常处理一起返回给用户。
+    const noticeReplies: BotOutboundMessage[] = [];
+    let rejectedAttachmentCount = 0;
+    if (skippedAttachmentCount > 0) {
+      // §5.1：>4 的静默 slice 死亡——slice 先于任何 per-attachment IO，用户与模型都必须知道。
+      noticeReplies.push(
+        createOutbound(
+          message.actor,
+          msg(locale, "attachmentCountLimited", {
+            max: BOT_MAX_ATTACHMENTS_PER_MESSAGE,
+            count: skippedAttachmentCount,
+          }),
+        ),
+      );
+      fileLines.push(
+        `提示：本条消息共携带 ${totalAttachmentCount} 个附件，仅处理前 ${BOT_MAX_ATTACHMENTS_PER_MESSAGE} 个，其余 ${skippedAttachmentCount} 个未接收（已跳过）。`,
+      );
+    }
     for (const rawAttachment of rawAttachments) {
-      const resolved = await resolveAttachmentBytes(bot, rawAttachment, message.actor);
+      // Alpha 6（§5.2 单次检查语义，§7.32 owner 裁定）：sizeBytes 已知且超限 →
+      // 下载前 typed 逐文件拒绝（零下载零缓存零附件）；三家 provider 的消息通知
+      // 均已自带 sizeBytes，此处只是看一眼已到手的信息。
+      if (
+        rawAttachment.sizeBytes !== undefined &&
+        rawAttachment.sizeBytes > BOT_MAX_ATTACHMENT_SIZE_BYTES
+      ) {
+        rejectedAttachmentCount += 1;
+        noticeReplies.push(
+          createOutbound(
+            message.actor,
+            msg(locale, "attachmentTooLargeSkipped", { filename: rawAttachment.filename }),
+          ),
+        );
+        fileLines.push(`附件：${rawAttachment.filename} 超过 5MB 上限，已跳过（未下载）。`);
+        continue;
+      }
+      // [ulw] 评审修复（MINOR-1）：下载中途 throw（weixin CDN HTTP 失败 / URL 超时）
+      // 不丢已累积的附件通知——挂在错误上随 throw 上抛，由各 catch 漏斗前置送达。
+      let resolved;
+      try {
+        resolved = await resolveAttachmentBytes(bot, rawAttachment, message.actor);
+      } catch (error) {
+        tagBotNoticeRepliesOn(error, noticeReplies);
+        throw error;
+      }
       if (!resolved) {
         fileLines.push(
           `附件：${rawAttachment.filename} (${rawAttachment.mimeType}, ${formatAttachmentSize(rawAttachment.sizeBytes)})，未能下载。`,
         );
         continue;
       }
-      if (resolved.data.byteLength > BOT_MAX_ATTACHMENT_SIZE_BYTES) {
-        throw new Error(`${resolved.attachment.filename} exceeds 5MB.`);
+      // §5.2：sizeBytes 元数据缺失时才保留下载后 byteLength 检查（fallback，逐文件拒绝，
+      // 不再整条 throw）；元数据已知且合法时绝不复查——每个文件只查一次。
+      if (
+        rawAttachment.sizeBytes === undefined &&
+        resolved.data.byteLength > BOT_MAX_ATTACHMENT_SIZE_BYTES
+      ) {
+        rejectedAttachmentCount += 1;
+        noticeReplies.push(
+          createOutbound(
+            message.actor,
+            msg(locale, "attachmentTooLargeSkipped", {
+              filename: resolved.attachment.filename,
+            }),
+          ),
+        );
+        fileLines.push(`附件：${resolved.attachment.filename} 超过 5MB 上限，已跳过。`);
+        continue;
       }
-      const cached = await cacheResolvedAttachment({
-        bot,
-        message,
-        attachment: resolved.attachment,
-        data: resolved.data,
-      });
+      // [ulw] 评审修复（MINOR-1）：缓存写盘失败同样不丢已累积通知（同上随错误携带）。
+      let cached;
+      try {
+        cached = await cacheResolvedAttachment({
+          bot,
+          message,
+          attachment: resolved.attachment,
+          data: resolved.data,
+        });
+      } catch (error) {
+        tagBotNoticeRepliesOn(error, noticeReplies);
+        throw error;
+      }
       const dataBase64 = Buffer.from(resolved.data).toString("base64");
       if (cached.kind === "image" || cached.kind === "audio") {
         zcodeAttachments.push({
@@ -2270,11 +2473,18 @@ export function createBotsService(
       );
     }
     const trimmed = message.text.trim();
+    // §5.2 唯一存活的整条拒绝边界：所有附件都被（超限）拒绝且消息无文字——
+    // 绝不创建空任务；R4 钉住该路径零缓存写入（per-file 拒绝先于任何兄弟附件缓存）。
+    const wholeRejection =
+      rawAttachments.length > 0 && rejectedAttachmentCount === rawAttachments.length && !trimmed;
     const baseContent =
-      trimmed || (rawAttachments.length > 0 ? msg(locale, "attachmentOnlyPrompt") : "");
+      trimmed ||
+      (rawAttachments.length > 0 && !wholeRejection ? msg(locale, "attachmentOnlyPrompt") : "");
     return {
       content: [baseContent, ...fileLines].filter(Boolean).join("\n\n"),
       zcodeAttachments,
+      noticeReplies,
+      wholeRejection,
     };
   }
 
@@ -4225,6 +4435,9 @@ export function createBotsService(
           `provider callback failed provider=${provider} bot=${inboundMessage.botId} user=${inboundMessage.actor.providerUserId}: ${message}`,
         );
         outbound = [
+          // [ulw] 评审修复（MINOR-1）：prepare/后续流程中途失败时已累积的附件通知
+          // 前置送达（>4 提示与逐文件拒绝不因半途失败蒸发），失败回复本身不变。
+          ...takeBotNoticeRepliesFrom(error),
           createOutbound(
             inboundMessage.actor,
             isSessionExpiredError(error)
@@ -6745,7 +6958,9 @@ export function createBotsService(
     try {
       preparedMessage = await prepareBotMessageContent(auth.bot, message, auth.locale);
     } catch (error) {
+      // [ulw] 评审修复（MINOR-1）：prepare 中途失败时，已累积的附件通知前置送达。
       return [
+        ...takeBotNoticeRepliesFrom(error),
         createOutbound(
           message.actor,
           msg(auth.locale, "attachmentRejected", {
@@ -6753,6 +6968,11 @@ export function createBotsService(
           }),
         ),
       ];
+    }
+    // Alpha 6（§5.2）：全部附件被拒且无文字 → 整条拒绝（逐个点名的通知即整条拒绝
+    // 回复），绝不创建空任务，也不进入任何 prompt 发送路径。
+    if (preparedMessage.wholeRejection) {
+      return preparedMessage.noticeReplies;
     }
     if (auth.context.mode === "draft" || !auth.context.activeTaskId) {
       const draftOptions =
@@ -6771,7 +6991,9 @@ export function createBotsService(
         // 该 throw 经通用 catch 变成失败通知，曾驱动无限重投死锁。改为与其他用户可见回复
         // 相同的出站链路返回本地化指引；无有效模型时无法启动，不创建 task（保持不变）。
         // 文案区分“从未选择”（无 preferred 可解析）与“已保存但失效”（selectionIssue）。
+        // Alpha 6（§5.1/§5.2）：附件通知仍须随该指引一起送达（通知不替代正常处理）。
         return [
+          ...preparedMessage.noticeReplies,
           createOutbound(
             message.actor,
             msg(
@@ -6821,6 +7043,8 @@ export function createBotsService(
             workspaceIdentity: auth.context.workspaceIdentity,
           })
           .catch(() => undefined);
+        // [ulw] 评审修复（MINOR-1）：附件通知随错误携带，由回调层 catch 漏斗前置送达。
+        tagBotNoticeRepliesOn(error, preparedMessage.noticeReplies);
         throw error;
       }
       const context = {
@@ -6884,7 +7108,8 @@ export function createBotsService(
         resolveAutomationBotDeliveryTarget(message.actor),
         submissionDraftOptions.modelSelection,
       );
-      return [];
+      // Alpha 6（§5.1/§5.2）：>4 通知与逐文件超限通知随正常处理一起返回（不替代它）。
+      return preparedMessage.noticeReplies;
     }
     const zcodeTaskService = await resolveZCodeTaskServiceForContext(auth.context);
     await zcodeTaskService.resumeTask({
@@ -6902,7 +7127,11 @@ export function createBotsService(
       : null;
     const effectiveSelection = selectionView?.effectiveSelection;
     if (!effectiveSelection || selectionView?.selectionIssue) {
-      throw new Error(msg(auth.locale, "sessionModelUnavailable"));
+      // [ulw] 评审修复（MINOR-1）：附件通知随错误携带，由回调层 catch 漏斗前置送达
+      //（throw 语义本身不变——仍按 §7.12 的 consumed/abort 分类处理）。
+      const error = new Error(msg(auth.locale, "sessionModelUnavailable"));
+      tagBotNoticeRepliesOn(error, preparedMessage.noticeReplies);
+      throw error;
     }
     await broadcastTaskListChange(auth.context, auth.context.activeTaskId, "resumed");
     runningTasks.add(auth.context.activeTaskId);
@@ -6939,7 +7168,8 @@ export function createBotsService(
       resolveAutomationBotDeliveryTarget(message.actor),
       effectiveSelection,
     );
-    return [];
+    // Alpha 6（§5.1/§5.2）：>4 通知与逐文件超限通知随正常处理一起返回（不替代它）。
+    return preparedMessage.noticeReplies;
   }
 
   async function handleTaskList(message: BotInboundMessage): Promise<BotOutboundMessage[]> {
@@ -8454,6 +8684,9 @@ export function createBotsService(
     void telegramRuntime.refresh();
     void weixinRuntime.refresh();
     void feishuRuntime.refresh();
+    // Alpha 6（§5.3）：启动单趟修剪（复用同一 24h 门与 fire-and-forget 形态；
+    // harness 测试关闭 startup tasks 时该趟不跑，由 cacheResolvedAttachment piggyback 覆盖）。
+    maybePruneAttachmentCache();
     void ensureBotStorageMigrated().catch((error: unknown) => {
       // 首次读取失败必须可见，不能产生未处理 rejection；交互入口仍直接收到该错误。
       botsLogger.error(

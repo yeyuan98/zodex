@@ -421,3 +421,25 @@ test("feishu sendAttachment：凭据缺失 → 显式拒绝且不发起任何请
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("feishu sendAttachment：>5MB 本地文件读侧复检 → 报 5MB 上限且零上传/发送请求", async () => {
+  // specs/bot-file-delivery.md「Inbound attachment gates (3.14.5 Alpha 6)」§5.4
+  // （计划 §5.4）：TG/飞书 sendAttachment 对齐 weixin 的读侧 ≤5MB 复检。红点：
+  // 今天 readFile 后照常 upload-then-send（stub 全成功 → run.error 为空），
+  // 超限文件会被硬传，报错里不会出现 5MB 字样。
+  const run = await runSendAttachment({
+    appId: "cli_7000000000000001",
+    filename: "big.bin",
+    mimeType: "application/octet-stream",
+    kind: "file",
+    bytes: Buffer.alloc(6 * 1024 * 1024, 0x61),
+  });
+  assert.ok(run.error, ">5MB 文件必须在读侧被拒绝（今天：stub 全成功、无任何抛错）");
+  assert.match(run.error.message, /5MB/u);
+  // 超限必须先于任何上传/发送请求（tenant_access_token 先行读取允许存在）。
+  assert.equal(
+    run.calls.filter((call) => call.url.includes("/open-apis/im/v1/")).length,
+    0,
+    "超限必须在任何 im/v1 上传或发送请求之前拒绝",
+  );
+});

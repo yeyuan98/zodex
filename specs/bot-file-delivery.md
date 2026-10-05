@@ -21,6 +21,10 @@ subfolder paths) after Alpha 6 routed bot traffic through the app proxy.
 Alpha 6 (bot provider network/proxy + observability + cursor persistence) **shipped** in
 `3.14.4-alpha.6` (PR #11) — owner-rig validated 2026-10-02; see
 specs/bot-provider-network.md. **Train complete → official `3.14.4`.**
+Inbound attachment UX (3.14.5 Alpha 6: >4-attachment notice, per-file oversize
+single-check rejection, unnamed-attachment container sniffing, attachment-cache lazy
+prune, Telegram/Feishu read-side size re-check) **spec'd 2026-10-04** — see the
+"Inbound attachment gates (3.14.5 Alpha 6)" section below; implementation pending.
 Full-feature playbook: ../ZCode-handoff.md.
 Owners: bots service (`packages/services/src/bots/botsService.ts`) — command admission, path
 policy, size gates, `taskDeliveryRegistry` + `deliverWorkspaceFile` single writer + tool-source
@@ -563,7 +567,12 @@ senders and widens channel qualification; the single writer above them does not 
    timeout — the helper default (15s) is too low for 5MB uploads, and the Telegram bot
    API limit (50MB) sits far above our 5MB cap. The chat target is derived exactly like
    the existing `sendMessage` path (no new identity plumbing). Documents only — no
-   recompression, no photo special-casing.
+   recompression, no photo special-casing. **3.14.5 Alpha 6 amendment (§5.4):** after
+   the `readFile` and before the upload request, `bytes.length` over the 5MB cap is
+   rejected with an error naming the limit (parity with the weixin adapter's read-side
+   re-check, same `${filename} exceeds 5MB.` shape) — a file that grew between the
+   service-side stat and the adapter read must fail honestly, never upload oversized.
+   See "Inbound attachment gates (3.14.5 Alpha 6)" item 5.
 5. **Feishu/Lark adapter `sendAttachment`: upload-then-send, per attachment kind.**
    `readTenantAccessToken` (existing) gates both upload routes. Kind "image" → upload
    `im/v1/images` (inline render; 10MB API limit) then send `msg_type: "image"`. Kinds
@@ -575,7 +584,10 @@ senders and widens channel qualification; the single writer above them does not 
    `createFeishuMessageError` (code/msg/log_id preserved). Upload calls carry explicit
    60s timeouts (same rationale as Telegram). `sendAttachment` must NOT interact with
    the streaming reply card machinery — the media arrives as its own separate message
-   bubble.
+   bubble. **3.14.5 Alpha 6 amendment (§5.4):** the same read-side ≤5MB re-check as
+   Telegram item 4 — after `readFile`, before ANY upload request, reject with an error
+   naming the limit (parity with weixin). See "Inbound attachment gates (3.14.5 Alpha 6)"
+   item 5.
 6. **`/help` finally lists `/file` (deferred since Alpha 0).** "file" joins
    `BOT_MENU_COMMAND_ORDER`; `helpFile` copy lands in BOTH the zh and en catalogs;
    `telegramCommandNames`/`telegramCommandDescriptions` gain entries so Telegram's
@@ -697,8 +709,10 @@ Windows desktop path in the prompt text and every tool read failed.
   render on desktop transcript AND phone web replay before any strip lands; do
   not guess).
 - New kinds never carry `dataBase64`.
-- The 5MB / 4-attachments-per-message inbound gates are unchanged in this alpha
-  (A2 in alpha.1 revisits per-file rejection UX).
+- The 5MB / 4-attachments-per-message inbound gates were unchanged in this alpha. The
+  per-file rejection UX, the >4-attachment notice, unnamed-attachment container
+  sniffing, and the attachment-cache lifecycle land in 3.14.5 Alpha 6 — see
+  "Inbound attachment gates (3.14.5 Alpha 6)" below.
 - Kind mapping is faithful: inbound kind is never widened; only the pdf mime
   derivation narrows `file` → `pdf`.
 
@@ -767,3 +781,156 @@ Windows desktop path in the prompt text and every tool read failed.
    `unhandledRejection` capture stays empty).
 3. Rig checklist: slow remote `/file` + immediate `/stop` responds instantly;
    local `/file` regression (ack then result).
+
+## Inbound attachment gates (3.14.5 Alpha 6)
+
+Spec'd 2026-10-04 from ../ZCode-alpha6-plan.md Part 1 items 1-5 + Appendix B
+(§5.1/§5.2/§5.15/§5.3/§5.4) and the ../ZCode-handoff.md §7.32 owner rulings
+(single-check semantics; sniffing instead of hardcoded per-kind extensions).
+Targets `3.14.5-alpha.6`. Red tests written first (`packages/services/test/
+botInboundAttachments.test.ts`, `botFileDeliveryTelegram.test.ts`,
+`botFileDeliveryFeishu.test.ts`); this section is the contract they pin.
+
+### Behavior
+
+1. **>4-attachment gate becomes visible (§5.1).** A message carrying more than
+   `BOT_MAX_ATTACHMENTS_PER_MESSAGE` (4) attachments still processes exactly the
+   first 4 (slice unchanged), but the silent drop dies. The user immediately
+   receives a localized notice — new key `attachmentCountLimited` (zh
+   「一条消息最多处理前 {max} 个附件，已跳过其余 {count} 个附件。」 / en
+   "At most the first {max} attachments in a message are processed; the remaining
+   {count} were skipped.") — as an immediate reply from the inbound handling,
+   alongside (not instead of) normal message processing. The model-facing prompt
+   gains one line stating that the message carried {total} attachments, only the
+   first {max} were received, and the remaining {skipped} were skipped. Attachments
+   beyond the first 4 are never resolved or downloaded (the slice runs before any
+   per-attachment IO).
+2. **Per-file oversize rejection with SINGLE-CHECK semantics (§5.2, §7.32).** One
+   oversized file no longer rejects the whole message. Inside the per-attachment
+   loop of `prepareBotMessageContent`, BEFORE resolution/download:
+   - `sizeBytes` known AND over the 5MB cap → typed per-file reject WITHOUT
+     downloading (all three providers already parse sizeBytes into
+     `BotInboundAttachment.sizeBytes` on the message notification itself — zero
+     extra requests);
+   - `sizeBytes` known AND within the cap → download, cache, and NO post-download
+     recheck — each file is size-checked exactly once, never before AND after;
+   - `sizeBytes` absent → download and keep the existing post-download
+     `byteLength` check as the per-file fallback.
+
+   A rejected file produces (a) an individual localized chat reply naming the file
+   — new key `attachmentTooLargeSkipped` (zh
+   「附件 {filename} 超过 5MB 上限，已跳过。」 / en "Attachment {filename} exceeds
+   the 5MB limit and was skipped.") — and (b) a prompt line naming the file and
+   the 5MB limit. Sibling attachments
+   and the message text proceed untouched. Whole-message rejection survives at
+   exactly one edge: ALL attachments rejected AND no message text → reject the
+   whole message (never create an empty task); the rejection reply names every
+   rejected file individually, and ZERO cache files are written for that message.
+   The brittle `/exceeds 5MB/i` error-prose regex coupling
+   (`formatAttachmentRejectedReason`) dies with the typed per-file result.
+
+3. **Unnamed-attachment container sniffing (§5.15, §7.32: sniff, never hardcoded
+   per-kind extensions).** At cache time (`cacheResolvedAttachment`), when the
+   attachment filename lacks an extension (weixin's `weixin-attachment-N` fallback
+   naming; provider-supplied filenames are never rewritten; the image `.jpg`
+   fallback stays as-is), detect the container from the already-in-memory bytes'
+   magic fingerprint (zero extra reads), then (a) append the correct extension to
+   the cached filename and (b) correct the fallback mimeType to the real container
+   type. New pure helper `sniffAttachmentContainer(data)` in packages/shared.
+   Magic table:
+
+   | container | fingerprint                                  | extension | mimeType           |
+   | --------- | -------------------------------------------- | --------- | ------------------ |
+   | mp4       | `ftyp` at offset 4, brand ≠ qt               | `.mp4`    | `video/mp4`        |
+   | mov       | `ftyp` at offset 4, brand `qt  `             | `.mov`    | `video/quicktime`  |
+   | webm      | EBML header (`1A 45 DF A3`) + DocType `webm` | `.webm`   | `video/webm`       |
+   | mkv       | EBML header + DocType `matroska`             | `.mkv`    | `video/x-matroska` |
+   | m4a       | `ftyp` at offset 4, brand `M4A `             | `.m4a`    | `audio/mp4`        |
+   | mp3       | `ID3` at offset 0 or MPEG audio frame sync   | `.mp3`    | `audio/mpeg`       |
+   | wav       | `RIFF` at offset 0 + `WAVE` at offset 8      | `.wav`    | `audio/wav`        |
+   | ogg       | `OggS` at offset 0                           | `.ogg`    | `audio/ogg`        |
+
+   Unknown fingerprint → keep the extension-less filename and the existing
+   fallback mimeType (never worse than today).
+
+4. **Attachment cache lazy prune — NO daemon (§5.3).** The
+   `~/.zcode/v2/bot-attachments` cache previously only ever grew. Alpha 6 bounds
+   it: one in-memory 24h gate; the prune piggybacks on
+   `cacheResolvedAttachment` (fire-and-forget, NOT awaited — inbound latency must
+   never wait on cleanup) and also runs one pass at service start. Each pass
+   deletes files with mtime older than 7 days anywhere under the bot-attachments
+   root and removes directories left empty by the deletion. Errors warn+swallow
+   (a failed prune must never fail the message). Goal is bounded growth, not
+   strict lifespan: replaying an old session may honestly find attachment files
+   gone (accepted trade-off; surfaced as missing files, never fabricated).
+5. **Telegram + Feishu read-side ≤5MB re-check (§5.4; amends Phase C Alpha 5
+   items 4-5 above).** Both adapters' `sendAttachment` read the file with a bare
+   `readFile` right before upload while the weixin adapter re-checks the cap at
+   the same point (`uploadAndSendWeixinAttachment`). Parity fix: after reading,
+   both adapters reject when the byte length is over the 5MB cap with an error
+   naming the limit (weixin's `${filename} exceeds 5MB.` wording is the
+   precedent), BEFORE any upload request; the failure surfaces through today's
+   send-failed detail path.
+
+### Invariants
+
+- Single-check: a file whose `sizeBytes` metadata is present is size-adjudicated
+  exactly once — metadata is authoritative when known; the post-download
+  `byteLength` check runs ONLY when metadata is absent. No before-AND-after
+  double check (§7.32 owner ruling).
+- Per-file gates never widen exposure: a rejected attachment is never downloaded,
+  never cached, never attached; skipped (>4) attachments are never downloaded.
+- Whole-message rejection happens only when every attachment is rejected AND the
+  message has no text; in that case zero cache files are written and no task or
+  prompt is created (never an empty task).
+- Provider-supplied filenames are never rewritten by sniffing; sniffing applies
+  only to extension-less fallback names; the image `.jpg` fallback behavior is
+  unchanged (verified behavior, kept).
+- The prune is best-effort background hygiene: no timers, no daemon process, no
+  awaited IO on the inbound path; the deletion set is mtime > 7 days under
+  bot-attachments only (never other config data).
+- The outbound read-side re-check adds error copy only; upload/send sequencing is
+  unchanged.
+
+### Acceptance scenarios
+
+Red-first (each fails on `3.14.5-alpha.5` for the stated reason; all in
+packages/services/test):
+
+1. R1 `botInboundAttachments.test.ts` — message with 6 provider-file attachments +
+   text: immediate `attachmentCountLimited` localized reply (today: no reply);
+   `downloadAttachment` invoked exactly 4 times (extras never resolved); prompt
+   attachments = the first 4; prompt line mentions the skipped attachments
+   (today: silent).
+2. R2 oversize+valid mix + text: (a) metadata path — oversize via known sizeBytes
+   (6MB) with small adapter-returned bytes + one valid attachment: prompt carries
+   ONLY the valid attachment and an individual `attachmentTooLargeSkipped` reply
+   names the file (today: the metadata is ignored, the oversize file is cached and
+   attached); (b) fallback path — oversize via >5MB inline bytes with no sizeBytes
+   - one valid attachment: the valid attachment still reaches `sendPrompt` with an
+     individual reject notice (today: whole message throws, nothing reaches the
+     prompt).
+3. R3 all-rejected + no text: whole-message rejection reply names EVERY rejected
+   file individually; `sendPrompt` never called (today: only the first throwing
+   file is named).
+4. R4 all-rejected ⇒ ZERO cache files under bot-attachments (today: the
+   metadata-oversize sibling is cached before the byteLength-oversize file
+   throws — partial cache writes happen).
+5. R5 metadata-known pre-download reject: attachment with sizeBytes > 5MB → the
+   provider `downloadAttachment` path is never invoked and the reject notice is
+   immediate (today: it downloads).
+6. R6 prune: pre-aged files (mtime 8 days) + a fresh file under the harness
+   bot-attachments root; trigger one inbound attachment message (the
+   cacheResolvedAttachment piggyback seam — the harness disables startup
+   background tasks); aged files deleted, emptied dirs removed, fresh kept
+   (today: nothing is ever deleted).
+7. R7 `botFileDeliveryTelegram.test.ts` + `botFileDeliveryFeishu.test.ts` —
+   `sendAttachment` with a >5MB local file throws an error naming the 5MB limit
+   before any upload request (today: no throw, the oversized file is uploaded).
+8. R8 sniffing: unnamed weixin-kind attachment with mp4 bytes (ftyp + non-qt
+   brand) → cached filename ends `.mp4`, mimeType `video/mp4`; mov bytes (qt
+   brand) → `.mov` + `video/quicktime`; EBML/webm bytes → `.webm`; RIFF/WAVE
+   bytes → `.wav`; garbage bytes → filename stays extension-less (today: all stay
+   extension-less).
+9. Regression: the existing inbound attachment suite (A1/A3a) and the outbound
+   zero-drift fixtures stay green.

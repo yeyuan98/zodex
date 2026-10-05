@@ -28,6 +28,9 @@ const TELEGRAM_ATTACHMENT_DOWNLOAD_TIMEOUT_MS = 30_000;
 // 出站文档上传（5MB 上限）耗时高于普通文本请求；15s 默认值不够，60s 仍远低于
 // Telegram sendDocument 的 50MB 文档上限对应的传输预算（specs/bot-file-delivery.md Alpha 5）。
 const TELEGRAM_SEND_ATTACHMENT_TIMEOUT_MS = 60_000;
+// 与服务层 BOT_MAX_ATTACHMENT_SIZE_BYTES 对齐；provider 侧读取时兜底校验
+// （specs/bot-file-delivery.md「Inbound attachment gates (3.14.5 Alpha 6)」§5.4）。
+const TELEGRAM_OUTBOUND_MAX_BYTES = 5 * 1024 * 1024;
 
 interface TelegramGetMeResponse {
   ok?: boolean;
@@ -156,12 +159,15 @@ function readTelegramFileAttachment(
   if (!providerFileId) {
     return null;
   }
-  const filename =
-    typeof value.file_name === "string" && value.file_name.trim() ? value.file_name : fallbackName;
+  // §5.15（§7.32）：兜底命名打标——容器 sniff 只允许改写兜底名，provider 给过的名不动。
+  const providedFilename =
+    typeof value.file_name === "string" && value.file_name.trim() ? value.file_name : null;
+  const filename = providedFilename ?? fallbackName;
   return {
     id: providerFileId,
     kind,
     filename,
+    ...(providedFilename ? {} : { filenameIsFallback: true }),
     mimeType:
       typeof value.mime_type === "string" && value.mime_type.trim()
         ? value.mime_type
@@ -481,6 +487,11 @@ export function createTelegramBotProvider(deps: TelegramProviderDeps): BotProvid
       // 出站文件投递（specs/bot-file-delivery.md Phase C Alpha 5）：只走 sendDocument 文档通道，
       // 不做图片重压缩、不走 photo 特例；服务层 5MB 上限远低于 Telegram 50MB 文档限制。
       const bytes = await readFile(attachment.localPath);
+      if (bytes.length > TELEGRAM_OUTBOUND_MAX_BYTES) {
+        // Alpha 6（§5.4）：服务层 stat 与 provider readFile 之间存在增长窗口，
+        // 对齐 weixin 读侧复检——读取后、任何上传请求前如实拒绝，绝不硬传超限文件。
+        throw new Error(`${attachment.filename} exceeds 5MB.`);
+      }
       // 目标推导与 send/sendMessage 完全一致：chat_id 直接取 message.providerUserId，
       // 接收方真值由服务层 taskDeliveryRegistry 解析，adapter 不新增身份管道。
       // content-type 不能手工设置：undici FormData 会自带 multipart boundary。

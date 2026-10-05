@@ -86,6 +86,9 @@ const FEISHU_ATTACHMENT_DOWNLOAD_TIMEOUT_MS = 30_000;
 // 60s 仍远低于飞书 im/v1/images 的 10MB 与 im/v1/files 的 30MB API 限制
 // （specs/bot-file-delivery.md Phase C Alpha 5）。
 const FEISHU_SEND_ATTACHMENT_TIMEOUT_MS = 60_000;
+// 与服务层 BOT_MAX_ATTACHMENT_SIZE_BYTES 对齐；provider 侧读取时兜底校验
+// （specs/bot-file-delivery.md「Inbound attachment gates (3.14.5 Alpha 6)」§5.4）。
+const FEISHU_OUTBOUND_MAX_BYTES = 5 * 1024 * 1024;
 
 interface FeishuAppInfoResponse {
   code?: number;
@@ -627,10 +630,9 @@ function readFeishuAttachment(
     return null;
   }
   const kind = inferFeishuAttachmentKind(msgType);
-  const filename =
-    readString(content, "file_name") ||
-    readString(content, "filename") ||
-    `${msgType}-${providerFileId.slice(0, 8)}`;
+  // §5.15（§7.32）：兜底命名打标——容器 sniff 只允许改写兜底名，provider 给过的名不动。
+  const providedFilename = readString(content, "file_name") || readString(content, "filename");
+  const filename = providedFilename ?? `${msgType}-${providerFileId.slice(0, 8)}`;
   const mimeType =
     readString(content, "mime_type") ||
     readString(content, "mimeType") ||
@@ -640,6 +642,7 @@ function readFeishuAttachment(
     kind,
     filename,
     mimeType,
+    ...(!providedFilename ? { filenameIsFallback: true } : {}),
     ...(typeof content.size === "number" ? { sizeBytes: content.size } : {}),
     providerFileId,
   };
@@ -1867,6 +1870,11 @@ export function createFeishuBotProvider(deps: FeishuProviderDeps): BotProviderAd
         throw new Error("Feishu app credentials are missing.");
       }
       const bytes = await readFile(attachment.localPath);
+      if (bytes.length > FEISHU_OUTBOUND_MAX_BYTES) {
+        // Alpha 6（§5.4）：服务层 stat 与 provider readFile 之间存在增长窗口，
+        // 对齐 weixin 读侧复检——读取后、任何 im/v1 上传/发送请求前如实拒绝。
+        throw new Error(`${attachment.filename} exceeds 5MB.`);
+      }
       // 目标推导与 send 完全一致：receive_id = message.providerUserId，
       // 接收方真值由服务层 taskDeliveryRegistry 解析，adapter 不新增身份管道。
       const receiveId = message.providerUserId;
