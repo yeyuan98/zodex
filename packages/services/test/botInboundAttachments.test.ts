@@ -391,7 +391,12 @@ test("A1 入站 file/pdf/video 附件成为 prompt attachments（localPath + kin
   }
 });
 
-test("A1 回归：image/audio prompt attachments 行为逐字节不变（dataBase64 + localPath 保留）", async () => {
+test("A1 回归：image/audio prompt attachments 停发 dataBase64（§5.11 Alpha 7 翻转），localPath 照常携带", async () => {
+  // §5.11（R3 rig PASS 2026-10-04 门控，handoff §2h → §7.31 GO）：owner 已实证
+  // 手机微信预览 + 桌面 transcript 均可按 localPath 路径渲染——image/audio 不再
+  // 把整份内容以 base64 复制进 prompt（同一数据传两遍）。这是 spec invariant
+  // 翻转（specs/bot-file-delivery.md「Inbound remote workspaces」§5.11 amendment），
+  // 不是断言弱化；本用例在今天（alpha.6）代码上必红：dataBase64 仍在。
   const harness = await createHarness();
   try {
     const imageData = Buffer.from([1, 2, 3, 4]);
@@ -410,15 +415,24 @@ test("A1 回归：image/audio prompt attachments 行为逐字节不变（dataBas
     assert.ok(imageAttachment);
     assert.equal(imageAttachment.kind, "image");
     assert.equal(imageAttachment.mimeType, "image/png");
-    assert.equal(imageAttachment.dataBase64, imageData.toString("base64"));
-    assert.ok(imageAttachment.localPath);
+    // §5.11 翻转点：dataBase64 必须缺席；渲染依据 localPath（缓存文件刚写入）。
+    assert.equal(
+      "dataBase64" in imageAttachment,
+      false,
+      "image 附件不得再携带 dataBase64（§5.11 Alpha 7 strip）",
+    );
+    assert.ok(imageAttachment.localPath, "image 附件必须携带缓存 localPath");
 
     const audioAttachment = capture.attachments.find((item) => item.filename === "voice.mp3");
     assert.ok(audioAttachment);
     assert.equal(audioAttachment.kind, "audio");
     assert.equal(audioAttachment.mimeType, "audio/mpeg");
-    assert.equal(audioAttachment.dataBase64, audioData.toString("base64"));
-    assert.ok(audioAttachment.localPath);
+    assert.equal(
+      "dataBase64" in audioAttachment,
+      false,
+      "audio 附件不得再携带 dataBase64（§5.11 Alpha 7 strip）",
+    );
+    assert.ok(audioAttachment.localPath, "audio 附件必须携带缓存 localPath");
 
     assert.match(capture.content, /已作为图片输入提供/u);
     assert.match(capture.content, /已作为音频输入提供/u);
@@ -1071,6 +1085,81 @@ test("A6 R8 sniff 守护：乱码字节 → 维持无扩展名（识别不出不
     );
     assert.equal(attachment.filename, "weixin-attachment-5");
     assert.equal(attachment.filename.includes("."), false, "不得为未知容器捏造扩展名");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+// ---- Alpha 7（specs/bot-file-delivery.md「Outbound attachment naming & inline kinds」§5.6）：
+// 共享字节预算文件名 helper——红测先行，W3 实现后转绿。计划依据：
+// ../ZCode-alpha6-plan.md Part 1 item 7 + 附录 C §5.6。
+
+test("A7 §5.6 超长 CJK 文件名：缓存文件名按 UTF-8 字节预算截断、扩展名保留、基名不劈不乱", async () => {
+  // 红点：今天 sanitizeAttachmentFilename 按【字符】slice(0,120)——70 个 CJK 字符
+  // + .pdf 共 74 字符（≤120 字符，不触发截断、写盘不超文件系统单段上限），但
+  // 74 字符 = 214 UTF-8 字节，远超 120 字节预算（Windows MAX_PATH 余量被击穿）。
+  // 经核实：Array.from 按码点切片不会劈开多字节字符——今天的缺陷是字符 vs
+  // 字节口径，不是乱码。新契约（spec §5.6）：缓存文件名段 ≤120 UTF-8 字节、
+  // 扩展名在预算内保留、CJK 基名起点原样。
+  const harness = await createHarness();
+  try {
+    const longCjkFilename = `${"报".repeat(70)}.pdf`;
+    await harness.triggerMessage({
+      text: "看下这份长名文件",
+      attachments: [
+        inboundAttachment("file", longCjkFilename, "application/pdf", Buffer.from("x")),
+      ],
+    });
+    const capture = lastSendPrompt(harness);
+    const attachment = capture.attachments?.[0];
+    assert.ok(attachment?.localPath, "必须已缓存并携带 localPath");
+    // 缓存文件名 = <16hex digest>-<预算化文件名段>；预算只作用于文件名段。
+    const cachedBasename = basename(attachment.localPath);
+    const sanitizedSegment = cachedBasename.slice(17);
+    assert.ok(
+      Buffer.byteLength(sanitizedSegment, "utf8") <= 120,
+      `缓存文件名段必须 ≤120 UTF-8 字节（今天 70 个 CJK 字符 + .pdf = 214 字节，字符口径不设防）：${Buffer.byteLength(sanitizedSegment, "utf8")} 字节`,
+    );
+    assert.ok(sanitizedSegment.endsWith(".pdf"), `字节预算截断必须保留扩展名：${sanitizedSegment}`);
+    // 基名不劈不乱：起点 CJK 内容保留，且无 U+FFFD 替换符（乱码守护）。
+    assert.ok(sanitizedSegment.startsWith("报"), `CJK 基名必须原样保留：${sanitizedSegment}`);
+    assert.ok(!sanitizedSegment.includes("\uFFFD"), "不得出现替换符（乱码）");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("A7 §5.6 超 120 字符 CJK 文件名不再拖垮整条消息（今天字符切片产出 360 字节路径，缓存写盘 ENAMETOOLONG → 红）", async () => {
+  // 红点（同根缺陷的极端形态）：125 个 CJK 字符 + .pdf = 129 字符 → 字符口径
+  // slice(0,120) 保留 120 个 CJK 字符 = 360 UTF-8 字节，超过常见文件系统单段
+  // 255 字节上限 → 今天缓存写盘抛错、整条消息失败（sendPrompt 从不发生）。
+  // 新契约：字节预算（120B）截断后照常缓存、照常进 prompt，扩展名保留。
+  const harness = await createHarness();
+  try {
+    const hugeCjkFilename = `${"报".repeat(125)}.pdf`;
+    const replies = await harness.triggerMessage({
+      text: "处理这份超大名文件",
+      attachments: [
+        inboundAttachment("file", hugeCjkFilename, "application/pdf", Buffer.from("x")),
+      ],
+    });
+    const capture = harness.sendPromptCalls.at(-1);
+    assert.ok(
+      capture,
+      `超长 CJK 文件名必须不再拖垮整条消息（今天 120 个 CJK 字符 = 360 字节缓存路径写盘失败，回复：${replies.map((reply) => reply.text).join(" | ")}）`,
+    );
+    const attachment = capture.attachments?.[0];
+    assert.ok(attachment?.localPath, "必须已缓存并携带 localPath");
+    const sanitizedSegment = basename(attachment.localPath).slice(17);
+    assert.ok(
+      Buffer.byteLength(sanitizedSegment, "utf8") <= 120,
+      `预算化文件名段 ≤120 UTF-8 字节：${Buffer.byteLength(sanitizedSegment, "utf8")} 字节`,
+    );
+    assert.ok(
+      sanitizedSegment.endsWith(".pdf"),
+      `预算截断必须保留扩展名（今天字符切片把扩展名整个切掉）：${sanitizedSegment}`,
+    );
+    assert.ok(sanitizedSegment.startsWith("报"), `CJK 基名保留：${sanitizedSegment}`);
   } finally {
     await harness.dispose();
   }

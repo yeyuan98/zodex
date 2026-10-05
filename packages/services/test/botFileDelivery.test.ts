@@ -7,8 +7,10 @@ import {
   buildWeixinUploadRequestBody,
   encodeWeixinMediaAesKey,
   encryptWeixinCdnMediaForTest,
+  getWeixinUpdates,
   weixinCdnPaddedSize,
 } from "../src/bots/providers/weixinProvider.js";
+import { createBotProviderRequester } from "../src/bots/providers/providerRequest.js";
 import { parseBotCommand } from "../src/bots/commandParser.js";
 import { formatBotToolCallSummaryLine } from "../src/bots/replyFormatter.js";
 import {
@@ -100,6 +102,59 @@ test("inferOutboundAttachmentKind 按扩展名路由 image/video/file", () => {
   assert.equal(inferOutboundAttachmentKind("d.mov"), "video");
   assert.equal(inferOutboundAttachmentKind("report.pdf"), "file");
   assert.equal(inferOutboundAttachmentKind("archive.tar.gz"), "file");
+});
+
+// ---- Alpha 7（specs/bot-file-delivery.md「Outbound attachment naming & inline kinds」§5.7/§5.6/§5.8）：
+// 内联图片扩展扩容 + Windows 保留名中和 + 审计字段去重——红测先行，W3 实现后转绿。
+// 计划依据：../ZCode-alpha6-plan.md Part 1 items 7-8 + 附录 C。
+
+test("A7 §5.7 inferOutboundAttachmentKind 把 heic/heif/tiff/avif 路由为 image（今天 file → 红）", () => {
+  // §5.7：这些格式的图片出站应按图片发送（直接内联显示），不再落成"文件"气泡。
+  // rig B3 负责真机内联渲染确认（tiff/avif 未验证，渲染坏则按 spec 回落条款回 file）。
+  assert.equal(inferOutboundAttachmentKind("photo.heic"), "image");
+  assert.equal(inferOutboundAttachmentKind("photo.heif"), "image");
+  assert.equal(inferOutboundAttachmentKind("scan.tiff"), "image");
+  assert.equal(inferOutboundAttachmentKind("next-gen.avif"), "image");
+  // 大小写与已覆盖格式回归钉。
+  assert.equal(inferOutboundAttachmentKind("Photo.HEIC"), "image");
+  assert.equal(inferOutboundAttachmentKind("clip.mp4"), "video");
+  assert.equal(inferOutboundAttachmentKind("report.pdf"), "file");
+});
+
+test("A7 §5.7 weixin 入站推断：heif/tiff/avif 文件名识别为 image（heic 已覆盖作对照；今天 file → 红）", async () => {
+  // §5.7 双侧扩容的 weixin 侧：inferWeixinAttachmentKind 为模块私有，经导出的
+  // getWeixinUpdates（假 requester 只喂 /getupdates 应答）驱动真实解析路径。
+  // heic 今天已识别（对照锚，绿）；heif/tiff/avif 今天落入 file → 红。
+  const weixinInferBot = { credentialRef: "cred-alpha7" } as BotConfig;
+  async function inferWeixinKindByFilename(filename: string): Promise<string> {
+    const payload = {
+      ret: 0,
+      data: {
+        msgs: [
+          {
+            from_user_id: "wx-user-1",
+            item_list: [{ file_item: { filename, file_id: `f-${filename}`, size: 10 } }],
+          },
+        ],
+      },
+    };
+    const requester = createBotProviderRequester(
+      async () => new Response(JSON.stringify(payload), { status: 200 }),
+    );
+    const updates = await getWeixinUpdates({
+      bot: weixinInferBot,
+      deps: { loadCredential: async () => "test-token", requester },
+    });
+    const attachment = updates.messages[0]?.attachments?.[0];
+    assert.ok(attachment, `必须解析出附件：${filename}`);
+    return attachment.kind;
+  }
+  assert.equal(await inferWeixinKindByFilename("pic.heic"), "image", "heic 已覆盖（对照锚）");
+  assert.equal(await inferWeixinKindByFilename("pic.heif"), "image");
+  assert.equal(await inferWeixinKindByFilename("pic.tiff"), "image");
+  assert.equal(await inferWeixinKindByFilename("pic.avif"), "image");
+  // 非图片扩展不误伤。
+  assert.equal(await inferWeixinKindByFilename("doc.pdf"), "file");
 });
 
 test("inferOutboundAttachmentMime 已知扩展名映射，未知回退按 kind", () => {
@@ -1646,6 +1701,99 @@ test("/file 无参数（review 修复附注）：parser 归为未知命令，与
     assert.equal(harness.sendAttachmentCalls.length, 0);
   } finally {
     await harness.dispose();
+  }
+});
+
+test("A7 §5.6 Windows 保留名中和：远端 `CON.txt` 物料化的临时文件名不得是保留名（今天原样 CON.txt → 红）", async () => {
+  // §5.6：远端 Linux workspace 可以存在名为 CON.txt 的文件（Windows 用户建不出，
+  // 远端可以）；/file 取回后物料化到 os.tmpdir 的临时文件若沿用原名，在 Windows
+  // 桌面上是非法设备名（测试表 B4 的 CON.txt 场景）。注：入站缓存文件段因
+  // `<digest>-` 前缀而偶合安全；真正裸奔的是出站临时物料化点（无前缀）——
+  // 红测钉在这里。新契约：helper 输出基名永不为保留名（含带扩展形态）。
+  const content = Buffer.from("reserved-name-payload");
+  const harness = await createHarness({
+    workspaceIdentity: "remote-identity-con",
+    remoteConnected: true,
+    remoteReader: createFakeRemoteReader({ filename: "CON.txt", content }),
+  });
+  try {
+    const replies = await harness.sendFileCommand("CON.txt");
+    assert.equal(harness.sendAttachmentCalls.length, 1, "投递本身必须照常完成");
+    const tempBasename = basename(harness.sendAttachmentCalls[0].attachment.localPath);
+    assert.ok(replies.length > 0);
+    assert.match(
+      tempBasename,
+      /^(?!con$|prn$|aux$|nul$|com[1-9]$|lpt[1-9]$)/iu,
+      `临时文件基名不得是 Windows 保留名（今天原样落 CON.txt，Windows 上非法）：${tempBasename}`,
+    );
+    // 带扩展形态也必须中和：CON.txt 的"首段"（第一个点之前）不得恰为保留名。
+    const stem = tempBasename.split(".")[0]!;
+    assert.match(
+      stem,
+      /^(?!con$|prn$|aux$|nul$|com[1-9]$|lpt[1-9]$)/iu,
+      `带扩展形态同样必须中和（stem=${stem}）`,
+    );
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("A7 §5.8 审计去重：file= 仅在与 path= 不同时输出（同值时只留 path=；今天恒双字段 → 红）", async () => {
+  // §5.8（specs/bot-file-delivery.md Alpha 0 §9 amendment）：path= 是唯一路径
+  // 字段；file= 仅当与 path= 取值不同（如物料化/消毒后文件名 vs 用户请求路径）
+  // 才输出。红点：今天的成功线无条件双字段——顶层路径下 file= 与 path= 同值
+  // 打两遍。子目录路径（file=basename ≠ path=相对路径）两字段都保留（契约钉）。
+  const realLog = console.log;
+  const logs: string[] = [];
+  console.log = (...args: unknown[]) => {
+    logs.push(args.map(String).join(" "));
+  };
+  try {
+    const harness = await createHarness();
+    try {
+      await writeFile(join(harness.workspacePath, "top-level.txt"), "alpha7 audit");
+      await harness.triggerConversationalMessage({ token: "token-captured" });
+
+      // 场景 1（红点）：顶层路径——filename ≡ path → 只留 path=。
+      const topLevel = await harness.service.shareFileForTask({
+        taskId: CONVERSATIONAL_TASK_ID,
+        path: "top-level.txt",
+      });
+      assert.equal(topLevel.ok, true);
+      const topLevelLine = logs.find(
+        (line) =>
+          line.includes("bot file delivery") &&
+          line.includes("outcome=ok") &&
+          line.includes("path=top-level.txt"),
+      );
+      assert.ok(topLevelLine, `必须存在成功审计线：\n${logs.join("\n")}`);
+      assert.ok(
+        !topLevelLine.includes("file=top-level.txt"),
+        `file= 与 path= 同值时必须省略 file=（今天恒双字段重复打印）：${topLevelLine}`,
+      );
+
+      // 场景 2（契约钉）：子目录路径——file=basename ≠ path=相对路径 → 两字段都保留。
+      const nested = await harness.service.shareFileForTask({
+        taskId: CONVERSATIONAL_TASK_ID,
+        path: "out/result.txt",
+      });
+      assert.equal(nested.ok, true);
+      const nestedLine = logs.find(
+        (line) =>
+          line.includes("bot file delivery") &&
+          line.includes("outcome=ok") &&
+          line.includes("path=out/result.txt"),
+      );
+      assert.ok(nestedLine, `子目录成功审计线必须存在：\n${logs.join("\n")}`);
+      assert.ok(
+        nestedLine.includes("file=result.txt") && nestedLine.includes("path=out/result.txt"),
+        `file= 与 path= 不同值时两字段都保留（file=basename、path=workspace 相对路径）：${nestedLine}`,
+      );
+    } finally {
+      await harness.dispose();
+    }
+  } finally {
+    console.log = realLog;
   }
 });
 

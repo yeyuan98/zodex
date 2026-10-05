@@ -565,11 +565,14 @@ function inferWeixinAttachmentKind(item: Record<string, unknown>): BotInboundAtt
   const filename =
     readString(item, "filename") || readString(item, "file_name") || readString(item, "name");
   const normalized = `${explicit} ${mimeType} ${filename}`.toLowerCase();
+  // §5.7（specs/bot-file-delivery.md「Outbound attachment naming & inline kinds
+  // (3.14.5 Alpha 7)」）：入站推断 regex 补 heif/tiff/avif（heic 已有）——这些扩展的
+  // 附件按 image（内联）归类，与出站 OUTBOUND_IMAGE_EXTENSIONS 双侧同扩。
   if (
     normalized.includes("image") ||
     normalized.includes("photo") ||
     normalized.includes("picture") ||
-    /\.(svg|png|jpe?g|gif|webp|heic|bmp)$/iu.test(filename)
+    /\.(svg|png|jpe?g|gif|webp|heic|heif|tiff|avif|bmp)$/iu.test(filename)
   ) {
     return "image";
   }

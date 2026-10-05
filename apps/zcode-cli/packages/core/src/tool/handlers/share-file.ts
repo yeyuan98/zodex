@@ -152,10 +152,11 @@ function formatShareFileModelContent(output: unknown): string {
     case "quota-exceeded":
       return "The file-sending quota for this chat is exhausted, so nothing was sent. Suggest the user request the file with the /file command, which is not quota-bound.";
     case "send-failed":
-      // Review 修复（honest prose）：-32602/-32603 等 Host 侧错误（如投递前配置 IO 失败）
-      // 从未触达 provider——不能断言失败发生在哪一侧。只陈述结局，引导模型如实报告
-      // 并转介 /file（/file 不受 tool 配额限制）。
-      return `The delivery attempt failed and the user did not receive the file. Tell the user the file could not be delivered, and suggest requesting it with the /file command instead.${detail}`;
+      // §5.5（specs/bot-file-delivery.md Status，3.14.5 Alpha 7）：不再断言「用户没有收到
+      // 文件」——Host 侧错误（-32602/-32603 等）从未触达 provider，且桌面侧仍可能在工具
+      // 超时（SHARE_FILE_TOOL_TIMEOUT_MS = 330_000）之后完成投递；只陈述尝试失败与结局
+      // 未知，引导模型如实报告并转介 /file（/file 不受 tool 配额限制）。
+      return `The delivery attempt failed and the delivery outcome is unknown: the desktop may still complete the delivery after the tool timeout. Do not claim the user did or did not receive the file. Tell the user the send attempt failed, suggest they check the chat, and offer the /file command as a quota-free alternative.${detail}`;
     case "unsupported-method":
       // 诊断链路：区分「旧桌面未就绪」（远端 forwarder 折叠，detail=
       // "desktop reverse channel never initialized"）与「远端未装配」（-32601

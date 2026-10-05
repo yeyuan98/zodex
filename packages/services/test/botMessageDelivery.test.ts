@@ -954,8 +954,15 @@ test("alpha.5 观测：weixin ret=-2 失败行附带 burstOrdinal/sendCount10s/f
   }
 });
 
-test("alpha.5 观测：fp 随 token 值稳定（同 token 同指纹、不同 token 不同指纹）", async () => {
+test("alpha.5 观测：fp 随 token 值稳定（同 token 同指纹、不同 token 不同指纹）", async (t) => {
   const cap = captureConsoleOutput();
+  // §5.12a 迁移注记（specs/log-diagnostics-hygiene.md Amendment 3.14.5-alpha.7 item 5）：
+  // alpha.7 死窗限频落地后，同 peer 30s 内的 channel-dead 失败线合并为一条——本用例
+  // 三个 force 边界改用 mock 时钟各前移 31s 越过限频窗，使每个边界自身的首条失败线
+  //（携带刚覆写条目的 fp）可发射；fp 稳定性断言语义不变。
+  const realNow = Date.now.bind(Date);
+  let clockOffsetMs = 0;
+  t.mock.method(Date, "now", () => realNow() + clockOffsetMs);
   const tokenA = "wx-token-alpha5-fp-stable-a11ce";
   const tokenB = "wx-token-alpha5-fp-rotate-b22df";
   try {
@@ -965,14 +972,19 @@ test("alpha.5 观测：fp 随 token 值稳定（同 token 同指纹、不同 tok
       const enqueue = await requireEnqueue(harness);
       harness.sendControl.failErrorFactory = () => createWeixinRetMinus2Error();
 
+      let boundaryCount = 0;
       const fpForToken = async (token: string, label: string): Promise<string> => {
+        if (boundaryCount > 0) {
+          clockOffsetMs += 31_000;
+        }
+        boundaryCount += 1;
         await harness.overwritePersistedWeixinToken(token);
         await enqueue(chunkEvent(`alpha5指纹正文-${label}`));
         await enqueue(toolCallEvent(`tool-alpha5-fp-${label}`));
         // 语义修正（main-agent 裁定）：每个 force 边界先补投保留积压再 flush 当前缓冲 ⇒
-        // 一个边界可能产出多条失败线，其中补发线在条目被 M2 失效删除后不带 fp。只认
-        // **带 fp 的线**（本 label 自己的发送读取了刚覆写的条目），避免上一 label 的
-        // 无 fp 尾线被 .at(-1) 误采。
+        // 一个边界可能产出多条发送尝试，其中补发之后的尝试在条目被 M2 失效删除后不带
+        // fp，且 30s 内被 §5.12a 限频合并。只认**带 fp 的线**（本 label 自己的发送读取
+        // 了刚覆写的条目），避免上一 label 的无 fp 尾线被 .at(-1) 误采。
         await waitForCondition(
           () => weixinFailureLines(cap.warns).some((line) => line.includes("fp=")),
           2500,
@@ -1010,8 +1022,15 @@ test("alpha.5 观测：fp 随 token 值稳定（同 token 同指纹、不同 tok
   }
 });
 
-test("alpha.5 观测：burstOrdinal 连续发送递增、该 peer 入站后归零重开", async () => {
+test("alpha.5 观测：burstOrdinal 连续发送递增、该 peer 入站后归零重开", async (t) => {
   const cap = captureConsoleOutput();
+  // §5.12a 迁移注记（specs Amendment 3.14.5-alpha.7 item 5）：alpha.7 死窗限频后 30s
+  // 内同 peer 的 channel-dead 失败线合并为一条——逐线断言按新密度改写（mock 时钟每个
+  // force 边界前移 31s，使各边界首条尝试可发射；边界内第二条尝试被合并，计数语义
+  // 不变——被合并的尝试仍计 burst 位次，且下一条发射线携带 suppressed=）。
+  const realNow = Date.now.bind(Date);
+  let clockOffsetMs = 0;
+  t.mock.method(Date, "now", () => realNow() + clockOffsetMs);
   try {
     const harness = await createHarness();
     try {
@@ -1023,36 +1042,49 @@ test("alpha.5 观测：burstOrdinal 连续发送递增、该 peer 入站后归�
       // 裁定，specs Amendment）：force 边界先补投保留积压再 flush 当前缓冲，补发重试
       // 也是对发送 API 的真实尝试、计入 burst——§2f.10 实测 -2 正是补发波中段死亡
       // （10 连发后第 11 发），排除补发会使位次判别在最需要的事件类上失明。
-      // 故边界#1 产出 chunk1(序号1)；边界#2 产出 补发chunk1(2)+chunk2(3)；
-      // 边界#3 产出 补发(4)+chunk3(5)——每条失败线序号严格等于其在波内的尝试位次。
-      const expectedOrdinals = [1, 3, 5];
-      const cumulativeLines = [1, 3, 5];
+      // 边界#1 产出 chunk1（位次1，发射）；边界#2 产出 补发chunk1(2，发射)+chunk2(3，合并)；
+      // 边界#3 产出 补发(4，发射，suppressed=1)+chunk3(5，合并)。
+      // 每个 force 边界的发射位次 = [1, 2, 4]（被合并尝试仍计位，从发射线位次可证）。
+      const expectedEmittedOrdinals = [1, 2, 4];
       for (const [index, text] of ["alpha5波次一", "alpha5波次二", "alpha5波次三"].entries()) {
+        if (index > 0) {
+          clockOffsetMs += 31_000;
+        }
         await enqueue(chunkEvent(text));
         await enqueue(toolCallEvent(`tool-alpha5-burst-${index}`));
         await waitForCondition(
-          () => weixinFailureLines(cap.warns).length >= cumulativeLines[index]!,
+          () => weixinFailureLines(cap.warns).length >= index + 1,
           2500,
-          `第 ${index + 1} 个边界的失败结果线必须全部出现（>= ${cumulativeLines[index]} 条）`,
+          `第 ${index + 1} 个边界的发射失败线必须出现`,
         );
+        // 边界内第二条尝试（当前 chunk）随即被合并：settle 后行数必须稳定在 index+1。
+        await new Promise((resolve) => setTimeout(resolve, 200));
         const lines = weixinFailureLines(cap.warns);
         assert.equal(
-          failureFieldNumber(lines.at(-1)!, "burstOrdinal"),
-          expectedOrdinals[index],
-          `无入站连续发送的第 ${index + 1} 个 chunk 的 burstOrdinal 必须为 ${expectedOrdinals[index]}（含补发重试计数）：${lines.at(-1)}`,
+          lines.length,
+          index + 1,
+          `30s 限频窗内第 ${index + 1} 个边界必须恰发射 1 条失败线（§5.12a）：\n${lines.join("\n")}`,
         );
-        if (index > 0) {
-          // 补发重试线（本边界第一条）必须同样计入波内位次（紧排在 chunk 线之前）。
+        const emitted = lines[index]!;
+        assert.equal(
+          failureFieldNumber(emitted, "burstOrdinal"),
+          expectedEmittedOrdinals[index],
+          `第 ${index + 1} 个边界发射线的 burstOrdinal 必须为 ${expectedEmittedOrdinals[index]}（含被合并的补发重试计数）：${emitted}`,
+        );
+        if (index === 2) {
+          // 计数语义钉：边界#2 的 chunk2 尝试（位次3）被合并——本发射线必须携带 suppressed=1。
           assert.equal(
-            failureFieldNumber(lines[cumulativeLines[index]! - 2]!, "burstOrdinal"),
-            expectedOrdinals[index]! - 1,
-            `边界 ${index + 1} 的保留积压补发线必须计入 burst 位次 ${expectedOrdinals[index]! - 1}：${lines[cumulativeLines[index]! - 2]}`,
+            failureFieldNumber(emitted, "suppressed"),
+            1,
+            `边界#3 发射线必须携带 suppressed=1（边界#2 的 chunk 尝试已合并计数）：${emitted}`,
           );
         }
       }
 
-      // 该 peer 任意入站（不带 token，避免触发持久化）：保留积压 revival 在死通道上
-      // 失败（preamble/首条 channel-dead 即停），失败线的 burstOrdinal 必须从 1 重新计数。
+      // 该 peer 任意入站（不带 token，避免触发持久化）：burst 归零 + revival 补发在死
+      // 通道上失败（preamble channel-dead 即停）。入站前移过限频窗，使 revival 失败线
+      // 作为新死窗首条照常发射、burstOrdinal 从 1 重新计数。
+      clockOffsetMs += 31_000;
       const linesBeforeInbound = weixinFailureLines(cap.warns).length;
       await harness.triggerMessage({ text: "ping" });
       await waitForCondition(
@@ -1065,26 +1097,32 @@ test("alpha.5 观测：burstOrdinal 连续发送递增、该 peer 入站后归�
         1,
         "该 peer 入站后 burstOrdinal 必须归零重开（下一条失败线为 1）",
       );
+      // §5.12a：死窗结束（revival 开始投递）输出一条汇总行，suppressed>=1（边界#3 的
+      // chunk3 尝试 + revival 前窗合并计数）。
+      const summaryLine = cap.logs.find((line) =>
+        line.includes("bot outbound dead-window summary"),
+      );
+      assert.ok(summaryLine, `revival 后必须存在死窗汇总行：\n${cap.logs.join("\n")}`);
+      assert.ok(
+        (failureFieldNumber(summaryLine!, "suppressed") ?? 0) >= 1,
+        `汇总行必须携带 suppressed>=1：${summaryLine}`,
+      );
 
-      // 入站之后的下一次 force 边界：补发重试(序号 2)+新 chunk(序号 3)——两条都
-      // 递增计位，验证归零后的连续发送位次语义。
+      // 入站之后的下一次 force 边界（前移 31s 越过限频窗）：补发重试（位次 2）发射；
+      // 归零后继续递增的位次语义由该线可证（chunk 尝试位次 3 被合并计数）。
+      clockOffsetMs += 31_000;
       await enqueue(chunkEvent("alpha5波次四"));
       await enqueue(toolCallEvent("tool-alpha5-burst-4"));
       await waitForCondition(
-        () => weixinFailureLines(cap.warns).length > linesBeforeInbound + 2,
+        () => weixinFailureLines(cap.warns).length > linesBeforeInbound + 1,
         2500,
-        "入站后的下两条失败线必须出现",
+        "入站后的下一条发射失败线必须出现",
       );
       const postInboundLines = weixinFailureLines(cap.warns).slice(linesBeforeInbound);
       assert.equal(
         failureFieldNumber(postInboundLines[1]!, "burstOrdinal"),
         2,
-        `归零后的波内第 2 次尝试（补发重试）必须为 2：${postInboundLines[1]}`,
-      );
-      assert.equal(
-        failureFieldNumber(postInboundLines[2]!, "burstOrdinal"),
-        3,
-        `归零后的波内第 3 次尝试（新 chunk）必须为 3：${postInboundLines[2]}`,
+        `归零后的波内下一次尝试（补发重试）必须为 2：${postInboundLines[1]}`,
       );
     } finally {
       harness.sendControl.failErrorFactory = undefined;
@@ -1095,8 +1133,14 @@ test("alpha.5 观测：burstOrdinal 连续发送递增、该 peer 入站后归�
   }
 });
 
-test("alpha.5 观测：ret=-2 触发 M2 token 失效后 burstOrdinal 归零；无条目时失败线不带 fp/tokenAgeMs", async () => {
+test("alpha.5 观测：ret=-2 触发 M2 token 失效后 burstOrdinal 归零；无条目时失败线不带 fp/tokenAgeMs", async (t) => {
   const cap = captureConsoleOutput();
+  // §5.12a 迁移注记（specs Amendment 3.14.5-alpha.7 item 5）：死窗限频后逐线断言按新
+  // 密度改写——mock 时钟使第 2/3 个边界各自越过 30s 限频窗（每边界首条尝试发射、
+  // 第二条合并计数）；"归零后继续递增"语义改钉边界#3 的发射线（位次 2）。
+  const realNow = Date.now.bind(Date);
+  let clockOffsetMs = 0;
+  t.mock.method(Date, "now", () => realNow() + clockOffsetMs);
   const persistedToken = "wx-token-alpha5-m2-invalidate-c4d1";
   try {
     const harness = await createHarness();
@@ -1118,17 +1162,24 @@ test("alpha.5 观测：ret=-2 触发 M2 token 失效后 burstOrdinal 归零；�
       const firstLine = weixinFailureLines(cap.warns).find((line) => line.includes("fp="))!;
       assert.ok(firstLine.includes("fp="), `有持久化条目的失败线必须带 fp：${firstLine}`);
 
-      // 第 2 个边界：先补投保留的波次一（无条目 ⇒ 无 fp/tokenAgeMs；M2 失效已归零
-      // ⇒ 位次重开为 1），再 flush 波次二（位次 2，同样无条目）。
+      // 第 2 个边界（前移 31s 越过限频窗）：先补投保留的波次一（无条目 ⇒ 无
+      // fp/tokenAgeMs；M2 失效已归零 ⇒ 位次重开为 1，发射），再 flush 波次二（位次 2，
+      // 合并计数不发射）。
+      clockOffsetMs += 31_000;
       await enqueue(chunkEvent("alpha5失效波次二"));
       await enqueue(toolCallEvent("tool-alpha5-m2-2"));
       await waitForCondition(
-        () => weixinFailureLines(cap.warns).length >= 3,
+        () => weixinFailureLines(cap.warns).length >= 2,
         2500,
-        "第 2 个边界的两条失败线必须出现",
+        "第 2 个边界的发射失败线必须出现",
       );
-      const secondBoundaryLines = weixinFailureLines(cap.warns).slice(1);
-      const secondLine = secondBoundaryLines[0]!;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(
+        weixinFailureLines(cap.warns).length,
+        2,
+        `30s 限频窗内第 2 个边界必须恰发射 1 条失败线（§5.12a）：\n${weixinFailureLines(cap.warns).join("\n")}`,
+      );
+      const secondLine = weixinFailureLines(cap.warns)[1]!;
       assert.ok(
         !secondLine.includes("fp=") && !secondLine.includes("tokenAgeMs="),
         `条目失效后无 token 可读，失败线不得带 fp/tokenAgeMs：${secondLine}`,
@@ -1138,11 +1189,26 @@ test("alpha.5 观测：ret=-2 触发 M2 token 失效后 burstOrdinal 归零；�
         1,
         `M2 token 失效必须归零 burstOrdinal（下一失败线为 1 而非 2）：${secondLine}`,
       );
-      const thirdLine = secondBoundaryLines[1]!;
+      // 第 3 个边界（再移 31s）：补发保留的波次一 → 位次 3 发射（波次二尝试位次 2 在
+      // 边界#2 已被合并计数，从本线位次可证）——归零后继续递增；携带 suppressed=1。
+      clockOffsetMs += 31_000;
+      await enqueue(chunkEvent("alpha5失效波次三"));
+      await enqueue(toolCallEvent("tool-alpha5-m2-3"));
+      await waitForCondition(
+        () => weixinFailureLines(cap.warns).length >= 3,
+        2500,
+        "第 3 个边界的发射失败线必须出现",
+      );
+      const thirdLine = weixinFailureLines(cap.warns)[2]!;
       assert.equal(
         failureFieldNumber(thirdLine, "burstOrdinal"),
-        2,
-        `归零后继续递增（同边界第 2 条 = 2）：${thirdLine}`,
+        3,
+        `归零后继续递增（边界#2 被合并的 chunk 尝试位次 2 已计数 ⇒ 补发尝试位次 3）：${thirdLine}`,
+      );
+      assert.equal(
+        failureFieldNumber(thirdLine, "suppressed"),
+        1,
+        `发射线必须携带 suppressed=1（边界#2 的 chunk 尝试已合并计数）：${thirdLine}`,
       );
       assert.ok(
         ![...cap.logs, ...cap.warns].some((logLine) => logLine.includes(persistedToken)),
@@ -1169,10 +1235,13 @@ test("alpha.5 观测：sendCount10s 只计 trailing 10s 窗口内的发送尝试
       const enqueue = await requireEnqueue(harness);
       harness.sendControl.failErrorFactory = () => createWeixinRetMinus2Error();
 
-      // 语义修正：每个 force 边界产出 补发重试+当前 chunk 两条尝试（均计数）。
-      // L1=chunk1@t0(计数1) → 时钟 +11s → L2=补发@t2（L1 滑出 trailing 10s 窗口 ⇒ 1）
-      // → L3=chunk2@t2（窗口内 L2+自身 ⇒ 2）→ L4=补发（L2,L3+自身 ⇒ 3）
-      // → L5=chunk3（L2,L3,L4+自身 ⇒ 4）。
+      // §5.12a 迁移注记（specs Amendment 3.14.5-alpha.7 item 5）：死窗限频（30s）>
+      // trailing 窗口（10s）后，发射线前 10s 内只可能排被合并的尝试（它们仍计数——
+      // 计数语义不变）。按新密度验证两个语义：
+      // ① 窗口内累积：t0 边界（L1 发射，计数1）→ +25s 边界（补发+chunk 两次尝试，
+      //    均在 30s 限频窗内被合并不发射）→ +6s 边界（补发尝试发射，trailing 10s 内
+      //    = 两条被合并尝试 + 自身 ⇒ 计数 3）；
+      // ② 滑出惰性裁剪：再 +31s 边界（补发尝试发射，此前所有尝试均滑出 10s 窗 ⇒ 1）。
       const runBoundary = async (text: string, toolId: string, label: string) => {
         await enqueue(chunkEvent(text));
         await enqueue(toolCallEvent(toolId));
@@ -1182,15 +1251,9 @@ test("alpha.5 观测：sendCount10s 只计 trailing 10s 窗口内的发送尝试
           `${label} 失败线必须出现`,
         );
       };
-      const waitLines = async (count: number, label: string) =>
-        waitForCondition(
-          () => weixinFailureLines(cap.warns).length >= count,
-          2500,
-          `${label} 需要至少 ${count} 条失败线`,
-        );
+      const settle = () => new Promise((resolve) => setTimeout(resolve, 200));
 
       await runBoundary("alpha5窗口正文一", "tool-alpha5-win-1", "首条");
-      await waitLines(1, "首条");
       const firstLine = weixinFailureLines(cap.warns)[0]!;
       assert.equal(
         failureFieldNumber(firstLine, "sendCount10s"),
@@ -1198,33 +1261,130 @@ test("alpha.5 观测：sendCount10s 只计 trailing 10s 窗口内的发送尝试
         `首条尝试的 sendCount10s 必须为 1：${firstLine}`,
       );
 
-      // 时钟前进 11s：L1 滑出 trailing 10s 窗口。
-      clockOffsetMs += 11_000;
-      await runBoundary("alpha5窗口正文二", "tool-alpha5-win-2", "滑出窗口后");
-      await waitLines(3, "滑出窗口后");
-      const slidRetry = weixinFailureLines(cap.warns)[1]!;
+      // +25s：两次尝试都在 30s 限频窗内 → 被合并（无新发射线）。
+      clockOffsetMs += 25_000;
+      await enqueue(chunkEvent("alpha5窗口正文二"));
+      await enqueue(toolCallEvent("tool-alpha5-win-2"));
+      await settle();
       assert.equal(
-        failureFieldNumber(slidRetry, "sendCount10s"),
+        weixinFailureLines(cap.warns).length,
         1,
-        `滑出窗口后的首条尝试（补发）计数必须为 1（>10s 的旧尝试被惰性裁剪）：${slidRetry}`,
-      );
-      const inWindowChunk = weixinFailureLines(cap.warns)[2]!;
-      assert.equal(
-        failureFieldNumber(inWindowChunk, "sendCount10s"),
-        2,
-        `紧随其后的尝试（同窗口）计数必须为 2：${inWindowChunk}`,
+        `限频窗内的两次尝试必须合并（无新发射线）：\n${weixinFailureLines(cap.warns).join("\n")}`,
       );
 
-      // 紧接着（窗口内）再一个边界：窗口内 4 条尝试 ⇒ 计数 4。
-      await runBoundary("alpha5窗口正文三", "tool-alpha5-win-3", "窗口内第二边界");
-      await waitLines(5, "窗口内第二边界");
-      const lastLine = weixinFailureLines(cap.warns)[4]!;
+      // +6s（距 L1 31s，越过限频窗；距 +25s 两次尝试 6s，仍在 trailing 10s 内）：
+      // 补发尝试发射，计数 = 两条被合并尝试 + 自身 = 3。
+      clockOffsetMs += 6_000;
+      await runBoundary("alpha5窗口正文三", "tool-alpha5-win-3", "越过限频窗后");
+      await settle();
       assert.equal(
-        failureFieldNumber(lastLine, "sendCount10s"),
-        4,
-        `窗口内第 5 次尝试的计数必须为 4：${lastLine}`,
+        weixinFailureLines(cap.warns).length,
+        2,
+        `越过限频窗后必须恰发射 1 条新失败线：\n${weixinFailureLines(cap.warns).join("\n")}`,
+      );
+      const inWindowLine = weixinFailureLines(cap.warns)[1]!;
+      assert.equal(
+        failureFieldNumber(inWindowLine, "sendCount10s"),
+        3,
+        `trailing 10s 内的计数必须包含被合并的尝试（2 条合并 + 自身 = 3）：${inWindowLine}`,
+      );
+
+      // +31s（距上次发射）：此前尝试全部滑出 trailing 10s 窗口 ⇒ 惰性裁剪后计数 1。
+      clockOffsetMs += 31_000;
+      await runBoundary("alpha5窗口正文四", "tool-alpha5-win-4", "滑出窗口后");
+      const slidLine = weixinFailureLines(cap.warns).at(-1)!;
+      assert.equal(
+        failureFieldNumber(slidLine, "sendCount10s"),
+        1,
+        `滑出窗口后的首条尝试计数必须为 1（>10s 的旧尝试被惰性裁剪）：${slidLine}`,
       );
     } finally {
+      harness.sendControl.failErrorFactory = undefined;
+      await harness.dispose();
+    }
+  } finally {
+    cap.restore();
+  }
+});
+
+// ---- alpha.7 §5.12a：死窗失败行限频（specs/log-diagnostics-hygiene.md
+// Amendment (3.14.5-alpha.7)）。红测先行，W3 实现后转绿；计数语义（burstOrdinal/
+// sendCount10s/fp 每次尝试仍计数）不变，仅行的发射密度变化（该 amendment 的迁移
+// 注记：上方 alpha.5 观测用例的逐线计数断言由实现 PR 按新密度改写）。
+
+test("alpha.7 §5.12a 死窗限频：channel-dead 失败线 30s 内合并为 1 条 + revival 汇总行；content-poison 永不限频", async () => {
+  const cap = captureConsoleOutput();
+  const isDeadWindowSummary = (line: string) => line.includes("bot outbound dead-window summary");
+  try {
+    const harness = await createHarness();
+    try {
+      await harness.triggerMessage();
+      const enqueue = await requireEnqueue(harness);
+
+      // 守护钉（实现前后都绿）：content-poison 失败线永不限频——
+      // 一个分块 2 次尝试 = 恰 2 条失败线（alpha.1 预算语义不变）。
+      harness.sendControl.failTextPattern = /alpha7毒丸正文/u;
+      await enqueue(chunkEvent("alpha7毒丸正文"));
+      await enqueue(toolCallEvent("tool-alpha7-poison"));
+      await waitForCondition(
+        () => weixinFailureLines(cap.warns).length >= 2,
+        4000,
+        "content-poison 两次尝试的失败线必须逐条输出（永不限频）",
+      );
+      const poisonLineCount = weixinFailureLines(cap.warns).length;
+      assert.equal(
+        poisonLineCount,
+        2,
+        `content-poison 失败线必须逐条输出（2 次尝试 2 条）：\n${weixinFailureLines(cap.warns).join("\n")}`,
+      );
+      harness.sendControl.failTextPattern = undefined;
+
+      // 死窗突发：3 个 force 边界（边界2/3 先补投保留积压再 flush，alpha.5 语义）
+      // 共 5 次 channel-dead 发送尝试，全部落在 30s 窗口内。
+      harness.sendControl.failErrorFactory = () => createWeixinRetMinus2Error();
+      for (const [index, text] of ["alpha7死窗一", "alpha7死窗二", "alpha7死窗三"].entries()) {
+        await enqueue(chunkEvent(text));
+        await enqueue(toolCallEvent(`tool-alpha7-dead-${index}`));
+      }
+      // 等第一条（合并后唯一一条）失败线出现，再短 settle 兜底后续边界的尝试收尾。
+      await waitForCondition(
+        () => weixinFailureLines(cap.warns).length > poisonLineCount,
+        4000,
+        "死窗第一条失败线必须照常输出（首条不限频）",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const deadWindowLines = weixinFailureLines(cap.warns).slice(poisonLineCount);
+      assert.equal(
+        deadWindowLines.length,
+        1,
+        `死窗内 5 次 channel-dead 失败尝试必须合并为恰 1 条失败线（specs §5.12a 最小间隔 30s）——今天逐条输出 ${deadWindowLines.length} 条：\n${deadWindowLines.join("\n")}`,
+      );
+
+      // revival：清除失败注入 + 该 peer 任意入站 → 保留积压补发开始投递（全部成功）
+      // → 恰一条汇总行，带 suppressed>=1（今天无任何汇总行 → 红）。
+      harness.sendControl.failErrorFactory = undefined;
+      await harness.triggerMessage({ text: "ping" });
+      const revivalDeadline = Date.now() + 2500;
+      while (Date.now() < revivalDeadline && !cap.logs.some((line) => isDeadWindowSummary(line))) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const summaryLine = cap.logs.find((line) => isDeadWindowSummary(line));
+      assert.ok(
+        summaryLine,
+        `revival（积压补发开始）后必须恰一条 dead-window summary 汇总行：\n${cap.logs.join("\n")}`,
+      );
+      const suppressed = summaryLine ? failureFieldNumber(summaryLine, "suppressed") : undefined;
+      assert.ok(
+        suppressed !== undefined && suppressed >= 1,
+        `汇总行必须携带 suppressed>=1（被合并掉的失败线计数）：${summaryLine}`,
+      );
+      assert.equal(
+        cap.logs.filter((line) => isDeadWindowSummary(line)).length,
+        1,
+        "汇总行只输出一次",
+      );
+    } finally {
+      harness.sendControl.failTextPattern = undefined;
       harness.sendControl.failErrorFactory = undefined;
       await harness.dispose();
     }

@@ -23,8 +23,12 @@ Alpha 6 (bot provider network/proxy + observability + cursor persistence) **ship
 specs/bot-provider-network.md. **Train complete → official `3.14.4`.**
 Inbound attachment UX (3.14.5 Alpha 6: >4-attachment notice, per-file oversize
 single-check rejection, unnamed-attachment container sniffing, attachment-cache lazy
-prune, Telegram/Feishu read-side size re-check) **spec'd 2026-10-04** — see the
-"Inbound attachment gates (3.14.5 Alpha 6)" section below; implementation pending.
+prune, Telegram/Feishu read-side size re-check) **shipped** in `3.14.5-alpha.6` (PR #19,
+release `99359f6`). Outbound polish (3.14.5 Alpha 7: shared byte-budget filename helper,
+inline image kinds widening, audit field dedup, image/audio dataBase64 strip) **spec'd
+2026-10-05** — see "Outbound attachment naming & inline kinds (3.14.5 Alpha 7)" below;
+implementation pending. §5.5 (share-file timeout wording) is CLI-only and rides the same
+alpha without a spec section here (apps/zcode-cli has no test harness; rig B6 covers it).
 Full-feature playbook: ../ZCode-handoff.md.
 Owners: bots service (`packages/services/src/bots/botsService.ts`) — command admission, path
 policy, size gates, `taskDeliveryRegistry` + `deliverWorkspaceFile` single writer + tool-source
@@ -78,8 +82,23 @@ Related: `docs/versioning.md` (patch 3.14.4 = full bidirectional file sync).
    error, stale session) produces a localized text reply; `/file` never throws an unhandled
    error into the polling loop and never mutates the active task/draft context.
 9. **Audit.** Successful and attempted deliveries log via `createServiceLogger("bots")`
-   `info`: bot id, peer id (not name), filename, size, outcome. Bot sessions are force-yolo;
-   the workspace-only policy + audit log + 5MB cap are the exfiltration guards.
+   `info`: bot id, peer id (not name), filename, size, outcome.
+   **3.14.5 Alpha 7 amendment (§5.8, field dedup):** `path=` is the single path field;
+   `file=` is logged ONLY when its value differs from `path=` (e.g. a sanitized or
+   remote-materialized delivery filename vs the user-requested path). When the two are
+   identical (top-level workspace paths, pre-resolution failures), `file=` is omitted —
+   never printed twice (the same-value dedup the forward-pin rejected line already
+   applies). **3.14.5 Alpha 7 amendment (§5.9, honest guard statement — replaces the
+   stale one-liner "Bot sessions are force-yolo; the workspace-only policy + audit log +
+   5MB cap are the exfiltration guards"):** bot sessions today run in forced yolo mode —
+   `BOT_FORCED_MODE` is applied at three botsService sites (draft init, inherit-task
+   draft, and the task-creation `setMode` throat, the single point where mode enters the
+   agent session; providers without yolo support keep their own default mode) — so
+   interactive permission prompts are structurally absent for bot tasks TODAY, and the
+   operative exfiltration guards are the workspace-only path policy + this audit log +
+   the 5MB cap. Track B (3.15.0, specs/off-peak-local-admission.md is the auto-deny
+   precedent) removes the force-yolo lock for bot permission parity; from that point the
+   permission surface joins the guard set and this statement must be revised again.
 
 ## Invariants (Alpha 0)
 
@@ -704,10 +723,15 @@ Windows desktop path in the prompt text and every tool read failed.
 
 **Invariants.**
 
-- `image`/`audio` behavior is byte-identical to 3.14.4, including `dataBase64`
-  (strip decision DEFERRED pending the preview E2E/rig check — previews must
-  render on desktop transcript AND phone web replay before any strip lands; do
-  not guess).
+- `image`/`audio` attachments STOP carrying `dataBase64` as of 3.14.5 Alpha 7 (§5.11
+  amendment; supersedes this bullet's earlier "byte-identical incl. dataBase64, strip
+  DEFERRED" wording). The R3 rig check passed 2026-10-04 (../ZCode-handoff.md §2h):
+  path-only rendering was owner-verified on the phone WeChat preview AND the desktop
+  transcript, so `localPath` (the just-written cache file, always present) is sufficient
+  and the base64 duplicate dies. The strip applies ONLY at the botsService inbound
+  prompt-attachment construction site; `dataBase64`-only attachments from other sources
+  still pass through the desktop wrapper unchanged (wrapper invariant below unchanged).
+  Prompt line, caching, and kind mapping are otherwise byte-identical.
 - New kinds never carry `dataBase64`.
 - The 5MB / 4-attachments-per-message inbound gates were unchanged in this alpha. The
   per-file rejection UX, the >4-attachment notice, unnamed-attachment container
@@ -721,8 +745,10 @@ Windows desktop path in the prompt text and every tool read failed.
 1. Services red test first (`packages/services/test/botInboundAttachments.test.ts`):
    inbound file/pdf/video → `sendPrompt` carries attachments with `localPath` +
    correct kind + `sizeBytes`, no `dataBase64`, prompt line still present.
-2. Regression: image/audio attachments unchanged including `dataBase64` + prompt
-   line.
+2. Regression: image/audio attachments keep their prompt line and `localPath`;
+   `dataBase64` is now ABSENT (§5.11 Alpha 7 flip, gated on the R3 rig PASS — the
+   updated A1 regression in `botInboundAttachments.test.ts` pins the flipped invariant;
+   this is a spec invariant change, not an assertion weakening).
 3. Remote-context (`workspaceIdentity` set) messages now carry attachments into
    `sendPrompt` (the wrapper input).
 4. NEW desktop wrapper characterization suite
@@ -734,8 +760,10 @@ Windows desktop path in the prompt text and every tool read failed.
    remote-root paths untouched (no upload); dataBase64-only attachments passed
    through unchanged (no upload).
 5. Rig checklist: send file/PDF/video to a remote-workspace bot → agent reads
-   them; previews render on desktop transcript + phone web replay (gates the
-   image `dataBase64` decision); local regression pass.
+   them; previews render on desktop transcript + phone web replay (the original
+   gate for the §5.11 image `dataBase64` decision, closed by R3 PASS 2026-10-04;
+   alpha.7 rig B5 re-confirms previews after the strip lands); local regression
+   pass.
 
 ### A3a. `/file` stops blocking the chat queue
 
@@ -934,3 +962,102 @@ packages/services/test):
    extension-less).
 9. Regression: the existing inbound attachment suite (A1/A3a) and the outbound
    zero-drift fixtures stay green.
+
+## Outbound attachment naming & inline kinds (3.14.5 Alpha 7)
+
+Spec'd 2026-10-05 from ../ZCode-alpha6-plan.md Part 1 items 7-8 + Appendix C (§5.6/§5.7)
+and ../ZCode-handoff.md §2h finding ② (CJK basename wiped at the remote staging site:
+`程曦简历.pdf` landed as `01-.pdf`). Red tests written first; targets `3.14.5-alpha.7`.
+Log-hygiene items of the same alpha (§5.12a dead-window throttling, §5.14 pending gauges)
+live in specs/log-diagnostics-hygiene.md.
+
+### Behavior
+
+1. **One shared byte-budget filename helper (§5.6).** A single pure helper in
+   packages/shared (no IO, no clocks) turns a raw filename into a safe filename under a
+   UTF-8 BYTE budget. Contract:
+   - **Unicode basenames are PRESERVED.** Control characters and path separators are
+     neutralized (as today), but there is NO ASCII-only stripping — `程曦简历.pdf` keeps
+     its CJK basename end-to-end. The desktop staging site's `[^A-Za-z0-9._-]+ → "-"`
+     sanitizer (which deleted the entire CJK basename) dies with this alpha.
+   - **Truncation is by UTF-8 bytes, never by chars and never mid-codepoint.** The
+     extension survives truncation: the stem is truncated within
+     (budget − extension bytes); the output never exceeds the budget in bytes, never
+     splits a multi-byte codepoint, and never garbles the basename. (Today the cache
+     site slices 120 CHARS — a 125-CJK-char name keeps 120 CJK chars = 360 bytes and
+     loses its extension entirely.)
+   - **Windows reserved names are neutralized, including with-extension forms:**
+     CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9 (`CON.txt`, `com1.tar.gz`, …). The
+     helper's output basename is never a reserved name (a neutralization marker such as
+     a leading `_` is acceptable; uniqueness prefixes below are NOT relied upon for
+     this).
+   - **Uniqueness prefixes keep working unchanged:** the inbound-cache digest prefix
+     (`<16hex>-`) and the remote-staging index prefix (`01-`, `02-`, …) are applied by
+     the call sites outside the budgeted segment; truncation cannot cause practical
+     collisions.
+   - Per-site byte budgets, preserved from current behavior (char limits → byte
+     equivalents):
+
+     | site                                                                                                        | sanitized segment | budget    |
+     | ----------------------------------------------------------------------------------------------------------- | ----------------- | --------- |
+     | botsService inbound cache filename (today `sanitizeAttachmentFilename`, `slice(0,120)` chars)               | filename          | 120 bytes |
+     | botsService outbound temp materialization (remote fetch → `os.tmpdir()/zcode-bot-outbound/<random>/<name>`) | filename          | 120 bytes |
+     | desktop `remotePromptAttachments` staging path                                                              | trace segment     | 80 bytes  |
+     | desktop `remotePromptAttachments` staging path                                                              | nonce segment     | 64 bytes  |
+     | desktop `remotePromptAttachments` staging path                                                              | filename segment  | 160 bytes |
+
+   The helper's only consumers are the three sites (botsService cache path, botsService
+   outbound temp file, desktop remote staging segments) — verified with `pnpm dep:refs`
+   when the implementation lands.
+
+2. **Inline image kinds widen (§5.7).** `OUTBOUND_IMAGE_EXTENSIONS`
+   (`inferOutboundAttachmentKind`, botsService) gains `.heic/.heif/.tiff/.avif`; the
+   weixin inbound infer regex in weixinProvider (which already contains `heic`) gains
+   `heif/tiff/avif`, so attachments of those kinds classify as `image` (inline) instead
+   of `file`. **Fallback clause:** weixin inline rendering of tiff/avif is unverified on
+   the rig — tester table B3 checks it; if rendering proves broken there, those
+   extensions fall back to file-kind delivery on the weixin side only (documented,
+   no hard-fail; heic/heif stay).
+
+### Invariants
+
+- The helper is pure and lives once in packages/shared; no site keeps a private
+  sanitizer (the desktop `sanitizePathSegment` ASCII-strip and the botsService
+  char-slice are replaced, not supplemented).
+- Provider-supplied filenames are never rewritten by sniffing (Alpha 6 rule) — the
+  helper only sanitizes/truncates/budgets; it never invents extensions.
+- The remote staging path structure (`<root>/<trace>/<nonce>/<index>-<filename>`) and
+  its privacy hardening (chmod 700/600, private root) are unchanged; only the segment
+  sanitizers change.
+- Zero drift: for ASCII filenames already within budget, every affected output (cache
+  paths, temp paths, staging paths, audit lines, reply texts) is byte-identical to
+  3.14.5-alpha.6. **Disclosed micro-drift ([ulw] NIT-5，接受）**：desktop staging
+  旧消毒的 ASCII 连字符折叠（`a--b`→`a-b`）与前导横线剥离随 ASCII-strip 一并
+  消亡（安全字符原样保留）；`:` 的替换字符由 `-` 改为 `_`；空 nonce 兜底名
+  `attachment`→`nonce`。三者在真实 UUID trace/nonce 下不可达。
+- Reserved-name neutralization is a property of the helper output itself, not of call
+  sites' prefixes (the inbound-cache file segment is incidentally reserved-safe via its
+  digest prefix today; the outbound temp file is NOT — a remote `CON.txt` currently
+  materializes as a literally invalid Windows temp name). **纯点号输出（`.`/`..`/
+  `…`）同样在 helper 内兜底替换**（[ulw] MINOR-1：无前缀段经 join() 会折叠成
+  父目录）。
+
+### Acceptance scenarios (red-first on 3.14.5-alpha.6)
+
+1. §5.6 services (`botInboundAttachments.test.ts`): inbound attachment with a
+   > 120-char CJK filename → the cached filename segment is ≤120 UTF-8 bytes, extension
+   > preserved, basename not garbled (today: 120 CJK chars = 360 bytes survive the
+   > char-slice and the extension is sliced off).
+2. §5.6 desktop (`remotePromptAttachments.test.ts`): staging `程曦简历.pdf` keeps the
+   CJK basename in the remote path (today: collapses to `01-.pdf`).
+3. §5.6 services (`botFileDelivery.test.ts`): a remote file named `CON.txt`
+   materializes to a NON-reserved temp basename (today: the temp file is literally
+   `CON.txt` — invalid on Windows).
+4. §5.7 services: `inferOutboundAttachmentKind` routes `.heic/.heif/.tiff/.avif` to
+   image (today: file).
+5. §5.7 weixin (`botFileDelivery.test.ts`, via exported `getWeixinUpdates` with a fake
+   requester): a file_item named `photo.heif` / `.tiff` / `.avif` parses as kind image
+   (today: file; `heic` already passes).
+6. §5.8 services (`botFileDelivery.test.ts`): the audit success line for a tool
+   delivery whose filename equals its `path=` carries `path=` only — `file=` appears
+   only when the two differ (today: both always printed).

@@ -70,6 +70,7 @@ import {
   type BotShareFileFailureReason,
   type BotShareFileResult,
   sniffAttachmentContainer,
+  sanitizeByteBudgetedFilename,
 } from "@zcode/shared";
 import type { IZCodeTaskService } from "../session/zcodeTaskService.js";
 import type { IBotWorkspaceFileService } from "./botWorkspaceFileService.js";
@@ -855,6 +856,13 @@ const OUTBOUND_IMAGE_EXTENSIONS = new Set([
   ".webp",
   ".bmp",
   ".svg",
+  // §5.7（specs/bot-file-delivery.md Alpha 7）：heic/heif/tiff/avif 按图片（内联）发送，
+  // 不再落成"文件"气泡；与 weixinProvider 入站推断 regex 双侧扩容。tiff/avif 的微信
+  // 内联渲染未在 rig 验证——渲染坏则按 spec 回落条款回 file（rig B3）。
+  ".heic",
+  ".heif",
+  ".tiff",
+  ".avif",
 ]);
 const OUTBOUND_VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"]);
 const OUTBOUND_MIME_BY_EXTENSION: Record<string, string> = {
@@ -1118,13 +1126,15 @@ export async function revalidateWorkspaceFileForDelivery(
   }
 }
 
-/** 纯字符串工具：文件名去控制字符/路径分隔符并截断（入站缓存与出站临时文件共用）。
- *  Review 修复：160 → 120，给 Windows MAX_PATH 留深路径余量（tmpdir + 随机目录 + 文件名）。 */
+/** §5.6（specs/bot-file-delivery.md「Outbound attachment naming & inline kinds (3.14.5
+ *  Alpha 7)」）：文件名消毒统一走 packages/shared 的共享字节预算 helper——Unicode 基名
+ *  保留（不再按字符 slice(0,120)——125 个 CJK 字符 = 360 字节曾击穿文件系统单段上限并
+ *  丢失扩展名）、扩展名在预算内保留、Windows 保留名（CON/PRN/AUX/NUL/COM1-9/LPT1-9
+ *  含带扩展形态）中和。本站点预算 120 字节 = 旧字符口径的字节等价（Windows MAX_PATH
+ *  深路径余量）；入站缓存的 `<digest>-` 前缀由调用方拼在预算段之外（spec：前缀不承担
+ *  保留名中和）。ASCII 预算内名字输出逐字节不变（零漂移）。 */
 function sanitizeAttachmentFilename(filename: string): string {
-  const normalized = Array.from(filename.trim())
-    .map((char) => (char.charCodeAt(0) < 32 || '\\/:*?"<>|'.includes(char) ? "_" : char))
-    .join("");
-  return normalized.length > 0 ? normalized.slice(0, 120) : "attachment";
+  return sanitizeByteBudgetedFilename(filename, { byteBudget: 120 });
 }
 
 /** 纯格式化工具：字节数 → 人类可读大小（未知/非正值 → unknown size）。 */
@@ -1372,6 +1382,17 @@ export function createBotsService(
   const weixinSendObservationByPeer = new Map<
     string,
     { burstOrdinal: number; sendTimestamps: number[]; lastReadTokenFp: string | undefined }
+  >();
+  // alpha.7 §5.12a（specs/log-diagnostics-hygiene.md Amendment 3.14.5-alpha.7）：死窗
+  //（channel-dead）失败行限频状态——per (botId, peerKey) 惰性时间戳 + 自上一条发射线
+  // 以来合并的条数。owner rig 实测断线窗内任务仍输出时 `bot outbound send … failed`
+  // 每分钟约 82 行、持续数小时，淹没有用信号。仅日志密度变化（零行为变化）：窗口内
+  // 第一条失败线照常输出，30s 内后续合并计数不发射；下一条件（到期新线/汇总行）携带
+  // suppressed=。无 timer（先例：weixin typing warn 30s、zcodeTaskIndexSyncer 60s）。
+  // content-poison 失败线永不限频，逐条保全。
+  const deadWindowFailureLogStates = new Map<
+    string,
+    { lastEmitAtMs: number; suppressedSinceLastEmit: number; suppressedTotal: number }
   >();
   let botStorageMigrationPromise: Promise<void> | null = null;
   const cachedWorkspaceRefsByKey = new Map<
@@ -1887,9 +1908,11 @@ export function createBotsService(
       detail?: string,
     ): DeliverWorkspaceFileResult => {
       // 每次尝试都留审计（specs Phase B 场景 15）：bot、peer、file、size、outcome、source、task、path。
+      // §5.8（specs Alpha 0 §9 amendment，3.14.5 Alpha 7）：path= 是唯一路径字段；file= 仅当
+      // 与 path= 取值不同才输出（顶层路径/预解析失败处两者同值——不重复打印）。
       botsLogger.warn(
         undefined,
-        `bot file delivery failed bot=${bot.id} peer=${peerKey} file=${filename} size=${sizeBytes} outcome=${reason}${auditSuffix} path=${requestedPath}${detail ? `: ${detail}` : ""}`,
+        `bot file delivery failed bot=${bot.id} peer=${peerKey}${filename !== requestedPath ? ` file=${filename}` : ""} size=${sizeBytes} outcome=${reason}${auditSuffix} path=${requestedPath}${detail ? `: ${detail}` : ""}`,
       );
       return detail === undefined ? { ok: false, reason } : { ok: false, reason, detail };
     };
@@ -1970,10 +1993,13 @@ export function createBotsService(
       sizeBytes,
       localPath,
     };
-    // Bot 会话强制 yolo，无交互权限；workspace-only 路径策略 + 审计日志 + 5MB 上限是出站防泄露边界。
+    // §5.9（specs Alpha 0 §9 amendment，3.14.5 Alpha 7）：Bot 会话今天仍强制 yolo
+    //（BOT_FORCED_MODE 三处生效，权限提示结构性缺席），出站防泄露边界 = workspace-only
+    // 路径策略 + 本审计日志 + 5MB 上限；3.15.0 Track B 解除 force-yolo 后本句须再修订。
+    // §5.8：file= 仅当与 path= 取值不同（子目录 basename ≠ 相对路径）才输出。
     botsLogger.info(
       undefined,
-      `bot file delivery bot=${authorizedBot.id} peer=${peerKey} file=${filename} size=${sizeBytes} kind=${kind} outcome=ok${auditSuffix} path=${auditPath}`,
+      `bot file delivery bot=${authorizedBot.id} peer=${peerKey}${filename !== auditPath ? ` file=${filename}` : ""} size=${sizeBytes} kind=${kind} outcome=ok${auditSuffix} path=${auditPath}`,
     );
     const providerContextToken =
       opts.source === "tool"
@@ -2424,13 +2450,16 @@ export function createBotsService(
         tagBotNoticeRepliesOn(error, noticeReplies);
         throw error;
       }
-      const dataBase64 = Buffer.from(resolved.data).toString("base64");
+      // §5.11（specs/bot-file-delivery.md「Inbound remote workspaces」invariant amendment，
+      // 3.14.5 Alpha 7；R3 rig PASS 2026-10-04 门控，handoff §2h → §7.31 GO）：image/audio
+      // 不再携带 dataBase64——owner 已实证手机微信预览 + 桌面 transcript 均按 localPath
+      // 渲染，缓存文件刚写入、路径必然存在，base64 重复传输同一份数据就此消亡。渲染
+      // 依据 localPath；dataBase64-only 附件（其它来源）在 desktop 包装器仍原样透传。
       if (cached.kind === "image" || cached.kind === "audio") {
         zcodeAttachments.push({
           kind: cached.kind,
           filename: cached.filename,
           mimeType: cached.mimeType,
-          dataBase64,
           // Bugfix：Bot 已把附件缓存到本地，ZCodePromptAttachment 也必须携带该路径。
           // 只在 prompt 文本里描述路径会让下游附件策略无法选择本地文件读取。
           localPath: cached.localPath,
@@ -2450,9 +2479,9 @@ export function createBotsService(
       // ZCodePromptAttachment：包装器即可把缓存文件上传到远端 ~/.zcode/tmp/prompt-attachments/
       // 并改写附件与 prompt 行中的路径。kind 映射：入站 video → video；入站 file 且 mimeType 为
       // application/pdf → pdf（CLI mapper 对 pdf 有专门 content-block 处理；入站协议没有 pdf kind）；
-      // 其余 file → file。新 kind 不携带 dataBase64——CLI 恒优先 localPath，且缓存文件刚刚写入、
-      // 路径必然存在；sizeBytes 用缓存字节数（file kind 协议必填）。image/audio 行为保持逐字节不变
-      // （dataBase64 是否可剥离 deferred 到 preview E2E 验证后再决定）。
+      // 其余 file → file。各 kind 一律不携带 dataBase64——CLI 恒优先 localPath，且缓存
+      // 文件刚刚写入、路径必然存在；sizeBytes 用缓存字节数（file kind 协议必填）。
+      // image/audio 的 dataBase64 strip 见上方 §5.11 注记。
       const promptAttachmentCommonFields = {
         filename: cached.filename,
         mimeType: cached.mimeType,
@@ -3463,6 +3492,10 @@ export function createBotsService(
     if (!bot) {
       return;
     }
+    // §5.12a：死窗结束判定之一 = 该 peer 的 revival（任意入站触发的保留积压补发开始
+    // 投递）——确有 suppressed 计数时在此输出一条汇总并清零（log-only；状态删除保证
+    // 后续补发成功触发的"窗口变化"汇总不会重复输出）。
+    flushDeadWindowFailureSummary(bot, peerKey);
     await deliverRetainedBacklog(bot, message.actor, { withPreamble: true });
   }
 
@@ -3561,6 +3594,68 @@ export function createBotsService(
     }
   }
 
+  // ---- alpha.7 §5.12a（specs/log-diagnostics-hygiene.md Amendment 3.14.5-alpha.7）：
+  // 死窗（channel-dead）失败行限频。仅日志密度变化，零行为变化；计数语义（burstOrdinal/
+  // sendCount10s/fp 每次尝试仍计数）不变，只是行的发射被合并。无 timer：惰性时间戳比较
+  //（先例：weixin typing warn 30s、zcodeTaskIndexSyncer topic-subscribe 60s）。 ----
+
+  /** §5.12a 最小发射间隔：死窗内同 peer 的失败线合并到 30s 一条。 */
+  const BOT_DEAD_WINDOW_FAILURE_LOG_MIN_INTERVAL_MS = 30_000;
+
+  function deadWindowFailureLogKey(botId: string, peerKey: string): string {
+    return `${botId}:${peerKey}`;
+  }
+
+  /** 出站 peer 键（与 createOutbound/失败线 peer= 同口径：chatId 优先、providerUserId 兜底）。 */
+  function resolveOutboundPeerKey(actor: Pick<BotActor, "providerUserId" | "chatId">): string {
+    return actor.chatId?.trim() || actor.providerUserId.trim();
+  }
+
+  /** §5.12a：死窗失败线发射裁决。窗口内第一条照常发射；30s 内后续合并计数不发射。
+   *  返回 suppressed = 自上一条发射线以来已合并的条数（>=1 时随下一条件输出：
+   *  到期后的新失败线或死窗汇总行）。 */
+  function admitDeadWindowFailureLine(
+    botId: string,
+    peerKey: string,
+    nowMs: number,
+  ): { emit: true; suppressed: number } | { emit: false } {
+    const key = deadWindowFailureLogKey(botId, peerKey);
+    const state = deadWindowFailureLogStates.get(key);
+    if (!state || nowMs - state.lastEmitAtMs >= BOT_DEAD_WINDOW_FAILURE_LOG_MIN_INTERVAL_MS) {
+      const suppressed = state?.suppressedSinceLastEmit ?? 0;
+      // suppressedTotal 在每条被合并线时已同步自增，这里不得重复累加（仅复位分段计数）。
+      deadWindowFailureLogStates.set(key, {
+        lastEmitAtMs: nowMs,
+        suppressedSinceLastEmit: 0,
+        suppressedTotal: state?.suppressedTotal ?? 0,
+      });
+      return { emit: true, suppressed };
+    }
+    state.suppressedSinceLastEmit += 1;
+    state.suppressedTotal += 1;
+    return { emit: false };
+  }
+
+  /** §5.12a：死窗结束（该 peer 的 revival 保留积压开始投递，或下一次发送结果不再判
+   *  channel-dead）——确有 suppressed 计数时输出一条 info 汇总并清零；零合并时静默
+   *  清态。汇总行是 per 死窗一次（状态删除保证 revival + 发送成功两触发点不重复）。 */
+  function flushDeadWindowFailureSummary(bot: BotConfig, peerKey: string): void {
+    const key = deadWindowFailureLogKey(bot.id, peerKey);
+    const state = deadWindowFailureLogStates.get(key);
+    if (!state) {
+      return;
+    }
+    deadWindowFailureLogStates.delete(key);
+    // [ulw] 评审修复（NIT-2）：汇总行报**整窗累计**（spec suppressed=<total> 语义）；
+    // 逐条发射线上的 suppressed= 仍是"自上一条发射线以来"的分段计数，两者分工。
+    if (state.suppressedTotal > 0) {
+      botsLogger.info(
+        undefined,
+        `bot outbound dead-window summary provider=${bot.provider} peer=${peerKey} suppressed=${state.suppressedTotal}`,
+      );
+    }
+  }
+
   async function sendOutbound(
     bot: BotConfig,
     message: BotOutboundMessage,
@@ -3609,6 +3704,12 @@ export function createBotsService(
     const ageSuffix = tokenAgeMs !== undefined ? ` tokenAgeMs=${tokenAgeMs}` : "";
     try {
       await adapter.send(bot, outbound);
+      // §5.12a：发送成功 = 分类窗口变化（该 peer 不再判 channel-dead）——确有死窗
+      // 合并计数时补一条汇总行并清零（log-only）。
+      const successPeerKey = message.providerUserId.trim();
+      if (successPeerKey) {
+        flushDeadWindowFailureSummary(bot, successPeerKey);
+      }
       botsLogger.info(
         undefined,
         `bot outbound send provider=${bot.provider} peer=${message.providerUserId} bytes=${bytes} ok${ageSuffix}`,
@@ -3638,10 +3739,24 @@ export function createBotsService(
         bot.provider === "weixin"
           ? `${weixinSendStats ? ` burstOrdinal=${weixinSendStats.burstOrdinal} sendCount10s=${weixinSendStats.sendCount10s}` : ""}${weixinFp ? ` fp=${weixinFp}` : ""}`
           : "";
-      botsLogger.warn(
-        undefined,
-        `bot outbound send provider=${bot.provider} peer=${message.providerUserId} bytes=${bytes} failed${ageSuffix}${weixinObservationSuffix}${fields ? ` ${fields}` : ""}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      // §5.12a：channel-dead 分类才限频（死窗内 30s 合并为一条；首条照常输出，后续行
+      // 计数不发射，下一条件携带 suppressed=）。content-poison 等其它分类永不限频、
+      // 逐条输出，且作为分类窗口变化冲刷死窗汇总（若有）。计数语义（burstOrdinal/
+      // sendCount10s/fp 每次尝试仍计数）不变——recordWeixinSendAttempt 在上方已无条件记账。
+      const failurePeerKey = message.providerUserId.trim();
+      const deadWindowAdmission =
+        failurePeerKey && classifyBotSendFailure(error) === "channel-dead"
+          ? admitDeadWindowFailureLine(bot.id, failurePeerKey, Date.now())
+          : undefined;
+      if (deadWindowAdmission === undefined && failurePeerKey) {
+        flushDeadWindowFailureSummary(bot, failurePeerKey);
+      }
+      if (deadWindowAdmission?.emit !== false) {
+        botsLogger.warn(
+          undefined,
+          `bot outbound send provider=${bot.provider} peer=${message.providerUserId} bytes=${bytes} failed${ageSuffix}${weixinObservationSuffix}${deadWindowAdmission?.suppressed ? ` suppressed=${deadWindowAdmission.suppressed}` : ""}${fields ? ` ${fields}` : ""}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       // Bugfix（M1 缝隙，specs/bot-message-delivery.md 3.14.5-alpha.4）：sendOutbound 是
       // 缓冲 flush 与终态文书直发（16:42 丢失类）的唯一汇合失败缝隙。channel-dead 类失败
       // 且调用方选择保留（flush 分块 / 终态文书直发）时，文本进入 per-peer 保留缓冲等待
@@ -6283,6 +6398,26 @@ export function createBotsService(
       // Bugfix: ZCode Agent 事件分发不保证等待 async listener。微信这类离散消息如果并发发送，
       // task_complete 的 Change summary 可能抢在前面正文 flush 之前到达客户端，所以这里按任务串行消费。
       streamEventQueue = nextStreamEvent.catch((error: unknown) => {
+        // §5.12a：本 warn 与 sendOutbound 失败线共享同一死窗限频状态（per bot+peer，
+        // 30s 合并）——channel-dead 分类才限频；其它错误逐条输出并作为分类窗口变化
+        // 冲刷死窗汇总（若有）。log-only，队列语义不变。
+        const streamPeerKey = resolveOutboundPeerKey(actor);
+        if (streamPeerKey && classifyBotSendFailure(error) === "channel-dead") {
+          const admission = admitDeadWindowFailureLine(bot.id, streamPeerKey, Date.now());
+          if (!admission.emit) {
+            return;
+          }
+          botsLogger.warn(
+            event.traceId,
+            `bot task stream event failed task=${event.taskId}${admission.suppressed ? ` suppressed=${admission.suppressed}` : ""}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          return;
+        }
+        if (streamPeerKey) {
+          flushDeadWindowFailureSummary(bot, streamPeerKey);
+        }
         botsLogger.warn(
           event.traceId,
           `bot task stream event failed task=${event.taskId}: ${
@@ -7638,7 +7773,8 @@ export function createBotsService(
       if (peerKey && !shareFileQuota.reserve(entry.botId, peerKey, reservedAt)) {
         botsLogger.warn(
           undefined,
-          `bot file delivery rejected bot=${entry.botId} peer=${peerKey} file=${params.path} size=0 outcome=quota-exceeded source=tool task=${params.taskId} path=${params.path}`,
+          // §5.8（Alpha 7）：file= 与 path= 同值（预解析拒绝）——只留 path=，不重复打印。
+          `bot file delivery rejected bot=${entry.botId} peer=${peerKey} size=0 outcome=quota-exceeded source=tool task=${params.taskId} path=${params.path}`,
         );
         return { ok: false, reason: "quota-exceeded" };
       }
@@ -7678,7 +7814,8 @@ export function createBotsService(
         const reasonText = error instanceof Error ? error.message : String(error);
         botsLogger.warn(
           undefined,
-          `bot file delivery failed bot=${entry.botId} peer=${peerKey} file=${params.path} size=0 outcome=send-failed source=tool task=${params.taskId} path=${params.path}: host error before delivery: ${reasonText}`,
+          // §5.8（Alpha 7）：file= 与 path= 同值（投递前 Host 错误）——只留 path=。
+          `bot file delivery failed bot=${entry.botId} peer=${peerKey} size=0 outcome=send-failed source=tool task=${params.taskId} path=${params.path}: host error before delivery: ${reasonText}`,
         );
         return {
           ok: false,
@@ -8651,6 +8788,8 @@ export function createBotsService(
       streamSubscriptions.clear();
       taskDeliveryRegistry.clear();
       transientInteractionCards.clear();
+      // [ulw] 评审修复（NIT-4）：死窗限频状态随 dispose 清空（与相邻 per-peer 映射对齐）。
+      deadWindowFailureLogStates.clear();
       for (const intervalId of typingIntervals.values()) {
         clearInterval(intervalId);
       }
