@@ -1090,6 +1090,88 @@ test("A6 R8 sniff 守护：乱码字节 → 维持无扩展名（识别不出不
   }
 });
 
+// ---- Alpha 8（specs/bot-file-delivery.md §5.15 触发面修订，§7.33 裁定）：
+// sniff 门从「仅兜底命名（filenameIsFallback）」放宽为「任意来源的无扩展名」。
+// 红测先行；W2 放宽门控（botsService cacheResolvedAttachment 去掉 flag 合取项）
+// 后转绿。依据：2026-10-05 rig 证据 §2i.1——微信视频以 base64url token
+// 「命名」（无扩展名、非兜底名），alpha.6 门跳过 sniff ⇒ 缓存无扩展名。----
+
+test("A8 sniff：provider 命名的无扩展名 mp4（token 名）→ 缓存补 .mp4 且 mimeType=video/mp4", async () => {
+  // rig 证据（2026-10-05 §2i.1）：微信视频的文件名是 provider 给定的
+  // base64url token（如 VGVNcnVrcU9z…，无扩展名），filenameIsFallback 未置位。
+  // 红点：今天门控 = extname==="" && filenameIsFallback===true，本用例不置
+  // 该标记（provider 给过的名）⇒ sniff 不跑，文件名维持无扩展名、mimeType
+  // 维持 provider 兜底值。新语义：无扩展名不看命名来源，ftyp isom 字节
+  // 正向命中即补 .mp4。
+  const harness = await createHarness();
+  try {
+    await harness.triggerMessage({
+      text: "看下这个视频",
+      attachments: [
+        inboundAttachment("video", "VGVNcnVrcU9zXzREZUxK", "video/mp4", ftypBytes("isom")),
+      ],
+    });
+    const capture = lastSendPrompt(harness);
+    const attachment = capture.attachments?.[0];
+    assert.ok(attachment, "token 命名的视频附件必须产出 prompt attachment");
+    assert.equal(attachment.filename, "VGVNcnVrcU9zXzREZUxK.mp4");
+    assert.equal(attachment.mimeType, "video/mp4");
+    assert.ok(attachment.localPath?.endsWith(".mp4"), "缓存路径必须带 .mp4 后缀");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("A8 sniff 守护：provider 命名的无扩展名文本文件 notes → 原样保留（不为文本捏造扩展名）", async () => {
+  // 守护钉：门放宽后（W2）文本字节不得命中任何容器指纹；今天门关着，同样绿。
+  const harness = await createHarness();
+  try {
+    await harness.triggerMessage({
+      text: "看下这个文件",
+      attachments: [
+        inboundAttachment(
+          "file",
+          "notes",
+          "text/plain",
+          Buffer.from("just plain notes, definitely not a media container"),
+        ),
+      ],
+    });
+    const capture = lastSendPrompt(harness);
+    const attachment = capture.attachments?.[0];
+    assert.ok(attachment, "文本附件必须产出 prompt attachment");
+    assert.equal(attachment.filename, "notes");
+    assert.equal(attachment.filename.includes("."), false, "不得为文本字节捏造扩展名");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("A8 sniff 守护：纯点号文件 .env（Node extname 视为无扩展名，门开着）→ 原样保留", async () => {
+  // Node extname(".env")===""：本名落在无扩展名门内（置兜底标记以打开今天
+  // 的门，让 sniff 真正跑到文本字节上）；sniff 必须不命中——.env 不得被
+  // 捏造扩展名。
+  const harness = await createHarness();
+  try {
+    await harness.triggerMessage({
+      text: "看下这个配置",
+      attachments: [
+        {
+          ...inboundAttachment("file", ".env", "text/plain", Buffer.from("NODE_ENV=development\n")),
+          filenameIsFallback: true,
+        },
+      ],
+    });
+    const capture = lastSendPrompt(harness);
+    const attachment = capture.attachments?.[0];
+    assert.ok(attachment, ".env 附件必须产出 prompt attachment");
+    assert.equal(attachment.filename, ".env");
+    assert.equal(attachment.filename.endsWith(".env"), true, ".env 原样保留");
+  } finally {
+    await harness.dispose();
+  }
+});
+
 // ---- Alpha 7（specs/bot-file-delivery.md「Outbound attachment naming & inline kinds」§5.6）：
 // 共享字节预算文件名 helper——红测先行，W3 实现后转绿。计划依据：
 // ../ZCode-alpha6-plan.md Part 1 item 7 + 附录 C §5.6。
