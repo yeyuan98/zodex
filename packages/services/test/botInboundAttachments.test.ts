@@ -974,17 +974,11 @@ async function triggerUnnamedAttachment(
   fallbackMimeType: string,
   data: Buffer,
 ): Promise<ZCodePromptAttachment> {
-  // [ulw] 评审修复（MINOR-2）对齐：sniff 门控 = filenameIsFallback（§7.32——
-  // provider 给过的名字永远不改写）；本组用例模拟的正是 provider 兜底命名，
-  // fixture 需带该标记（断言不变，仅补齐 provider 契约字段）。
+  // fixture 对齐（Alpha 8 §7.33）：兜底标记已退役——门放宽为「任意来源的
+  // 无扩展名」后，兜底命名用例无需（也无法）再置该标记，断言不变。
   await harness.triggerMessage({
     text: "看下这个文件",
-    attachments: [
-      {
-        ...inboundAttachment(kind, fallbackFilename, fallbackMimeType, data),
-        filenameIsFallback: true,
-      },
-    ],
+    attachments: [inboundAttachment(kind, fallbackFilename, fallbackMimeType, data)],
   });
   const capture = lastSendPrompt(harness);
   const attachment = capture.attachments?.[0];
@@ -1085,6 +1079,90 @@ test("A6 R8 sniff 守护：乱码字节 → 维持无扩展名（识别不出不
     );
     assert.equal(attachment.filename, "weixin-attachment-5");
     assert.equal(attachment.filename.includes("."), false, "不得为未知容器捏造扩展名");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+// ---- Alpha 8（specs/bot-file-delivery.md §5.15 触发面修订，§7.33 裁定）：
+// sniff 门从「仅兜底命名」放宽为「任意来源的无扩展名」（红测先行，W2 放宽
+// 门控后转绿）。依据：2026-10-05 rig 证据 §2i.1——微信视频以 base64url token
+// 「命名」（无扩展名、非兜底名），alpha.6 门跳过 sniff ⇒ 缓存无扩展名。----
+
+test("A8 sniff：provider 命名的无扩展名 mp4（token 名）→ 缓存补 .mp4 且 mimeType=video/mp4", async () => {
+  // rig 证据（2026-10-05 §2i.1）：微信视频的文件名是 provider 给定的
+  // base64url token（如 VGVNcnVrcU9z…，无扩展名），非 provider 兜底命名。
+  // 旧门控仅对兜底命名开 sniff ⇒ token 名被跳过，文件名维持无扩展名、
+  // mimeType 维持 provider 兜底值。新语义：无扩展名不看命名来源，ftyp isom
+  // 字节正向命中即补 .mp4。[ulw] 评审修复（NIT）：fixture mimeType 用
+  // octet-stream——若 fixture 本身就是 video/mp4，mimeType 断言无法经 sniff
+  // 失败，形同虚设。
+  const harness = await createHarness();
+  try {
+    await harness.triggerMessage({
+      text: "看下这个视频",
+      attachments: [
+        inboundAttachment(
+          "video",
+          "VGVNcnVrcU9zXzREZUxK",
+          "application/octet-stream",
+          ftypBytes("isom"),
+        ),
+      ],
+    });
+    const capture = lastSendPrompt(harness);
+    const attachment = capture.attachments?.[0];
+    assert.ok(attachment, "token 命名的视频附件必须产出 prompt attachment");
+    assert.equal(attachment.filename, "VGVNcnVrcU9zXzREZUxK.mp4");
+    assert.equal(attachment.mimeType, "video/mp4");
+    assert.ok(attachment.localPath?.endsWith(".mp4"), "缓存路径必须带 .mp4 后缀");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("A8 sniff 守护：provider 命名的无扩展名文本文件 notes → 原样保留（不为文本捏造扩展名）", async () => {
+  // 守护钉：门放宽后（W2）文本字节不得命中任何容器指纹；今天门关着，同样绿。
+  const harness = await createHarness();
+  try {
+    await harness.triggerMessage({
+      text: "看下这个文件",
+      attachments: [
+        inboundAttachment(
+          "file",
+          "notes",
+          "text/plain",
+          Buffer.from("just plain notes, definitely not a media container"),
+        ),
+      ],
+    });
+    const capture = lastSendPrompt(harness);
+    const attachment = capture.attachments?.[0];
+    assert.ok(attachment, "文本附件必须产出 prompt attachment");
+    assert.equal(attachment.filename, "notes");
+    assert.equal(attachment.filename.includes("."), false, "不得为文本字节捏造扩展名");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("A8 sniff 守护：纯点号文件 .env（Node extname 视为无扩展名，门开着）→ 原样保留", async () => {
+  // Node extname(".env")==="": 本名落在无扩展名门内，门放宽后（不再依赖已
+  // 退役的兜底标记）sniff 真正跑到文本字节上；sniff 必须不命中——.env 不得
+  // 被捏造扩展名。fixture 对齐（Alpha 8 §7.33）：兜底标记已退役，无需置位。
+  const harness = await createHarness();
+  try {
+    await harness.triggerMessage({
+      text: "看下这个配置",
+      attachments: [
+        inboundAttachment("file", ".env", "text/plain", Buffer.from("NODE_ENV=development\n")),
+      ],
+    });
+    const capture = lastSendPrompt(harness);
+    const attachment = capture.attachments?.[0];
+    assert.ok(attachment, ".env 附件必须产出 prompt attachment");
+    assert.equal(attachment.filename, ".env");
+    assert.equal(attachment.filename.endsWith(".env"), true, ".env 原样保留");
   } finally {
     await harness.dispose();
   }

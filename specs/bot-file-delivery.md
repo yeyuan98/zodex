@@ -857,11 +857,14 @@ botInboundAttachments.test.ts`, `botFileDeliveryTelegram.test.ts`,
    The brittle `/exceeds 5MB/i` error-prose regex coupling
    (`formatAttachmentRejectedReason`) dies with the typed per-file result.
 
-3. **Unnamed-attachment container sniffing (§5.15, §7.32: sniff, never hardcoded
-   per-kind extensions).** At cache time (`cacheResolvedAttachment`), when the
-   attachment filename lacks an extension (weixin's `weixin-attachment-N` fallback
-   naming; provider-supplied filenames are never rewritten; the image `.jpg`
-   fallback stays as-is), detect the container from the already-in-memory bytes'
+3. **Extension-less attachment container sniffing (§5.15, §7.32: sniff, never
+   hardcoded per-kind extensions; trigger widened 3.14.5 Alpha 8 per §7.33 — rig
+   evidence 2026-10-05 §2i.1: weixin videos arrive under provider-given token
+   names with NO extension, so the Alpha 6 fallback-only gate skipped them).**
+   At cache time (`cacheResolvedAttachment`), when the attachment filename lacks
+   an extension — ANY extension-less name, fallback-named (weixin's
+   `weixin-attachment-N`) or provider-given (the image `.jpg` fallback stays
+   as-is) — detect the container from the already-in-memory bytes'
    magic fingerprint (zero extra reads), then (a) append the correct extension to
    the cached filename and (b) correct the fallback mimeType to the real container
    type. New pure helper `sniffAttachmentContainer(data)` in packages/shared.
@@ -881,6 +884,23 @@ botInboundAttachments.test.ts`, `botFileDeliveryTelegram.test.ts`,
    Unknown fingerprint → keep the extension-less filename and the existing
    fallback mimeType (never worse than today).
 
+   Alpha 8 amendments (§7.33 owner ratification):
+   - Safety is content-positive-only: an extension is appended ONLY on an exact
+     magic-signature match at fixed offsets (the table above); names are never
+     pattern-guessed.
+   - Amended ruling: provider-given filenames WITH an extension are never
+     rewritten; extension-less names get a content-verified extension only when
+     the bytes positively match a known container (the Alpha 6 fallback-only
+     trigger protected garbage token names — retired).
+   - `filenameIsFallback` retires (its only consumer was the old fallback-only
+     gate).
+   - Residuals (accepted): (i) a text file whose bytes literally begin with
+     ID3/OggS/RIFF/ftyp signatures gains a media extension — near-impossible for
+     real documents (§7.32 lineage, accepted); (ii) names carrying ANY dot (e.g.
+     the once-observed weixin CDN token suffixed `.image`) are left untouched by
+     the `extname===""` gate — revisit only if suffixed video tokens are ever
+     observed.
+
 4. **Attachment cache lazy prune — NO daemon (§5.3).** The
    `~/.zcode/v2/bot-attachments` cache previously only ever grew. Alpha 6 bounds
    it: one in-memory 24h gate; the prune piggybacks on
@@ -899,6 +919,15 @@ botInboundAttachments.test.ts`, `botFileDeliveryTelegram.test.ts`,
    naming the limit (weixin's `${filename} exceeds 5MB.` wording is the
    precedent), BEFORE any upload request; the failure surfaces through today's
    send-failed detail path.
+6. **Feishu inbound resource download `type` (3.14.5 Alpha 8 fix).** Feishu
+   inbound audio/video resources are fetched with `type=file` per Feishu's
+   message-resources API (`GET /im/v1/messages/{message_id}/resources/{file_key}`
+   accepts only `image|file`; `file` covers file/audio/video) — the Alpha ≤7
+   `type=audio`/`type=media` requests were contract-invalid and failed 100% of
+   audio/video downloads. Image keeps `type=image`. Audio UNDERSTANDING
+   (transcription) remains unsupported (owner ruling, issue #21). Download
+   failures surface in logs via the message-prepare failure funnel
+   (`botsLogger.warn`, carrying the thrown text with HTTP status + `x-tt-logid`).
 
 ### Invariants
 
@@ -911,8 +940,9 @@ botInboundAttachments.test.ts`, `botFileDeliveryTelegram.test.ts`,
 - Whole-message rejection happens only when every attachment is rejected AND the
   message has no text; in that case zero cache files are written and no task or
   prompt is created (never an empty task).
-- Provider-supplied filenames are never rewritten by sniffing; sniffing applies
-  only to extension-less fallback names; the image `.jpg` fallback behavior is
+- Provider-supplied filenames WITH AN EXTENSION are never rewritten by sniffing;
+  sniffing applies to extension-less names of ANY origin (Alpha 8 widening, §7.33;
+  was: fallback names only); the image `.jpg` fallback behavior is
   unchanged (verified behavior, kept).
 - The prune is best-effort background hygiene: no timers, no daemon process, no
   awaited IO on the inbound path; the deletion set is mtime > 7 days under
@@ -1024,8 +1054,11 @@ live in specs/log-diagnostics-hygiene.md.
 - The helper is pure and lives once in packages/shared; no site keeps a private
   sanitizer (the desktop `sanitizePathSegment` ASCII-strip and the botsService
   char-slice are replaced, not supplemented).
-- Provider-supplied filenames are never rewritten by sniffing (Alpha 6 rule) — the
-  helper only sanitizes/truncates/budgets; it never invents extensions.
+- Provider-supplied filenames WITH AN EXTENSION are never rewritten by sniffing
+  (Alpha 6 rule as amended by Alpha 8/§7.33: extension-less names get a
+  content-verified extension only when the bytes positively match a known
+  container) — the helper only sanitizes/truncates/budgets; it never invents
+  extensions.
 - The remote staging path structure (`<root>/<trace>/<nonce>/<index>-<filename>`) and
   its privacy hardening (chmod 700/600, private root) are unchanged; only the segment
   sanitizers change.

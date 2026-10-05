@@ -4,7 +4,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
+  BotActor,
   BotConfig,
+  BotInboundAttachment,
   BotOutboundAttachment,
   BotOutboundAttachmentKind,
   BotOutboundMessage,
@@ -442,4 +444,107 @@ test("feishu sendAttachment：>5MB 本地文件读侧复检 → 报 5MB 上限�
     0,
     "超限必须在任何 im/v1 上传或发送请求之前拒绝",
   );
+});
+
+// ---- Alpha 8（specs/bot-file-delivery.md Alpha 6 行为第 6 条）：飞书入站
+// audio/video 资源按 messages-resources API 契约以 type=file 拉取（API 仅收
+// image|file；file 覆盖 file/audio/video）。红测先行：今天 ternary 发
+// type=audio / type=media（feishuProvider downloadAttachment URL 拼接），
+// 契约非法、100% 下载失败。W2 改非 image → file 后转绿。----
+
+/**
+ * 单次 downloadAttachment：stub 网络后直接调 adapter 下载路径，捕获
+ * tenant_access_token 与 messages/{message_id}/resources/{file_key} 请求
+ * （记录 query string，返回小份二进制载荷 + ok 状态）。每次使用独立 appId，
+ * 避开模块级 tenant_access_token 缓存。
+ * 桩假设（披露）：直接构造 BotInboundAttachment（kind 显式给定）而非驱动
+ * 完整 parseCallback——被测 ternary 只读 attachment.kind，与
+ * readFeishuAttachment 经 inferFeishuAttachmentKind 从 msg_type 推得的
+ * kind 取值一致；providerMessageId/providerFileId 缺一即返回 null。
+ */
+async function runDownloadAttachment(options: {
+  appId: string;
+  kind: BotInboundAttachment["kind"];
+}): Promise<{ calls: CapturedFetchCall[]; error?: Error }> {
+  const payload = new Uint8Array([0x00, 0x01, 0x02, 0x03, 0x04, 0x05]);
+  const stub = installProviderStub((call) => {
+    if (call.url.includes("/open-apis/auth/v3/tenant_access_token/internal")) {
+      return jsonResponse({ code: 0, tenant_access_token: FEISHU_TOKEN, expire: 7200 });
+    }
+    if (call.url.includes("/open-apis/im/v1/messages/") && call.url.includes("/resources/")) {
+      // 小份二进制载荷 + ok 状态：下载路径只关心字节与 HTTP 状态。
+      return new Response(payload, { status: 200 });
+    }
+    throw new Error(`unexpected feishu fetch: ${call.url}`);
+  });
+  try {
+    const provider = createFeishuBotProvider({
+      loadCredential: async () => "feishu-app-secret-value",
+      requester: createBotProviderRequester(),
+    });
+    const downloadAttachment = provider.downloadAttachment;
+    assert.ok(downloadAttachment, "feishu adapter must implement downloadAttachment");
+    const attachment: BotInboundAttachment = {
+      id: "att-feishu-inbound-1",
+      kind: options.kind,
+      filename: `feishu-inbound-${options.kind}`,
+      mimeType: "application/octet-stream",
+      providerFileId: "file_v2_inbound_key_1",
+    };
+    const actor: BotActor = {
+      provider: "feishu",
+      botId: "bot-feishu-1",
+      providerUserId: FEISHU_OPEN_ID,
+      chatType: "private",
+      chatId: "oc_feishu_chat_1",
+      providerMessageId: "om_inbound_2001",
+    };
+    let error: Error | undefined;
+    try {
+      await downloadAttachment(buildFeishuBot(options.appId), attachment, actor);
+    } catch (caught) {
+      error = caught instanceof Error ? caught : new Error(String(caught));
+    }
+    return { calls: stub.calls, error };
+  } finally {
+    stub.restore();
+  }
+}
+
+test("feishu downloadAttachment：audio → 请求 type=file（API 仅收 image|file；今天 type=audio → 红）", async () => {
+  const run = await runDownloadAttachment({ appId: "cli_8000000000000001", kind: "audio" });
+  assert.ok(!run.error, run.error?.message);
+  const resourceCall = run.calls.find(
+    (call) => call.url.includes("/open-apis/im/v1/messages/") && call.url.includes("/resources/"),
+  );
+  assert.ok(resourceCall, "必须发起资源下载请求");
+  assert.equal(
+    new URL(resourceCall.url).searchParams.get("type"),
+    "file",
+    "audio 资源必须以 type=file 拉取（今天：type=audio，契约非法）",
+  );
+});
+
+test("feishu downloadAttachment：video → 请求 type=file（今天 type=media → 红）", async () => {
+  const run = await runDownloadAttachment({ appId: "cli_8000000000000002", kind: "video" });
+  assert.ok(!run.error, run.error?.message);
+  const resourceCall = run.calls.find(
+    (call) => call.url.includes("/open-apis/im/v1/messages/") && call.url.includes("/resources/"),
+  );
+  assert.ok(resourceCall, "必须发起资源下载请求");
+  assert.equal(
+    new URL(resourceCall.url).searchParams.get("type"),
+    "file",
+    "video 资源必须以 type=file 拉取（今天：type=media，契约非法）",
+  );
+});
+
+test("feishu downloadAttachment 守护：image → 仍请求 type=image", async () => {
+  const run = await runDownloadAttachment({ appId: "cli_8000000000000003", kind: "image" });
+  assert.ok(!run.error, run.error?.message);
+  const resourceCall = run.calls.find(
+    (call) => call.url.includes("/open-apis/im/v1/messages/") && call.url.includes("/resources/"),
+  );
+  assert.ok(resourceCall, "必须发起资源下载请求");
+  assert.equal(new URL(resourceCall.url).searchParams.get("type"), "image");
 });

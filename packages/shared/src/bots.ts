@@ -313,12 +313,6 @@ export interface BotInboundAttachment {
   dataBase64?: string;
   localPath?: string;
   providerMetadata?: Record<string, string>;
-  /**
-   * true 表示 filename 是 provider 适配器的兜底命名（聊天软件未提供文件名），
-   * 而非 provider 给定的名字。§5.15（§7.32）：容器指纹 sniff 只允许改写兜底命名；
-   * provider 给过的文件名永远原样不动。缺省（undefined）= provider 给过名。
-   */
-  filenameIsFallback?: boolean;
 }
 
 export type BotOutboundAttachmentKind = "image" | "video" | "file";
