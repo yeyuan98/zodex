@@ -630,10 +630,9 @@ function readFeishuAttachment(
     return null;
   }
   const kind = inferFeishuAttachmentKind(msgType);
-  const filename =
-    readString(content, "file_name") ||
-    readString(content, "filename") ||
-    `${msgType}-${providerFileId.slice(0, 8)}`;
+  // §5.15（§7.32）：兜底命名打标——容器 sniff 只允许改写兜底名，provider 给过的名不动。
+  const providedFilename = readString(content, "file_name") || readString(content, "filename");
+  const filename = providedFilename ?? `${msgType}-${providerFileId.slice(0, 8)}`;
   const mimeType =
     readString(content, "mime_type") ||
     readString(content, "mimeType") ||
@@ -643,6 +642,7 @@ function readFeishuAttachment(
     kind,
     filename,
     mimeType,
+    ...(!providedFilename ? { filenameIsFallback: true } : {}),
     ...(typeof content.size === "number" ? { sizeBytes: content.size } : {}),
     providerFileId,
   };

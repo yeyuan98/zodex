@@ -960,9 +960,17 @@ async function triggerUnnamedAttachment(
   fallbackMimeType: string,
   data: Buffer,
 ): Promise<ZCodePromptAttachment> {
+  // [ulw] 评审修复（MINOR-2）对齐：sniff 门控 = filenameIsFallback（§7.32——
+  // provider 给过的名字永远不改写）；本组用例模拟的正是 provider 兜底命名，
+  // fixture 需带该标记（断言不变，仅补齐 provider 契约字段）。
   await harness.triggerMessage({
     text: "看下这个文件",
-    attachments: [inboundAttachment(kind, fallbackFilename, fallbackMimeType, data)],
+    attachments: [
+      {
+        ...inboundAttachment(kind, fallbackFilename, fallbackMimeType, data),
+        filenameIsFallback: true,
+      },
+    ],
   });
   const capture = lastSendPrompt(harness);
   const attachment = capture.attachments?.[0];

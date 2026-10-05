@@ -42,7 +42,6 @@ const messages = {
     attachmentRejected: "附件处理失败：{message}",
     attachmentDownloadUnavailable:
       "无法下载附件。文件可能已过期、已撤回，或机器人没有读取权限。请重新发送附件后再试。",
-    attachmentTooLarge: "附件超过 5MB，请压缩后重新发送。",
     // 3.14.5 Alpha 6（specs/bot-file-delivery.md「Inbound attachment gates」§5.1/§5.2）：
     // >4 附件的即时通知 + 逐文件超限跳过通知（单次检查语义）。
     attachmentCountLimited: "一条消息最多处理前 {max} 个附件，已跳过其余 {count} 个附件。",
@@ -189,7 +188,6 @@ const messages = {
     attachmentRejected: "Failed to process attachment: {message}",
     attachmentDownloadUnavailable:
       "Could not download the attachment. The file may have expired, been removed, or the bot may not have permission to read it. Please send the attachment again and try once more.",
-    attachmentTooLarge: "The attachment exceeds 5MB. Compress it and send it again.",
     // 3.14.5 Alpha 6 (specs/bot-file-delivery.md "Inbound attachment gates" §5.1/§5.2):
     // immediate >4-attachment notice + per-file oversize skip (single-check semantics).
     attachmentCountLimited:

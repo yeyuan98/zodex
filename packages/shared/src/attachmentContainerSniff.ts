@@ -107,8 +107,14 @@ export function sniffAttachmentContainer(data: Uint8Array): SniffedAttachmentCon
     return { extension: ".mp3", mimeType: "audio/mpeg" };
   }
   // MPEG audio 帧同步：首字节 0xFF + 次字节高 3 位全 1（11 个连续 1 的 frame sync）。
+  // [ulw] 评审加固：排除保留取值——version 位 01 = reserved、layer 位 00 = reserved，
+  // 降低随机二进制误判率（仅在无扩展名兜底路径生效，误判后果=错补 .mp3 后缀）。
   if (data.length >= 2 && data[0] === 0xff && (data[1]! & 0xe0) === 0xe0) {
-    return { extension: ".mp3", mimeType: "audio/mpeg" };
+    const versionBits = (data[1]! & 0x18) >> 3;
+    const layerBits = (data[1]! & 0x06) >> 1;
+    if (versionBits !== 0b01 && layerBits !== 0b00) {
+      return { extension: ".mp3", mimeType: "audio/mpeg" };
+    }
   }
   return {};
 }

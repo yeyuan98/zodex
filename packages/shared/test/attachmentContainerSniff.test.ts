@@ -102,3 +102,10 @@ test("RIFF 但非 WAVE（如 AVI 的 WAVE 未命中）→ 未知；乱码/空/�
   assert.deepEqual(sniffAttachmentContainer(ascii("ID")), {});
   assert.deepEqual(sniffAttachmentContainer(ascii("ftyp")), {});
 });
+
+test("帧同步命中但 version/layer 为保留取值 → 未知（[ulw] 评审加固）", () => {
+  // 0xE8 = sync 111 + version 01(reserved) + layer 10；0xE1 = sync 111 + version 00(2.5 合法) + layer 00(reserved)。
+  // 随机二进制约 1/2048 会撞上裸帧同步——保留位校验把它们挡在门外。
+  assert.deepEqual(sniffAttachmentContainer(Uint8Array.of(0xff, 0xe8, 0x00, 0x00)), {});
+  assert.deepEqual(sniffAttachmentContainer(Uint8Array.of(0xff, 0xe1, 0x00, 0x00)), {});
+});

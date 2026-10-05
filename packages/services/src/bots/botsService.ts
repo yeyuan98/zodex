@@ -2280,11 +2280,14 @@ export function createBotsService(
     attachment: BotInboundAttachment;
     data: Uint8Array;
   }): Promise<BotInboundAttachment> {
-    // Alpha 6（§5.15，§7.32 owner 裁定）：无扩展名的兜底命名（微信 weixin-attachment-N）
-    // 按内存字节的容器指纹补扩展名 + 修正兜底 mimeType；provider 给过文件名的
-    // （有扩展名）原样不动；识别不出维持无扩展名（不比今天更糟）。
+    // Alpha 6（§5.15，§7.32 owner 裁定）：无扩展名的**兜底命名**（微信
+    // weixin-attachment-N 等 provider 生成名）按内存字节的容器指纹补扩展名 +
+    // 修正兜底 mimeType；provider 给过文件名的原样不动（filenameIsFallback
+    // 门控，[ulw] 评审 MINOR-2 修复）；识别不出维持无扩展名（不比今天更糟）。
     const sniffed =
-      extname(params.attachment.filename) === "" ? sniffAttachmentContainer(params.data) : {};
+      extname(params.attachment.filename) === "" && params.attachment.filenameIsFallback === true
+        ? sniffAttachmentContainer(params.data)
+        : {};
     const cachedFilename = sniffed.extension
       ? `${params.attachment.filename}${sniffed.extension}`
       : params.attachment.filename;
@@ -2305,6 +2308,28 @@ export function createBotsService(
       localPath,
       sizeBytes: params.data.byteLength,
     };
+  }
+
+  /**
+   * [ulw] 评审修复（MINOR-1）：附件通知（>4 提示 / 逐文件超限拒绝）随正常处理送达，
+   * 中途失败不得让其蒸发。throw 前把已累积通知挂在错误对象上；各 catch 漏斗用
+   * takeBotNoticeRepliesFrom 取出并前置到失败回复之前。
+   */
+  function tagBotNoticeRepliesOn(error: unknown, replies: BotOutboundMessage[]): void {
+    if (error instanceof Error && replies.length > 0) {
+      (error as Error & { botNoticeReplies?: BotOutboundMessage[] }).botNoticeReplies = replies;
+    }
+  }
+
+  function takeBotNoticeRepliesFrom(error: unknown): BotOutboundMessage[] {
+    if (error instanceof Error) {
+      const replies = (error as Error & { botNoticeReplies?: BotOutboundMessage[] })
+        .botNoticeReplies;
+      if (Array.isArray(replies)) {
+        return replies;
+      }
+    }
+    return [];
   }
 
   async function prepareBotMessageContent(
@@ -2353,7 +2378,15 @@ export function createBotsService(
         fileLines.push(`附件：${rawAttachment.filename} 超过 5MB 上限，已跳过（未下载）。`);
         continue;
       }
-      const resolved = await resolveAttachmentBytes(bot, rawAttachment, message.actor);
+      // [ulw] 评审修复（MINOR-1）：下载中途 throw（weixin CDN HTTP 失败 / URL 超时）
+      // 不丢已累积的附件通知——挂在错误上随 throw 上抛，由各 catch 漏斗前置送达。
+      let resolved;
+      try {
+        resolved = await resolveAttachmentBytes(bot, rawAttachment, message.actor);
+      } catch (error) {
+        tagBotNoticeRepliesOn(error, noticeReplies);
+        throw error;
+      }
       if (!resolved) {
         fileLines.push(
           `附件：${rawAttachment.filename} (${rawAttachment.mimeType}, ${formatAttachmentSize(rawAttachment.sizeBytes)})，未能下载。`,
@@ -2378,12 +2411,19 @@ export function createBotsService(
         fileLines.push(`附件：${resolved.attachment.filename} 超过 5MB 上限，已跳过。`);
         continue;
       }
-      const cached = await cacheResolvedAttachment({
-        bot,
-        message,
-        attachment: resolved.attachment,
-        data: resolved.data,
-      });
+      // [ulw] 评审修复（MINOR-1）：缓存写盘失败同样不丢已累积通知（同上随错误携带）。
+      let cached;
+      try {
+        cached = await cacheResolvedAttachment({
+          bot,
+          message,
+          attachment: resolved.attachment,
+          data: resolved.data,
+        });
+      } catch (error) {
+        tagBotNoticeRepliesOn(error, noticeReplies);
+        throw error;
+      }
       const dataBase64 = Buffer.from(resolved.data).toString("base64");
       if (cached.kind === "image" || cached.kind === "audio") {
         zcodeAttachments.push({
@@ -4395,6 +4435,9 @@ export function createBotsService(
           `provider callback failed provider=${provider} bot=${inboundMessage.botId} user=${inboundMessage.actor.providerUserId}: ${message}`,
         );
         outbound = [
+          // [ulw] 评审修复（MINOR-1）：prepare/后续流程中途失败时已累积的附件通知
+          // 前置送达（>4 提示与逐文件拒绝不因半途失败蒸发），失败回复本身不变。
+          ...takeBotNoticeRepliesFrom(error),
           createOutbound(
             inboundMessage.actor,
             isSessionExpiredError(error)
@@ -6915,7 +6958,9 @@ export function createBotsService(
     try {
       preparedMessage = await prepareBotMessageContent(auth.bot, message, auth.locale);
     } catch (error) {
+      // [ulw] 评审修复（MINOR-1）：prepare 中途失败时，已累积的附件通知前置送达。
       return [
+        ...takeBotNoticeRepliesFrom(error),
         createOutbound(
           message.actor,
           msg(auth.locale, "attachmentRejected", {
@@ -6998,6 +7043,8 @@ export function createBotsService(
             workspaceIdentity: auth.context.workspaceIdentity,
           })
           .catch(() => undefined);
+        // [ulw] 评审修复（MINOR-1）：附件通知随错误携带，由回调层 catch 漏斗前置送达。
+        tagBotNoticeRepliesOn(error, preparedMessage.noticeReplies);
         throw error;
       }
       const context = {
@@ -7080,7 +7127,11 @@ export function createBotsService(
       : null;
     const effectiveSelection = selectionView?.effectiveSelection;
     if (!effectiveSelection || selectionView?.selectionIssue) {
-      throw new Error(msg(auth.locale, "sessionModelUnavailable"));
+      // [ulw] 评审修复（MINOR-1）：附件通知随错误携带，由回调层 catch 漏斗前置送达
+      //（throw 语义本身不变——仍按 §7.12 的 consumed/abort 分类处理）。
+      const error = new Error(msg(auth.locale, "sessionModelUnavailable"));
+      tagBotNoticeRepliesOn(error, preparedMessage.noticeReplies);
+      throw error;
     }
     await broadcastTaskListChange(auth.context, auth.context.activeTaskId, "resumed");
     runningTasks.add(auth.context.activeTaskId);

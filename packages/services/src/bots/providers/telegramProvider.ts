@@ -159,12 +159,15 @@ function readTelegramFileAttachment(
   if (!providerFileId) {
     return null;
   }
-  const filename =
-    typeof value.file_name === "string" && value.file_name.trim() ? value.file_name : fallbackName;
+  // §5.15（§7.32）：兜底命名打标——容器 sniff 只允许改写兜底名，provider 给过的名不动。
+  const providedFilename =
+    typeof value.file_name === "string" && value.file_name.trim() ? value.file_name : null;
+  const filename = providedFilename ?? fallbackName;
   return {
     id: providerFileId,
     kind,
     filename,
+    ...(providedFilename ? {} : { filenameIsFallback: true }),
     mimeType:
       typeof value.mime_type === "string" && value.mime_type.trim()
         ? value.mime_type
