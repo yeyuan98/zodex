@@ -1094,13 +1094,20 @@ test("A8 sniff：provider 命名的无扩展名 mp4（token 名）→ 缓存补 
   // base64url token（如 VGVNcnVrcU9z…，无扩展名），非 provider 兜底命名。
   // 旧门控仅对兜底命名开 sniff ⇒ token 名被跳过，文件名维持无扩展名、
   // mimeType 维持 provider 兜底值。新语义：无扩展名不看命名来源，ftyp isom
-  // 字节正向命中即补 .mp4。
+  // 字节正向命中即补 .mp4。[ulw] 评审修复（NIT）：fixture mimeType 用
+  // octet-stream——若 fixture 本身就是 video/mp4，mimeType 断言无法经 sniff
+  // 失败，形同虚设。
   const harness = await createHarness();
   try {
     await harness.triggerMessage({
       text: "看下这个视频",
       attachments: [
-        inboundAttachment("video", "VGVNcnVrcU9zXzREZUxK", "video/mp4", ftypBytes("isom")),
+        inboundAttachment(
+          "video",
+          "VGVNcnVrcU9zXzREZUxK",
+          "application/octet-stream",
+          ftypBytes("isom"),
+        ),
       ],
     });
     const capture = lastSendPrompt(harness);

@@ -7094,6 +7094,15 @@ export function createBotsService(
     try {
       preparedMessage = await prepareBotMessageContent(auth.bot, message, auth.locale);
     } catch (error) {
+      // [ulw] 评审修复（alpha.8 BLOCKER）：prepare/下载失败此前只转成用户回复后正常
+      // 返回，从不落日志——2026-10-05 复查中首例飞书下载失败无法归因正因如此（rider
+      // 的 warn 承诺落空）。在此漏斗单点 warn：原始错误文本自带 HTTP status +
+      // x-tt-logid（见 feishuProvider）；先例 = runtime 进入 error 态的转换 warn。
+      // 低频错误路径，不刷屏；不含凭据。
+      botsLogger.warn(
+        undefined,
+        `bot message prepare failed provider=${message.actor.provider} bot=${auth.bot.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
       // [ulw] 评审修复（MINOR-1）：prepare 中途失败时，已累积的附件通知前置送达。
       return [
         ...takeBotNoticeRepliesFrom(error),

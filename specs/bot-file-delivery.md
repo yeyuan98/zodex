@@ -926,7 +926,8 @@ botInboundAttachments.test.ts`, `botFileDeliveryTelegram.test.ts`,
    `type=audio`/`type=media` requests were contract-invalid and failed 100% of
    audio/video downloads. Image keeps `type=image`. Audio UNDERSTANDING
    (transcription) remains unsupported (owner ruling, issue #21). Download
-   failures log HTTP status + `x-tt-log-id` (warn) for diagnosis.
+   failures surface in logs via the message-prepare failure funnel
+   (`botsLogger.warn`, carrying the thrown text with HTTP status + `x-tt-logid`).
 
 ### Invariants
 

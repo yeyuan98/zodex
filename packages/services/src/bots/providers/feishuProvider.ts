@@ -2058,9 +2058,12 @@ export function createFeishuBotProvider(deps: FeishuProviderDeps): BotProviderAd
         );
         if (!response.ok) {
           // 修复原因：下载失败此前不落任何 HTTP 状态/trace-id，2026-10-05 复查中
-          // 首例失败无法归因；失败文本经既有 catch→warn 路径入日志（响应头可能
-          // 缺 x-tt-log-id，判空兜底；错误文本只追加不改动前缀，下游正则不受影响）。
-          const logId = response.headers.get("x-tt-log-id");
+          // 首例失败无法归因。[ulw] 评审修复：trace 头名按飞书文档与仓库先例
+          // （providerRequest.ts 读 x-tt-logid）为主、x-tt-log-id 兜底判空；失败
+          // 文本经 botsService prepare 失败漏斗 warn 入日志；错误文本只追加不改
+          // 前缀，formatAttachmentRejectedReason 的 /attachment download failed/i
+          // 仍匹配，用户侧仍映射 attachmentDownloadUnavailable。
+          const logId = response.headers.get("x-tt-logid") ?? response.headers.get("x-tt-log-id");
           throw new Error(
             `Feishu attachment download failed: HTTP ${response.status}${logId ? ` (logid: ${logId})` : ""}`,
           );
