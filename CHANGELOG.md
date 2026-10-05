@@ -1,5 +1,31 @@
 # Changelog
 
+## [3.14.5-alpha.8](https://github.com/yeyuan98/zodex/compare/v3.14.5-alpha.7...v3.14.5-alpha.8) (2026-10-05)
+
+### Bug Fixes
+
+* **bots:** [ulw] 评审收口——下载失败 warn 落地 prepare 漏斗 + logid 头名更正 ([da46222](https://github.com/yeyuan98/zodex/commit/da46222df02d7b0b1fa9b974d91b5d68ab79f3e6))
+  * BLOCKER：rider 此前无效——富化后的错误文本在 handleMessage 的 prepare
+  * MAJOR：trace 头名更正为 x-tt-logid（仓库先例 providerRequest.ts:118 与
+  * NIT：A8 token 名用例 fixture mimeType 由 video/mp4 改 application/
+  * 更正 c6e3bb8 披露：/download .+ failed: HTTP/i 正则从未匹配本消息形态
+  * 验证：A8 scoped 3/3；services 全量 298/298；typecheck/lint/fmt:check 通过。
+
+* **bots:** alpha.8——sniff 门放宽至任意无扩展名 + 飞书资源 type=file + 下载失败 logid ([c6e3bb8](https://github.com/yeyuan98/zodex/commit/c6e3bb896dc5d5a1fc2b87285dd31e08411ada2f))
+  * sniff 门放宽（botsService cacheResolvedAttachment ~:2309）：门控由
+  * filenameIsFallback 退役（唯一消费者是旧门控）：删除 shared/bots.ts 字段
+  * fixture 对齐披露（botInboundAttachments.test.ts）：R8 兜底命名 helper
+  * 飞书下载 type 修复（feishuProvider ~:2046）：资源 URL ternary 由
+  * 下载失败 logid rider（owner 批准，feishuProvider ~:2054）：!response.ok
+  * 验证：services 298/298（3 红→绿、守护全绿）、shared 61/61、
+
+
+### Chores
+
+* 第三方清单同步——补装 @larksuiteoapi/node-sdk 双版本落盘状态 ([0a456d2](https://github.com/yeyuan98/zodex/commit/0a456d262c59f80ea3f819e2775adcc0f4e18fc7))
+  * 本工作区 node_modules 曾落后锁文件（licenses 脚本要求清单内 1.61.1 已安装，
+  * 无代码变化；随 alpha.8 发布链路自然携带。
+
 ## [3.14.5-alpha.7](https://github.com/yeyuan98/zodex/compare/v3.14.5-alpha.6...v3.14.5-alpha.7) (2026-10-05)
 
 ### Features
