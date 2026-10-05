@@ -1,5 +1,39 @@
 # Changelog
 
+## [3.14.5-alpha.7](https://github.com/yeyuan98/zodex/compare/v3.14.5-alpha.6...v3.14.5-alpha.7) (2026-10-05)
+
+### Features
+
+* **bots:** alpha.7 出站打磨——字节安全文件名、内联图片扩展、审计去重、死窗日志限频、心跳仪表归零、image/audio dataBase64 剥离 ([7fb0f05](https://github.com/yeyuan98/zodex/commit/7fb0f05406e9931da91fadbcfb479d88fe3db8d3))
+  * §5.6 共享字节预算文件名 helper（packages/shared attachmentFilename.ts，经公开入口导出、被三站点消费）：Unicode 基名保留（修复 rig 实测 程曦简历.pdf 塌缩为 01-.pdf）、UTF-8 字节预算截断不劈码点且保留扩展名（修复 125 个 CJK 字符 = 360 字节缓存写盘 ENAMETOOLONG）、Windows 保留名中和（CON/PRN/AUX/NUL/COM1-9/LPT1-9 含带扩展形态；远端 CON.txt 出站临时物料化点是真正裸奔点，红测钉此）；botsService 入站缓存/出站临时 120B、desktop staging trace 80B / nonce 64B / filename 160B；digest/序号前缀仍在预算段之外
+  * §5.7 内联图片扩容双侧同扩：OUTBOUND_IMAGE_EXTENSIONS += .heic/.heif/.tiff/.avif；weixin inferWeixinAttachmentKind regex += heif|tiff|avif（heic 已有）——tiff/avif 微信内联渲染按 rig B3 验证，坏则依 spec 回落条款回 file
+  * §5.8 审计字段去重：path= 是唯一路径字段，file= 仅当与 path= 取值不同才输出（顶层路径/预解析失败/配额拒绝/投递前 Host 错误处同值不再双字段重复打印）；同段 §5.9 stale 一句话按 spec amendment 改写为如实版本
+  * §5.12a 死窗失败行限频（仅日志密度，零行为变化）：sendOutbound 失败线与 stream-event catch warn 共享 per (botId, peerKey) 死窗状态，channel-dead 分类 30s 惰性时间戳合并（首条照常输出、后续计数不发射、下一条件携带 suppressed=），无 timer；content-poison 永不限频；revival 保留积压开始投递或下一发送结果不再判 channel-dead 时输出一条 dead-window summary（suppressed>=1 才输出、per 死窗恰一条）；alpha.5 观测用例逐线断言按 spec 迁移注记以 mock 时钟改写到新密度（burstOrdinal/sendCount10s/fp 计数语义不变，被合并尝试仍计位）
+  * §5.14 pending 仪表归零：zcodeAgentService pendingPermissions/pendingUserInputs 条目在交互解决时打墓碑（resolved 标记退出 gauge 计数、保留键使 wasPending 去重继续生效、随既有断连/dispose 清理）——双挂点：(a) v4 resolveInteraction ACK 成功（respondPermission/respondElicitation 汇聚点，服务侧直接清理）、(b) permission.resolved / userInput.resolved 会话事件到达 host（覆盖 deny-on-stop/deadline）；墓碑 vs 删除由红测裁定为墓碑（解决后重发同 requestId 不得重新广播）
+  * §5.11 image/audio 入站 prompt attachments 停发 dataBase64（R3 rig PASS 2026-10-04 门控的 spec invariant 翻转）：渲染依据 localPath（缓存文件刚写入），同一数据不再 base64 传两遍；desktop 包装器对 dataBase64-only 附件（其它来源）原样透传不变
+  * §5.5 share_file send-failed 模型文案改写：不再断言「用户没有收到文件」——只陈述尝试失败与结局未知（桌面可能在工具超时 SHARE_FILE_TOOL_TIMEOUT_MS=330s 后完成投递）；apps/zcode-cli 无测试 harness，rig B6 人工覆盖（disclosed）
+  * §5.6 共享 helper 纯函数矩阵测试落 packages/shared/test/attachmentFilename.test.ts（保留名/截断/零漂移/fallback/staging 预算）
+
+
+### Chores
+
+* **bots:** [ulw] 评审收口——纯点号文件名兜底、死窗汇总整窗计数、dispose 清理 ([f09305a](https://github.com/yeyuan98/zodex/commit/f09305a247972aacf8a4ce86c12278d0108d70c9))
+  * MINOR-1 修复：sanitizeByteBudgetedFilename 对纯点号输出（./../…）回退
+  * NIT-2 修复：死窗汇总行 suppressed= 改为整窗累计（发射线上的分段计数分工
+  * NIT-4 修复：deadWindowFailureLogStates 随 disposeAllAndWait 清空（对齐相邻
+  * NIT-3/5 记录：非 weixin/空积压 peer 的汇总时点残余与 staging 微漂移已按
+  * 新增纯点号守卫单测（含 '..hidden' 正常形态不受影响钉）
+
+
+### Documentation
+
+* **specs:** alpha.7 出站打磨 + 观测卫生 spec 先行 ([a91abba](https://github.com/yeyuan98/zodex/commit/a91abba76484ed4016bfe9f169a3339fa871b674))
+  * bot-file-delivery.md：新增「Outbound attachment naming & inline kinds (3.14.5
+  * §5.7 出站图片扩展与微信入站推断扩至 heic/heif/tiff/avif（tiff/avif 渲染
+  * bot-file-delivery.md §9 审计项：§5.8 字段去重（path= 单一路径字段，file=
+  * bot-file-delivery.md「Inbound remote workspaces」§5.11 invariant 翻转：
+  * log-diagnostics-hygiene.md：新增 §5.12a 死窗失败行限频 amendment（sendOutbound
+
 ## [3.14.5-alpha.6](https://github.com/yeyuan98/zodex/compare/v3.14.5-alpha.5...v3.14.5-alpha.6) (2026-10-05)
 
 ### Features
