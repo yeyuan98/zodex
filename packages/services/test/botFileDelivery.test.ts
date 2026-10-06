@@ -2359,3 +2359,99 @@ test("远程 tool 配额释放：not-found 失败不消耗槽位，后续远程�
     await harness.dispose();
   }
 });
+
+// ---- Alpha 9（specs/bot-file-delivery.md「Attachment observability line」fix 3）：
+// filenameSource 必须在全部 parse 站点填充（weixin 三个分支：provider 提供名 /
+// media 兜底命名 / direct `${id}.${kind}` 直铸名）。红测先行——今天字段从不填充。
+// 仅由 cacheResolvedAttachment 观测 info 行与测试消费，绝不参与行为（退役的
+// filenameIsFallback 曾门控 sniff，本字段不得重蹈）。经导出的 getWeixinUpdates
+//（假 requester 只喂 /getupdates 应答）驱动真实解析路径，同 §5.7 测试先例。----
+
+test("A9 filenameSource（weixin）：provider 给过文件名 → provided（今天不填充 → 红）", async () => {
+  const weixinBot = { credentialRef: "cred-alpha9-naming" } as BotConfig;
+  const payload = {
+    ret: 0,
+    data: {
+      msgs: [
+        {
+          from_user_id: "wx-user-1",
+          item_list: [
+            { file_item: { filename: "annual-report.pdf", file_id: "f-alpha9-1", size: 10 } },
+          ],
+        },
+      ],
+    },
+  };
+  const requester = createBotProviderRequester(
+    async () => new Response(JSON.stringify(payload), { status: 200 }),
+  );
+  const updates = await getWeixinUpdates({
+    bot: weixinBot,
+    deps: { loadCredential: async () => "test-token", requester },
+  });
+  const attachment = updates.messages[0]?.attachments?.[0];
+  assert.ok(attachment, "必须解析出附件");
+  assert.equal(attachment.filename, "annual-report.pdf");
+  assert.equal(
+    attachment.filenameSource,
+    "provided",
+    "provider 给过的文件名必须标 provided（今天字段缺失）",
+  );
+});
+
+test("A9 filenameSource（weixin）：media 附件无文件名 → 兜底命名 weixin-attachment-N 标 fallback（今天不填充 → 红）", async () => {
+  // §2h 发现①形状：微信视频消息常不带文件名 → 兜底 weixin-attachment-N。观测行
+  // 需要区分「provider 原文」与「我们铸造」——正是 V1 H-A/H-B fork 的判别探针。
+  const weixinBot = { credentialRef: "cred-alpha9-media-fallback" } as BotConfig;
+  const payload = {
+    ret: 0,
+    data: {
+      msgs: [
+        {
+          from_user_id: "wx-user-1",
+          item_list: [{ video_item: { file_id: "v-alpha9-1", media_type: "video" } }],
+        },
+      ],
+    },
+  };
+  const requester = createBotProviderRequester(
+    async () => new Response(JSON.stringify(payload), { status: 200 }),
+  );
+  const updates = await getWeixinUpdates({
+    bot: weixinBot,
+    deps: { loadCredential: async () => "test-token", requester },
+  });
+  const attachment = updates.messages[0]?.attachments?.[0];
+  assert.ok(attachment, "必须解析出附件");
+  assert.equal(attachment.kind, "video");
+  assert.equal(attachment.filename, "weixin-attachment-1", "兜底命名形状回归钉");
+  assert.equal(attachment.filenameSource, "fallback", "兜底铸造名必须标 fallback（今天字段缺失）");
+});
+
+test("A9 filenameSource（weixin）：direct 附件缺文件名 → ${id}.${kind} 直铸名标 fallback（今天不填充 → 红）", async () => {
+  // weixinProvider.ts:706 `${id}.${kind}` 直铸正是伪扩展名词汇 {file,image,video,
+  // audio} 的 repo 内来源（§2j V1 的 H-B fork 候选）——它铸造的名字必须可观测。
+  const weixinBot = { credentialRef: "cred-alpha9-direct-mint" } as BotConfig;
+  const payload = {
+    ret: 0,
+    data: {
+      msgs: [
+        {
+          from_user_id: "wx-user-1",
+          attachments: [{ kind: "video", id: "UHRpeXo1d2hFWjJXekZ0" }],
+        },
+      ],
+    },
+  };
+  const requester = createBotProviderRequester(
+    async () => new Response(JSON.stringify(payload), { status: 200 }),
+  );
+  const updates = await getWeixinUpdates({
+    bot: weixinBot,
+    deps: { loadCredential: async () => "test-token", requester },
+  });
+  const attachment = updates.messages[0]?.attachments?.[0];
+  assert.ok(attachment, "必须解析出附件");
+  assert.equal(attachment.filename, "UHRpeXo1d2hFWjJXekZ0.video", "直铸名形状回归钉");
+  assert.equal(attachment.filenameSource, "fallback", "repo 直铸名必须标 fallback（今天字段缺失）");
+});

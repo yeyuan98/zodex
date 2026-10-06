@@ -1,9 +1,11 @@
-import { basename, isFileSystemPortError, resolvePath } from "../deps.js";
+import { basename, isFileSystemPortError, resolvePath, traceContextToLogContext } from "../deps.js";
+import { isVideoContainerBytes, sniffAttachmentContainer } from "@zcode/shared";
 import { VIDEO_INPUT_MAX_BYTES } from "@zcode/contracts";
 import type {
   FilePartSource,
   FileSystemPort,
   ImageProcessorPort,
+  Logger,
   SessionId,
   ToolArtifactStorePort,
   TraceContext,
@@ -24,6 +26,7 @@ interface InlineMediaResolverOptions {
   artifactStore?: ToolArtifactStorePort;
   existingArtifactUri?: string;
   imageProcessorPort?: ImageProcessorPort;
+  logger?: Logger;
   sessionId?: SessionId;
   traceContext: TraceContext;
   turnId?: TurnId;
@@ -176,6 +179,26 @@ export async function resolveInlineMediaAttachment(
       mime: videoData.mediaType,
       sizeBytes: videoData.sizeBytes,
       reason: "video_too_large",
+    });
+  }
+  // alpha.9 fix 4b（§2j F1 机制；PDF isPdfBytes 先例）：dataUrl 声称 video/* 的字节
+  // 必须正判命中共享 sniff 表的已知视频容器，否则不发射 video 块——恢复/重放与
+  // dataBase64 透传都经此路径，不设守卫则毒块（如飞书 WebP 封面冒充 video/mp4）
+  // 会经 replay 通道继续入模并滞留会话历史。降级为文本路径注记（此分支磁盘上无
+  // 实体文件，注记引用占位符路径 attachment-N，spec 披露成本 b）。
+  if (!isVideoContainerBytes(videoData.bytes)) {
+    warnVideoContainerMismatch(
+      options.logger,
+      options.traceContext,
+      attachment.filename ?? placeholder,
+      videoData.mediaType,
+      videoData.bytes,
+    );
+    return resolvedPathReferenceAttachment(attachment, placeholder, {
+      filename: attachment.filename,
+      mime: videoData.mediaType,
+      sizeBytes: videoData.sizeBytes,
+      reason: "unsupported-video-container",
     });
   }
   const resource = await persistAttachmentDataUrl(attachment.content, index, videoData.mediaType, {
@@ -460,6 +483,27 @@ async function resolveLocalVideoAttachment(
       source,
     });
   }
+  // alpha.9 fix 4b（§2j F1 机制；PDF 分支 isPdfBytes 先例 :295）：扩展名/mimeType
+  // 都声称是视频的字节必须正判命中共享 sniff 表的已知视频容器（mp4/mov/webm/
+  // mkv），否则不发射 video 块，降级为文本路径注记（agent Read 工具路径，微信链
+  // 路实证可用的那条）。表外真容器（AVI 等）同样降级——spec 披露成本 a，Read
+  // 工具自行按扩展名/字节识别，晚一跳仍可读。
+  if (!isVideoContainerBytes(read.content)) {
+    warnVideoContainerMismatch(
+      options.logger,
+      options.traceContext,
+      attachment.path!,
+      mime,
+      read.content,
+    );
+    return resolvedPathReferenceAttachment(attachment, attachment.path!, {
+      filename,
+      mime,
+      sizeBytes: read.sizeBytes,
+      source,
+      reason: "unsupported-video-container",
+    });
+  }
   const dataUrl = `data:${mime};base64,${Buffer.from(read.content).toString("base64")}`;
   const resource = await persistAttachmentDataUrl(dataUrl, index, mime, {
     abortSignal: options.abortSignal,
@@ -509,4 +553,24 @@ function localMediaReadFailure(
     mime,
     source,
   });
+}
+
+/** fix 4b 降级 warn：命名附件 + 期望 mime vs sniff 实测，供 rig 取证 grep。 */
+function warnVideoContainerMismatch(
+  logger: Logger | undefined,
+  traceContext: TraceContext,
+  attachmentRef: string,
+  expectedMime: string,
+  bytes: Uint8Array,
+): void {
+  const sniffedMime = sniffAttachmentContainer(bytes).mimeType ?? "unknown";
+  logger?.warn(
+    `Video attachment ${attachmentRef} degraded to path reference: bytes are not a known video container (expected ${expectedMime}, sniffed ${sniffedMime})`,
+    {
+      ...traceContextToLogContext(traceContext),
+      attachment: attachmentRef,
+      expectedMime,
+      sniffedMime,
+    },
+  );
 }

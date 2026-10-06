@@ -633,10 +633,15 @@ function readWeixinAttachmentItem(item: unknown, index: number): BotInboundAttac
   const kind = inferWeixinAttachmentKind({ ...item, ...mediaSource });
   // Alpha 8（§7.33）：兜底命名打标随 sniff 门放宽退役——无扩展名附件一律
   // content-positive-only sniff，provider 给过的名仅在带扩展名时才受保护。
+  // Bugfix（Alpha 9 fix 3 红测钉住）：readString 缺键返回 ""，`||` 链在全部缺席时
+  // 落在末位 ""——而 `"" ?? 兜底` 不触发空串合并，无名 media 附件的 filename 一直是
+  // 空串，`weixin-attachment-N` 兜底名从未真正铸出。链尾补 null 归一为 nullish，
+  // 兜底命名恢复生效（sniff 门与观测行从此拿到有名附件）。
   const providedFilename =
     readString(mediaSource, "filename") ||
     readString(mediaSource, "file_name") ||
-    readString(mediaSource, "name");
+    readString(mediaSource, "name") ||
+    null;
   const filename =
     providedFilename ??
     (kind === "image" ? `weixin-image-${index + 1}.jpg` : `weixin-attachment-${index + 1}`);
@@ -666,6 +671,10 @@ function readWeixinAttachmentItem(item: unknown, index: number): BotInboundAttac
     id: providerFileId || downloadUrl || `weixin-${index + 1}`,
     kind,
     filename,
+    // Alpha 9（fix 3）：文件名来源标注——provider 原文 provided / parse 站点兜底
+    // 铸造（weixin-attachment-N / weixin-image-N.jpg）fallback。仅由 botsService
+    // 观测 info 行与测试消费，绝不参与行为。
+    filenameSource: providedFilename ? "provided" : "fallback",
     mimeType,
     ...(sizeBytes ? { sizeBytes } : {}),
     ...(providerFileId ? { providerFileId } : {}),
@@ -703,7 +712,8 @@ function readWeixinDirectAttachment(item: unknown, index: number): BotInboundAtt
     return null;
   }
   const id = readString(item, "id") || `weixin-${index + 1}`;
-  const filename = readString(item, "filename") || `${id}.${kind}`;
+  const providedFilename = readString(item, "filename");
+  const filename = providedFilename || `${id}.${kind}`;
   const mimeType =
     readString(item, "mimeType") ||
     readString(item, "mime_type") ||
@@ -729,6 +739,9 @@ function readWeixinDirectAttachment(item: unknown, index: number): BotInboundAtt
     id,
     kind,
     filename,
+    // Alpha 9（fix 3）：直铸 `${id}.${kind}` 兜底名（伪扩展名词汇的 repo 内来源，
+    // §2j V1 的 H-B fork 候选）必须可观测——provided vs fallback 只作标注不参与行为。
+    filenameSource: providedFilename ? "provided" : "fallback",
     mimeType,
     ...(sizeBytes !== null ? { sizeBytes } : {}),
     ...(providerFileId ? { providerFileId } : {}),

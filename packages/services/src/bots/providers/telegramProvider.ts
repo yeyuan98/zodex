@@ -168,6 +168,9 @@ function readTelegramFileAttachment(
     id: providerFileId,
     kind,
     filename,
+    // Alpha 9（fix 3）：文件名来源标注——provider file_name provided / telegram-*
+    // 兜底铸造 fallback。仅由 botsService 观测 info 行与测试消费，绝不参与行为。
+    filenameSource: providedFilename ? "provided" : "fallback",
     mimeType:
       typeof value.mime_type === "string" && value.mime_type.trim()
         ? value.mime_type

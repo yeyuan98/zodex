@@ -112,6 +112,11 @@ interface HarnessOptions {
   downloadAttachment?: (
     attachment: BotInboundAttachment,
   ) => Promise<BotProviderDownloadedAttachment | null>;
+  /**
+   * Alpha 9 rider 红测接缝：fakeTaskService.sendPrompt 以该错误 reject，
+   * 驱动 sendPromptInBackground 失败漏斗（taskFailed 回复文案）。
+   */
+  sendPromptError?: Error;
 }
 
 interface Harness {
@@ -235,6 +240,9 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
       attachments?: ZCodePromptAttachment[];
       botDeliveryTarget?: ZCodeAutomationBotDeliveryTarget;
     }) => {
+      if (options.sendPromptError) {
+        throw options.sendPromptError;
+      }
       sendPromptCalls.push({
         taskId: request.taskId,
         content: request.content,
@@ -1239,6 +1247,256 @@ test("A7 §5.6 超 120 字符 CJK 文件名不再拖垮整条消息（今天字�
     );
     assert.ok(sanitizedSegment.startsWith("报"), `CJK 基名保留：${sanitizedSegment}`);
   } finally {
+    await harness.dispose();
+  }
+});
+
+// ---- Alpha 9（specs/bot-file-delivery.md「Pseudo-extension sniff, feishu
+// kind-aware keys & prompt inline video validation (3.14.5 Alpha 9)」）：
+// 红测先行（../ZCode-alpha9-plan.md Part 2 items 1/2/3/4/7/9/10；证据 §2j）。
+// 伪扩展名 {file,image,video,audio} ≡ 无扩展名（§7.34①）：内容正判命中即【替换】
+// 伪后缀；真扩展名永不改写；识别不出原样保留。W2 实现后转绿。----
+
+/** 捕获 console.log（createServiceLogger("bots") info 的缺省 sink），finally 恢复。 */
+function captureConsoleLog(): { lines: string[]; restore(): void } {
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (...args: unknown[]) => {
+    lines.push(args.map((arg) => String(arg)).join(" "));
+  };
+  return {
+    lines,
+    restore: () => {
+      console.log = original;
+    },
+  };
+}
+
+/** JPEG（JFIF）文件头——不在 sniff 表内（sniff 表无任何图片容器）。 */
+function jpegBytes(): Buffer {
+  return Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01]);
+}
+
+test("A9 R1 伪扩展名 sniff：token 名 <base64>.file + 真 MP4 字节 → 缓存改写为 .mp4 且 mimeType=video/mp4（今天维持 .file → 红）", async () => {
+  // §2j V1 实测形状：微信桥以 `<base64url token>.file` 命名送达 787,952B ftyp isom
+  // MP4。alpha.8 规则「带扩展名不改写」按字面放行 .file（伪扩展名无信息量，
+  // §7.34①）。新语义：伪后缀视为无扩展名，内容正判命中后【替换】为真后缀。
+  // fixture mimeType 用 octet-stream——若 fixture 本身就是 video/mp4，mimeType
+  // 断言无法经 sniff 失败，形同虚设（alpha.8 同型测试的 [ulw] NIT 教训）。
+  const harness = await createHarness();
+  try {
+    await harness.triggerMessage({
+      text: "看下这个视频",
+      attachments: [
+        inboundAttachment(
+          "video",
+          "UHRpeXo1d2hFWjJXekZ0.file",
+          "application/octet-stream",
+          ftypBytes("isom"),
+        ),
+      ],
+    });
+    const capture = lastSendPrompt(harness);
+    const attachment = capture.attachments?.[0];
+    assert.ok(attachment, "伪扩展名视频附件必须产出 prompt attachment");
+    assert.equal(
+      attachment.filename,
+      "UHRpeXo1d2hFWjJXekZ0.mp4",
+      "伪后缀 .file 必须被【替换】为内容实证的真后缀 .mp4（今天原样 .file）",
+    );
+    assert.equal(attachment.mimeType, "video/mp4");
+    assert.ok(attachment.localPath?.endsWith(".mp4"), "缓存路径必须带 .mp4 后缀");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("A9 R2 守护：token 名 <base64>.file + 文本字节 → 文件名原样保留", async () => {
+  // 伪扩展名门同样是 content-positive-only：识别不出（文本字节）绝不乱补/乱换后缀。
+  const harness = await createHarness();
+  try {
+    await harness.triggerMessage({
+      text: "看下这个文件",
+      attachments: [
+        inboundAttachment(
+          "file",
+          "UHRpeXo1d2hFWjJXekZ0.file",
+          "application/octet-stream",
+          Buffer.from("plain notes, not a media container at all"),
+        ),
+      ],
+    });
+    const capture = lastSendPrompt(harness);
+    const attachment = capture.attachments?.[0];
+    assert.ok(attachment);
+    assert.equal(attachment.filename, "UHRpeXo1d2hFWjJXekZ0.file", "识别不出必须原样保留");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("A9 R3 守护：真扩展名 clip.mp4 / report.pdf 任意字节 → 永不改写", async () => {
+  // §7.34① 修订后的 §7.33① 字面：「带【真实】扩展名的 provider 名永不改写」。
+  // 即使字节与扩展名不符（clip.mp4 内是乱码）也不动——真扩展名是可信信息。
+  const harness = await createHarness();
+  try {
+    await harness.triggerMessage({
+      text: "看下这两个文件",
+      attachments: [
+        inboundAttachment("video", "clip.mp4", "video/mp4", Buffer.from("garbage-not-mp4!!")),
+        inboundAttachment("file", "report.pdf", "application/pdf", Buffer.from("not-a-pdf")),
+      ],
+    });
+    const capture = lastSendPrompt(harness);
+    assert.equal(capture.attachments?.length, 2);
+    const clip = capture.attachments?.find((item) => item.filename.startsWith("clip"));
+    assert.ok(clip, "clip.mp4 必须存在");
+    assert.equal(clip.filename, "clip.mp4", "真扩展名永不改写");
+    assert.equal(clip.mimeType, "video/mp4");
+    const report = capture.attachments?.find((item) => item.filename.startsWith("report"));
+    assert.ok(report, "report.pdf 必须存在");
+    assert.equal(report.filename, "report.pdf", "真扩展名永不改写");
+    assert.equal(report.mimeType, "application/pdf");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("A9 R4 守护：.image 伪扩展名 + JPEG 字节 → 原样保留（JPEG 不在 sniff 表）", async () => {
+  // 微信桥已观测的 .image 形态（18:13 rig）：伪后缀落入伪扩展名门，但 JPEG 没有
+  // 容器指纹（sniff 表无图片条目）→ content-positive-only 不命中 → 原样保留。
+  const harness = await createHarness();
+  try {
+    await harness.triggerMessage({
+      text: "看下这张图",
+      attachments: [inboundAttachment("image", "R3cyQ25bG9j.image", "image/jpeg", jpegBytes())],
+    });
+    const capture = lastSendPrompt(harness);
+    const attachment = capture.attachments?.[0];
+    assert.ok(attachment);
+    assert.equal(attachment.filename, "R3cyQ25bG9j.image", "JPEG 不在 sniff 表，必须原样保留");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("A9 R7 伪扩展名语义守护：人名 data.file + MP4 字节 → 改名 data.mp4（provider-agnostic 门）", async () => {
+  // spec 钉住的有意边界：门不看命名来源（provenance），只看内容实证——人名的
+  // data.file 与微信桥的 token.file 同等对待。防止 W2 把门收窄到 weixin 专用。
+  const harness = await createHarness();
+  try {
+    await harness.triggerMessage({
+      text: "看下这个视频",
+      attachments: [
+        inboundAttachment("video", "data.file", "application/octet-stream", ftypBytes("isom")),
+      ],
+    });
+    const capture = lastSendPrompt(harness);
+    const attachment = capture.attachments?.[0];
+    assert.ok(attachment);
+    assert.equal(
+      attachment.filename,
+      "data.mp4",
+      "伪扩展名门 provider-agnostic：data.file → data.mp4",
+    );
+    assert.equal(attachment.mimeType, "video/mp4");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("A9 R7b 伪扩展名大小写守护：clip.FILE + MP4 字节 → 改名 clip.mp4（大小写不敏感门）", async () => {
+  // [ulw] 评审 NIT-1 收口：实现按 toLowerCase() 匹配词汇表（.FILE 同为无信息量
+  // 伪后缀），此处钉住该语义防止未来收窄；extname("clip.FILE")===".FILE" 长度
+  // 与小写一致，替换路径不受影响。
+  const harness = await createHarness();
+  try {
+    await harness.triggerMessage({
+      text: "看下这个视频",
+      attachments: [
+        inboundAttachment("video", "clip.FILE", "application/octet-stream", ftypBytes("isom")),
+      ],
+    });
+    const capture = lastSendPrompt(harness);
+    const attachment = capture.attachments?.[0];
+    assert.ok(attachment);
+    assert.equal(
+      attachment.filename,
+      "clip.mp4",
+      "大写伪后缀 .FILE 同等视为无扩展名：clip.FILE → clip.mp4",
+    );
+    assert.equal(attachment.mimeType, "video/mp4");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+// ---- Alpha 9 rider（specs/bot-message-delivery.md「User-facing business-error
+// localization」；§7.35 裁定 IN）：formatUserFacingBotError 对前置括号数字业务码
+// 做本地化包装并保留原文；纯文本透传不变。经 sendPromptInBackground 失败漏斗驱动
+// （sendPrompt reject → taskFailed 回复经 sendOutbound 送达）。----
+
+test("A9 R9 rider：sendPrompt 失败 [1210][视频输入格式/解析错误] → 回复含本地化包装（代码 1210）+ 原文（今天裸透传 → 红）", async () => {
+  const harness = await createHarness({
+    sendPromptError: new Error("[1210][视频输入格式/解析错误]"),
+  });
+  try {
+    await harness.triggerMessage({ text: "分析下这段视频" });
+    await waitForCondition(() => harness.sentMessages.length >= 1, 2000, "taskFailed 回复必须到达");
+    const replyText = harness.sentMessages.map((message) => message.text).join("\n");
+    assert.match(
+      replyText,
+      /模型服务返回错误（代码 1210）/u,
+      "必须包含本地化外壳（今天裸透传业务码，owner 误判为飞书通道故障，§2j F1）",
+    );
+    assert.match(
+      replyText,
+      /\[1210\]\[视频输入格式\/解析错误\]/u,
+      "原始错误文本必须逐字保留在包装内（不丢调试信息）",
+    );
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("A9 R9 rider 守护：纯文本错误 boom → 逐字节透传（任务失败：boom）", async () => {
+  const harness = await createHarness({ sendPromptError: new Error("boom") });
+  try {
+    await harness.triggerMessage({ text: "随便跑点什么" });
+    await waitForCondition(() => harness.sentMessages.length >= 1, 2000, "taskFailed 回复必须到达");
+    assert.equal(harness.sentMessages[0]!.text, "任务失败：boom");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("A9 R10 观测：cacheResolvedAttachment 每附件一条 info 行（provider/kind/filename/filenameSource/sniff 判定/bytes）", async () => {
+  // spec 契约行：`bot attachment cached provider=… bot=… kind=… filename=<原始名>
+  // filenameSource=provided|fallback sniff=<container=>.ext|none> bytes=<n>`。
+  // 今天 cacheResolvedAttachment 无任何观测行 → 红。该行同时是飞书 cover-vs-video
+  // 与 V1 H-A/H-B fork 的 rig 取证探针（§2j.5）。
+  const harness = await createHarness();
+  const capture = captureConsoleLog();
+  try {
+    await harness.triggerMessage({
+      text: "看下这个视频",
+      attachments: [
+        {
+          ...inboundAttachment("video", "weixin-attachment-9", "video/mp4", ftypBytes("isom")),
+          filenameSource: "fallback",
+        },
+      ],
+    });
+    const line = capture.lines.find((logged) => logged.includes("bot attachment cached"));
+    assert.ok(line, `必须发射附件观测 info 行，实际捕获：${capture.lines.join(" | ")}`);
+    assert.match(line, /provider=weixin/u);
+    assert.match(line, /kind=video/u);
+    assert.match(line, /filename=weixin-attachment-9/u, "必须记录 sniff 前的原始文件名");
+    assert.match(line, /filenameSource=fallback/u);
+    assert.match(line, /sniff=mp4=>\.mp4/u, "sniff 判定必须携带容器与扩展名结论");
+    assert.match(line, /bytes=\d+/u);
+  } finally {
+    capture.restore();
     await harness.dispose();
   }
 });

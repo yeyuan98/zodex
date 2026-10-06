@@ -125,6 +125,9 @@ const messages = {
     stopSubmitted: "已停止当前任务生成。",
     unknownCommand: "未知命令：**/{command}**",
     taskFailed: "任务失败：{message}",
+    // 3.14.5 Alpha 9 rider（specs/bot-message-delivery.md「User-facing business-error
+    // localization」§7.35）：前置 `[数字]` 括号业务码的本地化外壳，原文逐字保留在尾部。
+    modelBusinessError: "模型服务返回错误（代码 {code}）：{message}",
     taskRunning: "当前任务正在运行，稍后再试，或使用 **/停止** 停止当前任务。",
     taskSelectTitle: "当前任务 {task}\n选择任务",
     noHistoryTasks: "当前 workspace 没有历史任务。",
@@ -277,6 +280,9 @@ const messages = {
     stopSubmitted: "Current task generation stopped.",
     unknownCommand: "Unknown command: **/{command}**",
     taskFailed: "Task failed: {message}",
+    // 3.14.5 Alpha 9 rider: localized shell for leading bracketed business codes;
+    // the raw text is preserved verbatim in the tail.
+    modelBusinessError: "The model service returned an error (code {code}): {message}",
     taskRunning:
       "The current task is still running. Try again later, or use **/stop** to stop the current task.",
     taskSelectTitle: "Current task {task}\nSelect task",

@@ -1757,7 +1757,17 @@ export function createBotsService(
     if (isSessionExpiredError(error)) {
       return msg(locale, "sessionExpiredNewTaskHint");
     }
-    return error instanceof Error ? error.message : String(error);
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    // Alpha 9 rider（specs/bot-message-delivery.md「User-facing business-error
+    // localization」§7.35）：裸业务码错误（实测 BigModel/GLM `[1210][视频输入格式/解析错误]`）
+    // 原样透传进聊天曾让 owner 误判为飞书通道故障（§2j F1）。对【前置】`[数字]` 括号
+    // 业务码套本地化外壳，原文（含括号码）逐字保留在尾部，不丢调试信息；纯文本错误
+    // 不匹配前置括号形状，逐字节透传不变。匹配保守锚定串首，仅 UX 包装，无行为改动。
+    const businessErrorCode = /^\[(\d+)\]/.exec(message)?.[1];
+    if (businessErrorCode !== undefined) {
+      return msg(locale, "modelBusinessError", { code: businessErrorCode, message });
+    }
+    return message;
   }
 
   function formatAttachmentRejectedReason(error: unknown, locale: Locale | undefined): string {
@@ -2300,6 +2310,14 @@ export function createBotsService(
     await rmdir(dirPath).catch(() => undefined);
   }
 
+  /**
+   * Alpha 9（specs/bot-file-delivery.md「Pseudo-extension sniff widening」§7.34①）：
+   * 无信息量伪扩展名词汇，界定为「等价于无扩展名」。来源证据（§2j V1）：微信桥以
+   * `<base64url token>.file` / `.image` 送达真实媒体，repo 内 weixin 直铸兜底名
+   * `${id}.${kind}` 的 kind 也恰好落在这四个值。词汇表有界，禁止按模式猜测扩容。
+   */
+  const PSEUDO_ATTACHMENT_FILENAME_EXTENSIONS = new Set([".file", ".image", ".video", ".audio"]);
+
   async function cacheResolvedAttachment(params: {
     bot: BotConfig;
     message: BotInboundMessage;
@@ -2313,11 +2331,29 @@ export function createBotsService(
     // content-positive-only sniff——字节正向命中已知容器（固定偏移的精确
     // magic）才补扩展名 + 修正 mimeType；带扩展名的 provider 名永不改写
     // （走 else 分支原样落盘）；识别不出维持无扩展名（不比今天更糟）。
-    const sniffed =
-      extname(params.attachment.filename) === "" ? sniffAttachmentContainer(params.data) : {};
+    // Alpha 9（§7.34① 修订字面：「带扩展名」→「带【真实】扩展名」）：伪扩展名
+    // {file,image,video,audio} 实证为假标注（`.file` 后缀挂在 787,952B ftyp isom
+    // MP4 上，§2j V1）——等价于无扩展名参与 sniff。正判命中时【替换】而非追加
+    // 伪后缀（避免留下说谎的双后缀）；真扩展名（不在词汇表内）永不 sniff 永不
+    // 改写；该门 provider-agnostic，不看命名来源只看内容实证（人名 data.file
+    // 同等对待，spec 钉住的有意边界）。
+    const rawExtension = extname(params.attachment.filename).toLowerCase();
+    const sniffEligible =
+      rawExtension === "" || PSEUDO_ATTACHMENT_FILENAME_EXTENSIONS.has(rawExtension);
+    const sniffed = sniffEligible ? sniffAttachmentContainer(params.data) : {};
     const cachedFilename = sniffed.extension
-      ? `${params.attachment.filename}${sniffed.extension}`
+      ? rawExtension === ""
+        ? `${params.attachment.filename}${sniffed.extension}`
+        : `${params.attachment.filename.slice(0, params.attachment.filename.length - rawExtension.length)}${sniffed.extension}`
       : params.attachment.filename;
+    // Alpha 9（fix 3 观测行）：每附件一条生产可用 info——关闭 V1 H-A/H-B fork
+    // （payload 给名 vs repo 铸名）与飞书 cover-vs-video 的归因盲区（§2j.5）。
+    // filename 记 sniff 前原名（provider 怎么给的怎么看）；sniff 判定为
+    // `容器=>.扩展名`（容器名与表内扩展名一一对应），无命中为 none。
+    botsLogger.info(
+      undefined,
+      `bot attachment cached provider=${params.bot.provider} bot=${params.bot.id} kind=${params.attachment.kind} filename=${params.attachment.filename} filenameSource=${params.attachment.filenameSource ?? "provided"} sniff=${sniffed.extension ? `${sniffed.extension.slice(1)}=>${sniffed.extension}` : "none"} bytes=${params.data.byteLength}`,
+    );
     const localPath = buildAttachmentCachePath({
       botId: params.bot.id,
       providerMessageId: params.message.actor.providerMessageId,

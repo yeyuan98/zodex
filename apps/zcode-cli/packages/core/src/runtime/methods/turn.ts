@@ -431,6 +431,7 @@ export async function executeTurnCommand(
           artifactStore: this.artifactStore,
           fileSystemPort: this.fileSystemPort,
           imageProcessorPort: this.imageProcessorPort,
+          logger: this.logger,
           sessionId: this.sessionId,
           traceContext: turnTraceContext,
           turnId,

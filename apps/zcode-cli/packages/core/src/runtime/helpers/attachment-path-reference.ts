@@ -10,6 +10,7 @@ type PathReferenceReason =
   | "image_too_large"
   | "pdf_too_large"
   | "text_too_large"
+  | "unsupported-video-container"
   | "video_too_large";
 
 export function resolvedInlineTextAttachment(
@@ -99,6 +100,10 @@ function formatPathReferenceReason(reason: PathReferenceReason): string {
   if (reason === "image_too_large") return "the image is larger than the inline media budget";
   if (reason === "pdf_too_large") return "the PDF is larger than the inline PDF input limit";
   if (reason === "text_too_large") return "the text file is larger than the inline text budget";
+  // alpha.9 fix 4b：字节未正判命中已知视频容器（sniff 表），不得作为 video 块内联。
+  if (reason === "unsupported-video-container") {
+    return "the video bytes do not positively match a known video container";
+  }
   if (reason === "video_too_large") return "the video is larger than the ZCode video input limit";
   return "the file is not a known text attachment";
 }

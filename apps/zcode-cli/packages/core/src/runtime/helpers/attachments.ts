@@ -4,6 +4,7 @@ import type {
   FilePartSource,
   FileSystemPort,
   ImageProcessorPort,
+  Logger,
   SessionId,
   ToolArtifactStorePort,
   TraceContext,
@@ -35,6 +36,7 @@ type ResolveAttachmentOptions = {
   artifactStore?: ToolArtifactStorePort;
   fileSystemPort?: FileSystemPort;
   imageProcessorPort?: ImageProcessorPort;
+  logger?: Logger;
   sessionId?: SessionId;
   traceContext: TraceContext;
   turnId?: TurnId;
@@ -169,6 +171,7 @@ async function resolvedInlineAttachment(
     artifactStore?: ToolArtifactStorePort;
     existingArtifactUri?: string;
     imageProcessorPort?: ImageProcessorPort;
+    logger?: Logger;
     sessionId?: SessionId;
     traceContext: TraceContext;
     turnId?: TurnId;

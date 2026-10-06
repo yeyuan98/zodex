@@ -2,7 +2,9 @@
 
 Status: **IN FLIGHT — 3.14.5-alpha.1**. **Amended in 3.14.5-alpha.4（channel-death
 retention 三分类 + revival 语义——证据锁定 §2d；见 F1.4/F2/Typing/Invariants 各条修订
-与"Retention buffer"小节）**. Owner-reported (2026-10-02, on 3.14.5-alpha.0 but
+与"Retention buffer"小节）**. **Appended in 3.14.5-alpha.9（rider：用户可见业务错误码
+本地化包装——见文末「User-facing business-error localization」小节；随
+specs/bot-file-delivery.md 的 alpha.9 四修复同批发版）**. Owner-reported (2026-10-02, on 3.14.5-alpha.0 but
 PREEXISTENT and code-confirmed): bot session messages get stuck on the desktop and arrive
 late or only after the user sends another message; frequently MULTIPLE messages arrive as
 ONE bubble concatenated with no separator; persistent "typing"; tight repro on
@@ -252,3 +254,54 @@ multi-message bubbles anywhere; logs show flush/dispose reasons.
   共享 consumed 语义见 `specs/bot-inbound-resilience.md` §B（游标归属已迁移至该
   spec）；此处的过时 alpha.2 引用已删除。不要在此重新实现。
 - **Feishu typing-reaction surviving app restarts**: out of scope (same-process only).
+
+## User-facing business-error localization（3.14.5 Alpha 9 rider）
+
+Spec'd 2026-10-06 from ../ZCode-alpha9-plan.md rider (owner ruling §7.35 — rider
+INCLUDED; evidence: §2j F1, the raw `[1210][视频输入格式/解析错误]` BigModel/GLM
+business error surfaced verbatim into chat and misled the owner into blaming the
+feishu transport). Ships with the alpha.9 file-delivery fixes
+(specs/bot-file-delivery.md, same alpha). **Placement disclosed in the spec
+commit:** this rider lives here, not in bot-file-delivery.md, because it concerns
+error-REPLY text formatting (message-delivery UX), not file handling.
+
+### Behavior
+
+1. **Bracketed business-code wrapper.** `formatUserFacingBotError` (botsService)
+   detects an error text LED BY a bracketed numeric business code — the observed
+   shape is `[1210][视频输入格式/解析错误]` (leading `[<digits>]` bracket) — and
+   wraps it in a localized shell that PRESERVES the raw text verbatim:
+   - zh: 「模型服务返回错误（代码 {code}）：<raw>」
+   - en: "The model service returned an error (code {code}): <raw>"
+     New zh/en keys via the bots messages mechanism (e.g. `modelBusinessError`
+     with `{code}` and `{message}` placeholders). The code inside the wrapper is
+     extracted from the leading bracket; `<raw>` is the FULL original text
+     (brackets included), so no debugging information is lost.
+2. **Plain errors pass through UNCHANGED.** An error text without a leading
+   bracketed numeric code is returned byte-identically to today — no wrapping,
+   no reformatting. The existing `sessionExpiredNewTaskHint` precedence is
+   unchanged (it keeps winning before any wrapper logic runs).
+3. **Both funnels.** The wrapper applies inside `formatUserFacingBotError`, so
+   both call sites benefit unchanged: the provider-callback failure funnel
+   (`callbackFailed: {message}`) and the `sendPromptInBackground` task-failure
+   funnel (`taskFailed: {message}`). UX only.
+
+### Invariants
+
+- Text-only change: no error classification, retry, logging, or queueing
+  behavior changes; failure semantics (consumed/abort, §7.12) untouched.
+- The raw error text always survives verbatim inside the shell (the code is
+  duplicated into the shell AND kept in the raw tail).
+- Bracket-pattern over-match is the accepted, disclosed risk (§7.35 brief);
+  after the alpha.9 inline video guard lands, garbage-bytes 1210s mostly
+  disappear, shrinking exposure.
+
+### Acceptance scenarios (red-first on 3.14.5-alpha.8)
+
+1. A task whose `sendPrompt` rejects with `[1210][视频输入格式/解析错误]` →
+   the user-facing failure reply contains the localized shell WITH the code
+   (`模型服务返回错误（代码 1210）`) AND the raw tail
+   (`[1210][视频输入格式/解析错误]`) verbatim (today: the raw text passes
+   through unwrapped).
+2. Guard: a task whose `sendPrompt` rejects with plain `boom` → the failure
+   reply is byte-identical to today's passthrough (no shell).
