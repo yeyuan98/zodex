@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.14.5](https://github.com/yeyuan98/zodex/compare/v3.14.5-alpha.9...v3.14.5) (2026-10-06)
+
+### Documentation
+
+* **specs:** 标记 alpha.7/8/9 已发布并 rig 验证，3.14.5 train 收官 → official 3.14.5 ([52719f3](https://github.com/yeyuan98/zodex/commit/52719f3ed98edd72ae604a41801b3382184957ae))
+  * bot-file-delivery.md Status：alpha.7「spec'd/implementation pending」改为
+  * bot-message-delivery.md Status：rider 条目补发版哈希与 rig 验证结论，
+
 ## [3.14.5-alpha.9](https://github.com/yeyuan98/zodex/compare/v3.14.5-alpha.8...v3.14.5-alpha.9) (2026-10-06)
 
 ### Bug Fixes
