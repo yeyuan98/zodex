@@ -79,8 +79,11 @@ Bot 会话与桌面会话共用**同一权限模型**。解锁后 bot 默认 `bu
 2. Bots 建任务时经 `createTask` 参数携带 `permissionAutoDenyMs`（分钟×60000），
    经 adapter v4 分支落入 `createSession` payload 顶层（与 `offPeakToolEnabled`
    同模式的 additive 字段；v4 payload 为非 strict z.object——旧 CLI 静默丢弃该
-   键 = 优雅降级为「无 deadline，提示照旧等待」，不产生错误）。bot 未配置或
-   非 bot 任务不携带该字段（桌面会话行为逐字节不变）。
+   键 = 优雅降级为「无 deadline，提示照旧等待」，不产生错误）。**ZCode-Agent
+   provider 的 bot 任务一律携带**（未配置时按读取时默认 10 分钟——与 D2 的
+   「默认 10」一致；实现注记 2026-10-06：澄清初版「bot 未配置不携带」的歧义
+   措辞）；非 bot 任务与非 ZCode-Agent provider 不携带（桌面会话行为逐字节
+   不变）。
 3. CLI session record 保存该值；broker 注册权限交互时，若所属 session 携带
    deadline，登记表为该条目启用倒计时。
 
@@ -139,12 +142,16 @@ Bot 会话与桌面会话共用**同一权限模型**。解锁后 bot 默认 `bu
 ### 3d. 重启对账
 
 1. CLI 侧：reannounce 恢复（3b.4）。
-2. Bot 侧：服务启动时扫描持久化 context——存在已过期的 pendingPermissionOptions
-   条目时：清除该 pending；CLI 侧 deny 经 `permission_response` 到达（或已到）
-   → 常规清理；若 CLI 为旧版本无倒计时（降级窗口），提示在旧 CLI 侧等待，
-   用户仍可应答（first-wins）——deny-note 不补发（避免误导），披露为降级残留。
-   未到期条目不重设 bot 侧 timer（reminder 丢失接受——纯装饰性）；CLI 侧
-   倒计时继续（权威）。
+2. Bot 侧（实现注记 2026-10-06——启动扫描降级为惰性清理，如实记录）：bot 侧
+   timer 为纯内存态（重启无武装 timer，§3c 表「服务启动扫描」行平凡满足）；
+   持久化 context 中的 pendingPermissionOptions 不做启动扫描，改**惰性清理**：
+   下一个 `permission_response`/终态/`/new`/下一次提示覆盖时经
+   `clearPendingPermissionOptions` 收口；迟到 `/approve`//`/deny` 走
+   already-resolved 反馈。陈旧 pending 记录在无任何事件时静默留存（无渲染面，
+   无行为影响——授权清理路径均已覆盖）。若 CLI 为旧版本无倒计时（降级窗口），
+   提示在旧 CLI 侧等待，用户仍可应答（first-wins）——deny-note 不补发（避免
+   误导），披露为降级残留。未到期条目不重设 bot 侧 timer（reminder 丢失
+   接受——纯装饰性）；CLI 侧倒计时继续（权威）。
 
 ### 3e. 边界
 
