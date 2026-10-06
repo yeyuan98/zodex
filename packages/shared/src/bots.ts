@@ -295,6 +295,14 @@ export interface BotState {
   mode: BotContextMode;
   activeTaskId: string | null;
   draftOptions?: BotDraftOptions;
+  /**
+   * F2（specs/bot-permissions.md §8.2，alpha.1）：当前 active task 建任务时冻结的
+   * 权限无应答 deadline（与 createTask 传给 CLI 的 permissionAutoDenyMs 同值）。
+   * reminder/deny-note 武装只读该持久值，绝不读活配置（E7 虚假「已自动拒绝」根因）；
+   * 任务早于该字段/映射丢失 ⇒ 缺席 ⇒ 不武装。随 context 离开 task 模式（/new 等）
+   * 清除；终态/permission_response 不清（任务仍可续跑，19a 钉住）。
+   */
+  permissionAutoDenyMs?: number;
   pendingPermissionOptions?: BotPendingPermissionOption[];
   pendingElicitation?: BotPendingElicitation;
   telegramOffset?: number;
@@ -649,6 +657,9 @@ export const botsStateFileSchema = z
         mode: z.enum(["draft", "task"]),
         activeTaskId: z.string().min(1).nullable(),
         draftOptions: botDraftOptionsSchema.optional(),
+        // F2（specs/bot-permissions.md §8.2）：active task 冻结 deadline 持久化字段——
+        // 必须进 schema，否则 writeState/readState 的 zod parse 会剥离该键（武装读不到）。
+        permissionAutoDenyMs: z.number().int().positive().optional(),
         pendingPermissionOptions: z
           .array(
             z.object({

@@ -60,6 +60,10 @@ async function createSession(
   if (typeof payload.permissionAutoDenyMs === "number") {
     const record = requireRecord(host, sessionId);
     record.permissionAutoDenyMs = payload.permissionAutoDenyMs;
+    // F2（spec §8.2.4 CLI resume 缺口）：建档同时持久化会话级 deadline entry——
+    // 重启后 resume 重建 record 不带该字段，broker 回落读 entry 才能继续武装倒计时；
+    // 钩子 best-effort（失败仅 warn），record 字段仍是本次进程内的主源。
+    await host.persistSessionPermissionDeadline?.(sessionId, payload.permissionAutoDenyMs);
   }
   // createSession.config 消费——草稿态 UI 的先行选择（模型/思考深度/
   // 模式）在首发之前应用并补发事件，首条 turn 即用所选配置。必须在 firstInput 之前。

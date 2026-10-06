@@ -12,6 +12,7 @@ import {
   type PermissionBrokerRequest,
   type PermissionBrokerRequestOptions,
   type PermissionBrokerResult,
+  type SessionId,
 } from "@zcode/contracts";
 import {
   WORKFLOW_REFINE_PERMISSION_OPTION_ID,
@@ -612,7 +613,14 @@ export function buildPermissionInteractionRegistrationOptions(
  * permissionAutoDenyMs）；重启后 record 经 resume 重建不携带该值，倒计时恢复改由
  * 持久化 session entry 的绝对时间承担（两者并列，登记表侧 initialAutoResolution
  * 优先于重新武装）。
+ * F2（spec §8.2.4 CLI resume 缺口，owner 决策 2026-10-06）：resume 重建 record 不带
+ * deadline 字段时，回落读取会话级 permission-deadline entry（createSession 建档时经
+ * host 钩子持久化，与 per-interaction permission-auto-resolution 条目同一 store/
+ * overwrite 模式）——record 字段仍是建档主源，无 entry ⇒ 无倒计时（桌面/未配置
+ * 语义不变，场景20b）；建档路径行为不变（场景20c）。
  */
+const SESSION_ENTRY_PERMISSION_DEADLINE = "permission-deadline";
+
 async function resolvePermissionDeadline(
   context: ZCodeProtocolAgentServerContext,
   request: PermissionBrokerRequest,
@@ -621,7 +629,9 @@ async function resolvePermissionDeadline(
   initialAutoResolution?: V4InteractionRegistrationOptions["initialAutoResolution"];
 }> {
   const sessionRecord = context.sessions.get(String(request.sessionId));
-  const permissionAutoDenyMs = sessionRecord?.permissionAutoDenyMs;
+  const permissionAutoDenyMs =
+    sessionRecord?.permissionAutoDenyMs ??
+    (await readPersistedPermissionDeadline(context, request));
   const initialAutoResolution = await readPersistedAutoResolution(
     context,
     request,
@@ -631,6 +641,68 @@ async function resolvePermissionDeadline(
     ...(permissionAutoDenyMs !== undefined ? { permissionAutoDenyMs } : {}),
     ...(initialAutoResolution ? { initialAutoResolution } : {}),
   };
+}
+
+/**
+ * F2（spec §8.2.4）：resume 形态 record 的 deadline 回落读取——会话级
+ * permission-deadline entry 按 time.updated 取最新一条，data.permissionAutoDenyMs
+ * 必须为正数；store 缺席/读取失败仅 warn 并返回 undefined（无倒计时，不阻断交互）。
+ */
+async function readPersistedPermissionDeadline(
+  context: ZCodeProtocolAgentServerContext,
+  request: PermissionBrokerRequest,
+): Promise<number | undefined> {
+  const sessionStore = context.deps?.sessionStore;
+  if (!sessionStore?.sessionEntries) return undefined;
+  try {
+    const entries = await sessionStore.sessionEntries({
+      sessionID: request.sessionId,
+      type: SESSION_ENTRY_PERMISSION_DEADLINE,
+    });
+    const latest = [...entries].sort((left, right) => right.time.updated - left.time.updated)[0];
+    const value = latest && isRecord(latest.data) ? latest.data.permissionAutoDenyMs : undefined;
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+  } catch (error) {
+    context.logger?.warn("Failed to restore session permission deadline", {
+      error: error instanceof Error ? error.message : String(error),
+      event: "zcode_protocol.permission_deadline_restore_failed",
+      module: "bootstrap.zcode_protocol",
+      sessionId: request.sessionId,
+    });
+    return undefined;
+  }
+}
+
+/**
+ * F2（spec §8.2.4）：会话级 deadline 持久化写入——v4 createSession 建档写入 record
+ * 字段的同时经 host 钩子调用（单一写入方）。稳定 id ⇒ overwrite 语义（与
+ * permission-auto-resolution:<requestId> 同模式）；写失败仅 warn：record 字段仍是
+ * 本次进程内的主源，entry 只服务重启后 resume 的新提示。
+ */
+export async function persistSessionPermissionDeadlineEntry(
+  context: ZCodeProtocolAgentServerContext,
+  sessionId: string,
+  permissionAutoDenyMs: number,
+): Promise<void> {
+  const sessionStore = context.deps?.sessionStore;
+  if (!sessionStore?.saveSessionEntry) return;
+  const now = Date.now();
+  try {
+    await sessionStore.saveSessionEntry({
+      id: `${SESSION_ENTRY_PERMISSION_DEADLINE}:${sessionId}`,
+      sessionID: sessionId as SessionId,
+      type: SESSION_ENTRY_PERMISSION_DEADLINE,
+      time: { created: now, updated: now },
+      data: { permissionAutoDenyMs },
+    });
+  } catch (error) {
+    context.logger?.warn("Failed to persist session permission deadline", {
+      error: error instanceof Error ? error.message : String(error),
+      event: "zcode_protocol.permission_deadline_persist_failed",
+      module: "bootstrap.zcode_protocol",
+      sessionId,
+    });
+  }
 }
 
 /**

@@ -1,8 +1,6 @@
 import { ServiceChannels } from "@zcode/shared";
 import { createServiceDescriptor } from "../descriptors.js";
 import type {
-  ZCodeConfigOption,
-  ZCodeProvider,
   BotConfig,
   BotContextState,
   BotInboundMessage,
@@ -52,12 +50,6 @@ export interface BotBindCodeResult {
 
 export interface BotListWorkspaceRefsParams {
   currentWorkspace?: BotWorkspaceRef;
-}
-
-export interface BotUserConfigOptionsParams {
-  workspacePath: string;
-  workspaceIdentity?: string;
-  provider: ZCodeProvider;
 }
 
 export interface BotAutomationRunWatchParams {
@@ -153,7 +145,6 @@ export interface IBotsService {
   getStatus(): Promise<BotServiceStatus>;
   getConfig(): Promise<BotsConfigFile>;
   listWorkspaceRefs(params?: BotListWorkspaceRefsParams): Promise<BotWorkspaceRef[]>;
-  getUserConfigOptions(params: BotUserConfigOptionsParams): Promise<ZCodeConfigOption[]>;
   beginFeishuRegistration(
     params?: BotFeishuRegistrationBeginParams,
   ): Promise<BotFeishuRegistrationBeginResult>;

@@ -31,6 +31,7 @@ import {
   encodeCustomModelValue,
   getPermissionRequestPreview,
   getSupportedBotReplyGranularities,
+  getZCodeAgentAvailableModes,
   normalizeBotReplyGranularity,
   type ZCodeConfigOption,
   type ZCodeElicitationRequest,
@@ -101,7 +102,6 @@ import type {
   BotSaveBotResult,
   BotShareFileTaskDeliveryOptions,
   BotTestResult,
-  BotUserConfigOptionsParams,
   IBotsService,
 } from "./bots.js";
 import {
@@ -813,6 +813,9 @@ const BOT_RETAINED_BUFFER_MAX_BYTES = 64 * 1024;
 const BOT_PERMISSION_REMINDER_OFFSET_MINUTES = 2;
 const BOT_PERMISSION_REMINDER_MIN_DEADLINE_MINUTES = 5;
 const BOT_PERMISSION_REMINDER_OFFSET_MS = BOT_PERMISSION_REMINDER_OFFSET_MINUTES * 60_000;
+// F1（specs/bot-permissions.md §8.1，rig-221723 D1）：watcher 侧 seen-map 的容量上限
+//（有界 map 先例 = BOT_TASK_DELIVERY_REGISTRY_MAX，淘汰最旧防长运行内存增长）。
+const BOT_PERMISSION_PROMPT_SEEN_MAX = 200;
 
 /**
  * specs/bot-permissions.md §3c（3.15.0 Track B）：bot 侧权限策略 timer 的 E2E 时钟缩放
@@ -1379,6 +1382,76 @@ export function createBotsService(
   // E2E 时钟缩放在服务创建时一次解析（CLI 登记表先例：构造期固定，测试在创建 harness
   // 前设置 env）；生产恒为 1。
   const permissionTimerScale = resolveBotPermissionTimerScale(process.env);
+  // F1（specs/bot-permissions.md §8.1，rig-221723 D1/E1）：watcher 侧 DEDICATED 有界
+  // seen-map（requestId → options hash）。host pendingPermissions 登记表是收口权威，
+  // 本表只是 belt-and-braces 防御网（host 回归/混版旧 CLI 窗口下的重复事件兜底）：
+  // - 明确不键于 pendingPermissionOptions——后者只保存最新请求，重复 A 的再渲染会
+  //   把 pending 拖回 A、覆盖并发 B 的记录（场景18b 钉住）；
+  // - 服务实例内存态（跨 watcher 重建存活）；空 map 时首提示必须渲染（安全网不得
+  //   掩盖 host 回归，场景18a 钉住）。
+  const seenPermissionPromptOptionsHashes = new Map<string, string>();
+  /**
+   * F1（spec §8.1）：permission_request 渲染前的 seen 判定——同 requestId 已渲染过
+   * 则抑制第二次渲染。requestId 缺失或为 adapter 合成兜底字面量 "unknown" 时永不去重
+   * （陷阱 b：混版旧 CLI 可能把两条 distinct 并发提示折叠成一条，场景18c 钉住）。
+   * requestId 每次 ask 现铸（permission-flow.ts），seen 键不会吃掉合法再提示。
+   */
+  function rememberBotPermissionPromptSeen(
+    requestId: string,
+    options: readonly ZCodePermissionOption[],
+  ): boolean {
+    if (!requestId || requestId === "unknown") {
+      return true;
+    }
+    if (seenPermissionPromptOptionsHashes.has(requestId)) {
+      return false;
+    }
+    const optionsHash = createHash("sha256")
+      .update(JSON.stringify(options.map((option) => [option.optionId, option.kind])))
+      .digest("hex")
+      .slice(0, 16);
+    seenPermissionPromptOptionsHashes.delete(requestId);
+    seenPermissionPromptOptionsHashes.set(requestId, optionsHash);
+    while (seenPermissionPromptOptionsHashes.size > BOT_PERMISSION_PROMPT_SEEN_MAX) {
+      const oldestKey = seenPermissionPromptOptionsHashes.keys().next().value;
+      if (oldestKey === undefined) break;
+      seenPermissionPromptOptionsHashes.delete(oldestKey);
+    }
+    return true;
+  }
+  // F3（specs/bot-permissions.md §8.3，rig-221723 D4）：有界 recently-self-answered
+  // requestId 集合——聊天自答（按钮/文本）以命令 ack 为单确认，permission_response
+  // 处理器查阅本集合抑制 watcher 的 permissionResolved note；跨端/桌面应答、CLI
+  // 自动拒绝（permissionAutoDenied）与 B2.3 stop-deny 不经记录 ⇒ note 照发。
+  // 仅在 respondPermission 提交成功（submitted=true）时记录——迟到点击（false）的
+  // 解析权威在外部，note 不得被吞。requestId 每次 ask 现铸，TTL 只是防御性回收。
+  const BOT_PERMISSION_SELF_ANSWERED_MAX = 200;
+  const BOT_PERMISSION_SELF_ANSWERED_TTL_MS = 60_000;
+  const recentlySelfAnsweredPermissionRequestIds = new Map<string, number>();
+  function rememberSelfAnsweredPermission(requestId: string): void {
+    const now = Date.now();
+    recentlySelfAnsweredPermissionRequestIds.delete(requestId);
+    recentlySelfAnsweredPermissionRequestIds.set(requestId, now);
+    while (recentlySelfAnsweredPermissionRequestIds.size > BOT_PERMISSION_SELF_ANSWERED_MAX) {
+      const oldestKey = recentlySelfAnsweredPermissionRequestIds.keys().next().value;
+      if (oldestKey === undefined) break;
+      recentlySelfAnsweredPermissionRequestIds.delete(oldestKey);
+    }
+    for (const [key, recordedAt] of recentlySelfAnsweredPermissionRequestIds) {
+      if (now - recordedAt > BOT_PERMISSION_SELF_ANSWERED_TTL_MS) {
+        recentlySelfAnsweredPermissionRequestIds.delete(key);
+      }
+    }
+  }
+  /** F3：permission_response 处理器查阅——命中即自答（单确认已由 ack 交付）并消费条目。 */
+  function consumeSelfAnsweredPermission(requestId: string): boolean {
+    const recordedAt = recentlySelfAnsweredPermissionRequestIds.get(requestId);
+    if (recordedAt === undefined) {
+      return false;
+    }
+    recentlySelfAnsweredPermissionRequestIds.delete(requestId);
+    return Date.now() - recordedAt <= BOT_PERMISSION_SELF_ANSWERED_TTL_MS;
+  }
   const streamingCardRequestControllers = new Set<AbortController>();
   const transientInteractionCards = new Map<
     string,
@@ -1738,6 +1811,9 @@ export function createBotsService(
       draftOptions,
       pendingPermissionOptions: undefined,
       pendingElicitation: undefined,
+      // F2（spec §8.2）：冻结 deadline 属于刚离开的 active task——进入草稿即失效，
+      // 防止下一个任务（或 miss 任务）误按旧 deadline 武装（与 pending 同一清理缝）。
+      permissionAutoDenyMs: undefined,
     };
     // specs/bot-permissions.md §3c（W3b）：pending 随 /new 清空（§4.2 既有先例）时，
     // 策略 timer 必须一并清除——否则 deadline 会对已废弃的 pending 补发误导性文案。
@@ -2758,11 +2834,6 @@ export function createBotsService(
     };
   }
 
-  async function listUserConfigOptions(
-    _params: BotUserConfigOptionsParams,
-  ): Promise<ZCodeConfigOption[]> {
-    return [];
-  }
   async function ensureBotStorageMigrated(): Promise<void> {
     // 单向导入已收口到 Repo；这里只等待初始化，不再读取旧模型字段或重写当前状态。
     if (!botStorageMigrationPromise) {
@@ -3071,17 +3142,6 @@ export function createBotsService(
     return readConfigSelectCurrentValue(options, "mode") ?? task.mode;
   }
 
-  async function listProviderConfigOptionsForActiveTask(
-    task: Pick<ZCodeTaskMeta, "workspacePath" | "workspaceIdentity">,
-    activeProvider: ZCodeProvider,
-  ): Promise<ZCodeConfigOption[]> {
-    return listUserConfigOptions({
-      workspacePath: task.workspacePath,
-      workspaceIdentity: task.workspaceIdentity,
-      provider: activeProvider,
-    });
-  }
-
   function normalizeBotDraftOptions(draftOptions: BotDraftOptions): BotDraftOptions {
     // Bugfix: bot-state 里可能还残留旧三方 CLI 草稿 provider。
     // 如果直接复用，/new 后首条消息会重新创建第三方 runtime，绕过 ZCode Agent 单一事实源。
@@ -3201,19 +3261,43 @@ export function createBotsService(
     const selection = draftOptions.modelSelection
       ? view?.effectiveSelection
       : view?.preferredSelection;
-    if (!selection) return [];
-    const model = view?.providers
-      .find((provider) => provider.providerId === selection.providerId)
-      ?.models.find((candidate) => candidate.modelId === selection.modelId);
-    const spec = model?.config.optionSpecs.reasoningLevel;
-    if (!spec) return [];
+    // F4（spec §8.4 接受边界）：模型不可解析的 draft 仍不列任何选项（modeMissing）——
+    // 与 thoughtLevel 平权（thought_level 依赖 model.optionSpecs，mode 依赖模型已在场）；
+    // rig C1 使用已配置模型的 bot。
+    const model = selection
+      ? view?.providers
+          .find((provider) => provider.providerId === selection.providerId)
+          ?.models.find((candidate) => candidate.modelId === selection.modelId)
+      : undefined;
+    if (!model) return [];
+    // F4（specs/bot-permissions.md §8.4，rig-221723 RC1）：draft /mode 选项源——从
+    // getZCodeAgentAvailableModes（桌面 composer 同源）合成 mode select；当前值 =
+    // 读取时默认 build（draftOptions.mode 缺省即 build，不落盘回写）。此前只合成
+    // thought_level ⇒ 解锁后 draft /mode 恒回 modeMissing。
+    const modeOption: ZCodeConfigOption = {
+      id: "mode",
+      name: "Mode",
+      category: "mode",
+      type: "select",
+      currentValue: draftOptions.mode?.trim() || "build",
+      // [ulw] NIT-1：label 与 active 路径（active.configOptions 的 mode.name）同口径，
+      // 避免 draft 显示 "build" 而 active 显示 "Ask before changes" 的口径分裂。
+      options: getZCodeAgentAvailableModes().map((mode) => ({
+        value: mode.id,
+        name: mode.name,
+        description: mode.description,
+      })),
+    };
+    const spec = model.config.optionSpecs.reasoningLevel;
+    if (!spec) return [modeOption];
     return [
+      modeOption,
       {
         id: "thought_level",
         name: "Reasoning",
         category: "thought_level",
         type: "select",
-        currentValue: selection.options?.reasoningLevel ?? "",
+        currentValue: selection?.options?.reasoningLevel ?? "",
         options: spec.values.map((value) => ({ value, name: value })),
       },
     ];
@@ -5464,30 +5548,45 @@ export function createBotsService(
   }
 
   /**
-   * 在 permission_request 渲染点武装两个策略 timer。时长与 createTask 传递的 deadline 同源
-   * 同式（同一 bot 配置快照 + 同一 normalizePermissionTimeoutMinutes；§3c 表「deadline 配置
-   * 中途变更：无效（不重设）」——本次 pending 的 deadline 已定）。§3c 表「同 requestId 再
-   * 提示：不重设」——同键已存在时保持原 timer（时钟权威在登记表 3b.4）。
+   * 在 permission_request 渲染点武装两个策略 timer。F2（specs/bot-permissions.md
+   * §8.2，rig-221723 E7）：时长只读 bot context 持久化的冻结 permissionAutoDenyMs
+   * （createTask 时写入，与 CLI createSession 冻结值同源同值）——绝不读活配置：
+   * 任务运行期间调低配置后，活配置武装会提前发出与 CLI 事实不符的「已自动拒绝」
+   * （E7 虚假文案根因——今读 bot.currentOptions.permissionTimeoutMinutes）。miss
+   * （任务早于该字段/映射丢失）⇒ reminder 与 deny-note 均不武装（deadline 未知 ⇒
+   * 两个时点都不可计算；「不补发避免误导」的推论），绝不活配置重武装（场景19c）。
+   * §3c 表「同 requestId 再提示：不重设」——同键已存在时保持原 timer（时钟权威在
+   * 登记表 3b.4）。
    */
   function armBotPermissionPolicyTimers(params: {
     bot: BotConfig;
     actor: BotActor;
     taskId: string;
     requestId: string;
+    permissionAutoDenyMs: number | undefined;
   }): void {
-    const { bot, actor, taskId, requestId } = params;
+    const { bot, actor, taskId, requestId, permissionAutoDenyMs } = params;
     const key = permissionPolicyTimerKey(bot.id, actor, requestId);
     if (permissionPolicyTimers.has(key)) {
       return;
     }
-    const timeoutMinutes = normalizePermissionTimeoutMinutes(
-      bot.currentOptions.permissionTimeoutMinutes,
-    );
+    if (
+      typeof permissionAutoDenyMs !== "number" ||
+      !Number.isFinite(permissionAutoDenyMs) ||
+      permissionAutoDenyMs <= 0
+    ) {
+      // F2 miss：无持久化冻结 deadline ⇒ 不武装（spec §8.2.2），reminder 一并跳过。
+      botsLogger.info(
+        undefined,
+        `bot permission policy timers skipped (no persisted deadline) bot=${bot.id} task=${taskId} requestId=${requestId}`,
+      );
+      return;
+    }
     const scaleDuration = (durationMs: number): number =>
       permissionTimerScale > 1
         ? Math.max(1, Math.round(durationMs / permissionTimerScale))
         : durationMs;
-    const deadlineMs = scaleDuration(timeoutMinutes * 60_000);
+    const deadlineMs = scaleDuration(permissionAutoDenyMs);
     const entry: {
       botId: string;
       requestId: string;
@@ -5496,7 +5595,7 @@ export function createBotsService(
       reminderTimer?: ReturnType<typeof setTimeout>;
       denyNoteTimer?: ReturnType<typeof setTimeout>;
     } = { botId: bot.id, requestId, actor, deadlineAt: Date.now() + deadlineMs };
-    if (timeoutMinutes > BOT_PERMISSION_REMINDER_MIN_DEADLINE_MINUTES) {
+    if (permissionAutoDenyMs > BOT_PERMISSION_REMINDER_MIN_DEADLINE_MINUTES * 60_000) {
       const reminderDelayMs = Math.max(
         1,
         deadlineMs - scaleDuration(BOT_PERMISSION_REMINDER_OFFSET_MS),
@@ -5531,7 +5630,7 @@ export function createBotsService(
     permissionPolicyTimers.set(key, entry);
     botsLogger.info(
       undefined,
-      `bot permission policy timers armed bot=${bot.id} task=${taskId} requestId=${requestId} deadlineMinutes=${timeoutMinutes} reminder=${timeoutMinutes > BOT_PERMISSION_REMINDER_MIN_DEADLINE_MINUTES}`,
+      `bot permission policy timers armed bot=${bot.id} task=${taskId} requestId=${requestId} deadlineMs=${permissionAutoDenyMs} reminder=${permissionAutoDenyMs > BOT_PERMISSION_REMINDER_MIN_DEADLINE_MINUTES * 60_000}`,
     );
   }
 
@@ -6382,6 +6481,13 @@ export function createBotsService(
         }
       }
       if (event.type === "permission_request") {
+        // F1（specs/bot-permissions.md §8.1）：seen-map 防御判定必须先于一切渲染与
+        // pending 写入——重复事件（host 收口失效/混版窗口）在此整段抑制，否则会二次
+        // 发送提示卡并把 pendingPermissionOptions 拖回旧 requestId（Telegram 双卡 +
+        // E9 僵尸卡的 watcher 侧根因）。
+        if (!rememberBotPermissionPromptSeen(event.requestId, event.options)) {
+          return;
+        }
         const locale = await readMessageLocale();
         stopTyping(event.taskId);
         // Bugfix（F3 specs/bot-message-delivery.md）：交互边界必须先落正文——卡片 provider seal，
@@ -6504,7 +6610,8 @@ export function createBotsService(
             return;
           }
           // specs/bot-permissions.md §3c.1（W3b）：提示已在聊天内可见 ⇒ 在渲染点武装
-          // reminder/deny-note 两个策略 timer（时长与 createTask 传出的 deadline 同源同式）。
+          // reminder/deny-note 两个策略 timer。F2（§8.2，alpha.1）：时长只读 context
+          // 持久化的冻结 permissionAutoDenyMs（建任务时写入），不读活配置。
           // 修复原因（[ulw] 评审 R1-6）：permissionReply 未渲染（createSelectionReply 返回
           // 空）时不得武装——pending 已写入但聊天内没有任何可见提示，deadline 时刻补发
           // 提醒/超时文案只会误导；该 pending 由后续 permission_request 覆盖或终态收口。
@@ -6513,6 +6620,7 @@ export function createBotsService(
             actor,
             taskId: event.taskId,
             requestId: event.requestId,
+            permissionAutoDenyMs: context.permissionAutoDenyMs,
           });
         }
         return;
@@ -6535,6 +6643,13 @@ export function createBotsService(
         const resolvedNoteId: BotMessageId = useAutoDeniedNote
           ? "permissionAutoDenied"
           : "permissionResolved";
+        // F3（specs/bot-permissions.md §8.3，rig-221723 D4）：聊天自答（按钮/文本命令）
+        // 已以命令 ack 为单确认——抑制本 watcher 的独立 permissionResolved note。抑制
+        // 只作用于注记本身：pending 清理、broadcastTaskListChange、timer 清除与 transient
+        // 卡片退休 UX 照常执行。文本路径的 watcher 闭包 pending 副本不随命令清理更新，
+        // 不能依赖 pending 清理竞态判自答（W1 实测），集合抑制是唯一可靠判别。CLI 自动
+        // 拒绝不在集合内（从未记录）⇒ permissionAutoDenied 超时文案照发（§3c.2 不变）。
+        const selfAnswered = consumeSelfAnsweredPermission(event.requestId);
         const hadPendingPrompt = await clearPendingPermissionOptions(
           context,
           "permission_response",
@@ -6558,7 +6673,7 @@ export function createBotsService(
           );
           return;
         }
-        if (hadPendingPrompt) {
+        if (hadPendingPrompt && !selfAnswered) {
           await sendOutbound(
             bot,
             createOutbound(actor, msg(await readMessageLocale(), resolvedNoteId)),
@@ -7572,6 +7687,16 @@ export function createBotsService(
         },
       };
       const zcodeTaskService = await resolveZCodeTaskServiceForContext(auth.context);
+      // F2（specs/bot-permissions.md §8.2，rig-221723 E7）：deadline 在建任务时刻冻结
+      // 一次——同一值既传给 CLI（createSession 冻结值），也随任务状态持久化于 bot
+      // context（供 reminder/deny-note 武装只读）。此后配置中途变更对本次任务不可见
+      // （下一个任务生效，与 mode 同语义）；非 ZCode-Agent provider 不携带（显式清掉
+      // context 里可能残留的旧任务值）。
+      const permissionAutoDenyMs =
+        draftOptions.provider === ZCODE_AGENT_PROVIDER
+          ? normalizePermissionTimeoutMinutes(auth.bot.currentOptions.permissionTimeoutMinutes) *
+            60_000
+          : undefined;
       const task = await zcodeTaskService.createTask({
         workspacePath: auth.context.workspacePath,
         workspaceIdentity: auth.context.workspaceIdentity,
@@ -7584,14 +7709,7 @@ export function createBotsService(
         // specs/bot-permissions.md §3a.2（W3b）：bot 权限无应答 deadline（分钟×60000）——
         // 读取时归一（缺省 10）；仅 ZCode-Agent provider 任务携带（与 mode 咽喉同门），
         // 经 v4 createSession additive 字段落入 CLI session record；非 ZCode provider 不带。
-        ...(draftOptions.provider === ZCODE_AGENT_PROVIDER
-          ? {
-              permissionAutoDenyMs:
-                normalizePermissionTimeoutMinutes(
-                  auth.bot.currentOptions.permissionTimeoutMinutes,
-                ) * 60_000,
-            }
-          : {}),
+        ...(permissionAutoDenyMs !== undefined ? { permissionAutoDenyMs } : {}),
       });
       const taskTitle = deriveTaskTitle(preparedMessage.content, preparedMessage.zcodeAttachments);
       const broadcastTask = taskTitle ? { ...task, title: taskTitle } : task;
@@ -7621,6 +7739,9 @@ export function createBotsService(
         mode: "task" as const,
         activeTaskId: task.taskId,
         draftOptions: undefined,
+        // F2（spec §8.2.1）：冻结 deadline 随任务状态一并持久化（武装点只读该值）；
+        // undefined 时显式覆盖残留旧值，防止上一个任务的 deadline 泄漏给新任务。
+        permissionAutoDenyMs,
       };
       await writeContext(context);
       // Bugfix: Bot 首发不经过 UI 本地 deriveTaskTitle/optimistic cache。
@@ -7955,7 +8076,6 @@ export function createBotsService(
     },
     getConfig: () => repo.readConfig(),
     listWorkspaceRefs,
-    getUserConfigOptions: listUserConfigOptions,
     beginFeishuRegistration(params) {
       return beginFeishuAppRegistration(providerRequester, params?.domain);
     },
@@ -8695,12 +8815,15 @@ export function createBotsService(
                   : findSelectConfigOption(optionSource, commandName)?.currentValue;
               const currentValue =
                 typeof rawCurrentValue === "string" ? rawCurrentValue : undefined;
-              const currentLabel = readConfigSelectLabelForValue(
-                optionSource,
-                commandName,
-                currentValue,
-                { locale: auth.locale, provider: draftOptions.provider },
-              );
+              const currentLabel =
+                commandName === "mode"
+                  ? // F4（spec §8.4）：draft /mode 标题与 active 路径同口径——展示原始
+                    // mode token（/status 模式行同款），不经本地化 label。
+                    currentValue
+                  : readConfigSelectLabelForValue(optionSource, commandName, currentValue, {
+                      locale: auth.locale,
+                      provider: draftOptions.provider,
+                    });
               const selectOption = findSelectConfigOption(optionSource, commandName);
               const options = listConfigSelectOptions(optionSource, commandName, {
                 locale: auth.locale,
@@ -8735,23 +8858,22 @@ export function createBotsService(
             }
             const active = await requireActiveTask(message, auth);
             if (!active.ok) return active.reply;
-            const optionSource =
-              commandName === "mode" && active.task.provider
-                ? await listProviderConfigOptionsForActiveTask(
-                    active.task,
-                    normalizeAgentProviderToZCodeAgent(active.task.provider),
-                  )
-                : active.configOptions;
+            // F4（specs/bot-permissions.md §8.4，rig-221723 RC1）：/mode 选项源改用
+            // active.configOptions（thoughtLevel 分支同款先例；恒含 mode select——
+            // zcode-agent-model-state.ts 的 zcodeSessionSettingsToZCodeConfigOptions 保证）。
+            // 原 listProviderConfigOptionsForActiveTask → listUserConfigOptions 是三方
+            // CLI 遗留永久空 stub，解锁后 /mode 恒回 modeMissing。
+            const optionSource = active.configOptions;
             const currentValue =
               commandName === "mode"
                 ? readCurrentActiveTaskMode(active.task, active.configOptions)
                 : readConfigSelectCurrentValue(active.configOptions, commandName);
             const currentLabel =
               commandName === "mode"
-                ? readConfigSelectLabelForValue(optionSource, commandName, currentValue, {
-                    locale: auth.locale,
-                    provider: normalizeAgentProviderToZCodeAgent(active.task.provider),
-                  })
+                ? // F4（spec §8.4）：/mode 标题展示原始 mode token（用户可回传的
+                  // value，与 /status 模式行同口径）——本地化 label（如「计划」）
+                  // 会掩盖可输入值，场景22b 钉住 currentValue 必须可见。
+                  currentValue
                 : readConfigSelectCurrentLabel(active.configOptions, commandName, {
                     locale: auth.locale,
                     provider: normalizeAgentProviderToZCodeAgent(active.task.provider),
@@ -8863,10 +8985,9 @@ export function createBotsService(
             }
             const active = await requireActiveTask(message, auth);
             if (!active.ok) return active.reply;
-            const optionSource =
-              commandName === "mode" && active.task.provider
-                ? await listProviderConfigOptionsForActiveTask(active.task, active.task.provider)
-                : active.configOptions;
+            // F4（spec §8.4）：设置路径选项源与列表路径同源（active.configOptions），
+            // 解析出的 selectOption.id 经 setConfigOption 下发——两扇前门同一后端。
+            const optionSource = active.configOptions;
             const selectOption = findSelectConfigOption(optionSource, commandName);
             const displayOptions = listConfigSelectOptions(optionSource, commandName, {
               locale: auth.locale,
@@ -8940,6 +9061,13 @@ export function createBotsService(
               workspaceId: getWorkspaceKey(taskEntry.workspacePath, taskEntry.workspaceIdentity),
               mode: "task",
               activeTaskId: task.taskId,
+              // F2（spec §8.2）：切换目标任务的冻结 deadline 不为本 context 所知
+              // （可能早于字段/由其他端创建）⇒ miss 不武装；残留旧任务值会武装出
+              // 与 CLI 登记表不符的虚假文案（E7 类），显式清掉。重选当前任务不清
+              // （任务未变，冻结事实仍有效）。
+              ...(auth.context.activeTaskId === task.taskId
+                ? {}
+                : { permissionAutoDenyMs: undefined }),
             } satisfies BotContextState;
             await writeContext(nextContext);
             pendingTaskSelectionsByContext.delete(getActorContextKey(message.actor));
@@ -9063,6 +9191,10 @@ export function createBotsService(
               await clearPendingPermissionOptions(auth.context, "text_response", option.requestId);
               return [createOutbound(message.actor, msg(auth.locale, "permissionLateHandled"))];
             }
+            // F3（spec §8.3）：自答已以本命令 ack（permissionSubmitted/permissionDenied）
+            // 为单确认——记录 requestId，供 permission_response 处理器抑制重复的
+            // permissionResolved note（场景21a）。
+            rememberSelfAnsweredPermission(option.requestId);
             await writeContext({
               ...auth.context,
               pendingPermissionOptions: nextPermissionOptions,
@@ -9139,6 +9271,10 @@ export function createBotsService(
               await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);
               return [createOutbound(message.actor, msg(auth.locale, "permissionLateHandled"))];
             }
+            // F3（spec §8.3）：自答已以本命令 ack 为单确认——记录 requestId 供
+            // permission_response 处理器抑制重复 note（场景21a2：文本路径 watcher 闭包
+            // pending 副本不随此处的清理更新，抑制不得依赖 pending 竞态）。
+            rememberSelfAnsweredPermission(command.requestId);
             // specs/bot-permissions.md §4.1：文本路径应答提交成功后同样清扫 pending 记录
             // （/new writeDraftContext 为既有先例），避免陈旧按钮继续命中已失效的 requestId。
             await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);
@@ -9177,6 +9313,9 @@ export function createBotsService(
               await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);
               return [createOutbound(message.actor, msg(auth.locale, "permissionLateHandled"))];
             }
+            // F3（spec §8.3）：文本 /deny 自答同 approve——ack 为单确认，记录 requestId
+            // 供 permission_response 处理器抑制重复 note。
+            rememberSelfAnsweredPermission(command.requestId);
             // specs/bot-permissions.md §4.1：文本路径拒绝提交成功后同样清扫 pending 记录
             // （/new writeDraftContext 为既有先例）。
             await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);
