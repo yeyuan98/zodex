@@ -28,7 +28,18 @@ release `99359f6`). Outbound polish (3.14.5 Alpha 7: shared byte-budget filename
 inline image kinds widening, audit field dedup, image/audio dataBase64 strip) **spec'd
 2026-10-05** — see "Outbound attachment naming & inline kinds (3.14.5 Alpha 7)" below;
 implementation pending. §5.5 (share-file timeout wording) is CLI-only and rides the same
-alpha without a spec section here (apps/zcode-cli has no test harness; rig B6 covers it).
+alpha without a spec section here (apps/zcode-cli has had a core unit-test harness since
+3.14.5-alpha.5 — `node --test --import ./test/registerTsLoader.mjs "test/*.test.ts"` in
+`apps/zcode-cli/packages/core`; rig B6 covers it).
+Alpha 9 (pseudo-extension sniff widening + feishu kind-aware resource keys + prompt
+inline video byte validation + attachment observability) **spec'd 2026-10-06** from
+../ZCode-alpha9-plan.md (§2j postmortem evidence — bundles `zcode-logs-20261005-224253.zip`
+and `-234804.zip` incl. model-io rollouts; rulings §7.34, rider §7.35) — see
+"Pseudo-extension sniff, feishu kind-aware keys & prompt inline video validation
+(3.14.5 Alpha 9)" below; red tests written first, implementation pending. The alpha.9
+error-localization rider lives in specs/bot-message-delivery.md (placement disclosed in
+the spec commit: error-reply text is message-delivery UX, not file delivery).
+
 Full-feature playbook: ../ZCode-handoff.md.
 Owners: bots service (`packages/services/src/bots/botsService.ts`) — command admission, path
 policy, size gates, `taskDeliveryRegistry` + `deliverWorkspaceFile` single writer + tool-source
@@ -891,15 +902,19 @@ botInboundAttachments.test.ts`, `botFileDeliveryTelegram.test.ts`,
    - Amended ruling: provider-given filenames WITH an extension are never
      rewritten; extension-less names get a content-verified extension only when
      the bytes positively match a known container (the Alpha 6 fallback-only
-     trigger protected garbage token names — retired).
+     trigger protected garbage token names — retired). **Alpha 9 further amends
+     the letter (§7.34①): "with an extension" → "with a REAL extension" —
+     pseudo-extensions {file, image, video, audio} are treated as
+     extension-less for sniffing; see the Alpha 9 section below.**
    - `filenameIsFallback` retires (its only consumer was the old fallback-only
      gate).
    - Residuals (accepted): (i) a text file whose bytes literally begin with
      ID3/OggS/RIFF/ftyp signatures gains a media extension — near-impossible for
-     real documents (§7.32 lineage, accepted); (ii) names carrying ANY dot (e.g.
-     the once-observed weixin CDN token suffixed `.image`) are left untouched by
-     the `extname===""` gate — revisit only if suffixed video tokens are ever
-     observed.
+     real documents (§7.32 lineage, accepted); (ii) names carrying ANY dot are
+     left untouched by the `extname===""` gate — **CLOSED by Alpha 9: suffixed
+     video tokens WERE observed on the 2026-10-05 evening rig (`<base64>.file`
+     on real MP4 bytes, §2j V1), which is exactly what the Alpha 9
+     pseudo-extension widening fixes.**
 
 4. **Attachment cache lazy prune — NO daemon (§5.3).** The
    `~/.zcode/v2/bot-attachments` cache previously only ever grew. Alpha 6 bounds
@@ -928,6 +943,11 @@ botInboundAttachments.test.ts`, `botFileDeliveryTelegram.test.ts`,
    (transcription) remains unsupported (owner ruling, issue #21). Download
    failures surface in logs via the message-prepare failure funnel
    (`botsLogger.warn`, carrying the thrown text with HTTP status + `x-tt-logid`).
+   **3.14.5 Alpha 9 amendment:** the resource KEY choice becomes kind-aware —
+   a video message carries BOTH the cover's `image_key` and the video's
+   `file_key`, and the Alpha ≤8 fixed image_key-first order downloads the
+   WebP cover (§2j F1a). See the Alpha 9 section below for the per-kind key
+   order.
 
 ### Invariants
 
@@ -1055,10 +1075,10 @@ live in specs/log-diagnostics-hygiene.md.
   sanitizer (the desktop `sanitizePathSegment` ASCII-strip and the botsService
   char-slice are replaced, not supplemented).
 - Provider-supplied filenames WITH AN EXTENSION are never rewritten by sniffing
-  (Alpha 6 rule as amended by Alpha 8/§7.33: extension-less names get a
-  content-verified extension only when the bytes positively match a known
-  container) — the helper only sanitizes/truncates/budgets; it never invents
-  extensions.
+  (Alpha 6 rule as amended by Alpha 8/§7.33 and Alpha 9/§7.34① — extension-less
+  AND pseudo-extension {file,image,video,audio} names get a content-verified
+  extension only when the bytes positively match a known container) — the helper
+  only sanitizes/truncates/budgets; it never invents extensions.
 - The remote staging path structure (`<root>/<trace>/<nonce>/<index>-<filename>`) and
   its privacy hardening (chmod 700/600, private root) are unchanged; only the segment
   sanitizers change.
@@ -1094,3 +1114,174 @@ live in specs/log-diagnostics-hygiene.md.
 6. §5.8 services (`botFileDelivery.test.ts`): the audit success line for a tool
    delivery whose filename equals its `path=` carries `path=` only — `file=` appears
    only when the two differ (today: both always printed).
+
+## Pseudo-extension sniff, feishu kind-aware keys & prompt inline video validation (3.14.5 Alpha 9)
+
+Spec'd 2026-10-06 from ../ZCode-alpha9-plan.md (§2j postmortem evidence — bundles
+zcode-logs-20261005-224253.zip + zcode-logs-20261005-234804.zip incl. model-io
+rollouts; owner rulings §7.34, rider §7.35). Red tests written first; targets
+`3.14.5-alpha.9`. Four fixes at the inbound lifecycle + CLI prompt path; NO alpha.8
+rollback (§7.34② — the same input produces the identical `.file` outcome at alpha.7)
+and NO model-side change (§2j: the model never rejected a real video).
+
+### Behavior
+
+1. **Pseudo-extension sniff widening (fix 1; amends §7.33①'s letter — owner
+   ratification §7.34①: "with an extension" → "with a REAL extension").** At
+   cache time (`cacheResolvedAttachment`), names whose extension is one of the
+   bounded pseudo-extension vocabulary {`file`, `image`, `video`, `audio`} are
+   treated as information-less — exactly equivalent to extension-less — for
+   sniffing. Evidence: the WeChat bridge has now been observed naming videos
+   `<base64url-token>.file` and `.image` (three shapes across sessions, §2j V1),
+   and the repo's own weixin direct-attachment fallback mints `${id}.${kind}`
+   with kind ∈ the same four values. The gate is provider-agnostic by design.
+   - Content-POSITIVE-only, same as the Alpha 6/8 gate: bytes must positively
+     match a known container in the shared `sniffAttachmentContainer` magic
+     table (zero extra IO). On match the pseudo-suffix is REPLACED by the true
+     extension (`R3cy….file` → `R3cy….mp4`) and the mimeType is corrected to
+     the real container type.
+   - No match → the name stays exactly as-is (never worse than today). Names
+     with REAL extensions are never rewritten.
+   - Rationale, stated honestly: the pseudo-suffix is empirically false
+     labeling — the bytes disprove it (`.file` on 787,952 B `ftyp isom` MP4,
+     §2j) — and REPLACE (not append) avoids leaving a lying double suffix.
+     Note: the 120-byte cache-name budget is NOT a rationale here — the shared
+     byte-budget filename helper preserves extensions by construction.
+   - Intended edge, guard-pinned: a human-named `data.file` carrying real MP4
+     bytes IS renamed to `data.mp4` — the gate is content-proven and
+     provider-agnostic, not provenance-based.
+
+2. **Feishu kind-aware resource key (fix 2; F1a — we were downloading the WebP
+   COVER, not the video).** `readFeishuAttachment` picks the download key per
+   attachment kind instead of the fixed image_key-first order (which, since
+   v3.14.3, silently preferred a video message's cover):
+   - video: `file_key || media_key || image_key` — `image_key` is a LAST
+     RESORT only: a text-less video message must never be silently dropped,
+     and taking the last resort is warn-observable (the item-3 line flags it);
+   - audio: `file_key || audio_key`;
+   - image: `image_key`;
+   - file: `file_key || media_key || key`.
+     The chosen key MUST drive BOTH `id` and `providerFileId` — `id` feeds the
+     attachment cache digest, so a cover cached under the old image-first choice
+     can never be re-served for a video message (no stale-cover replay).
+   - sizeBytes assumption (disclosed): media-message `content.size` may be
+     absent or may be the COVER's size. Absent → the existing post-download
+     `byteLength` fallback governs (§7.32 single-check semantics unchanged).
+     A cover-sized value may bypass the >5MB pre-download rejection —
+     accepted and disclosed: an oversized real video already degrades
+     gracefully downstream (the CLI path-note route); the item-3 observability
+     line settles the facts on the next rig run.
+
+3. **Attachment observability line (fix 3; the probe that keeps us honest).**
+   `cacheResolvedAttachment` emits exactly ONE info-level line per attachment
+   (service logger `bots`; per-attachment frequency; no paths beyond the
+   filename; no credentials):
+   `bot attachment cached provider={provider} bot={botId} kind={kind} filename={raw} filenameSource={provided|fallback} sniff={container=>ext|none} bytes={byteLength}`
+   - `filename={raw}` logs the PRE-sniff name as the provider delivered it;
+     `sniff` is the verdict `mp4=>.mp4`-style on a content match, `none`
+     otherwise (covers both the extension-less and the pseudo-extension gate
+     shapes).
+   - `filenameSource` re-introduces the Alpha 8-retired fallback marker under
+     a new name: `BotInboundAttachment.filenameSource?: "provided" |
+"fallback"` (additive, optional). It is consumed ONLY by this log line
+     and tests — NEVER by behavior (the retired `filenameIsFallback` once
+     gated sniffing; this field must not).
+   - Populated at ALL provider parse sites: weixin media fallback
+     (`weixin-attachment-N` / `weixin-image-N.jpg`), weixin direct-mint
+     (`${id}.${kind}`), weixin provided names, feishu (`file_name` present vs
+     msgType-minted), telegram (`file_name` present vs `telegram-*`
+     fallbacks). Pinned by per-provider tests.
+   - Purpose: closes the V1 H-A/H-B fork (payload-given vs repo-minted
+     `.file`) and proves cover-vs-video on the next feishu rig run.
+
+4. **Prompt inline video validation (fix 4b; the 1210 enabler,
+   rollout-confirmed §2j).** The CLI prompt-inlining path must NOT emit a
+   `video/*` content block unless the bytes POSITIVELY match a known video
+   container. New shared helper `isVideoContainerBytes(data)`
+   (packages/shared; built on the `sniffAttachmentContainer` table — its
+   VIDEO entries mp4/mov/webm/mkv qualify; the audio entries m4a/mp3/wav/ogg
+   do NOT) is applied at BOTH video-bearing branches of
+   `apps/zcode-cli/.../attachment-media-resolver.ts`:
+   - the local-bytes branch `resolveLocalVideoAttachment` (after
+     `readBinaryFile`), and
+   - the inline/dataUrl branch `resolveInlineMediaAttachment`'s video case
+     (resume/replay + dataBase64 passthrough — leaving it unguarded would
+     keep the poison path open through replay).
+     Guard rule: bytes do NOT positively match a known video container → do NOT
+     emit the video block; degrade to the TEXT PATH NOTE
+     (`resolvedPathReferenceAttachment` shape — exactly today's kind=file
+     behavior, the route that demonstrably works on WeChat) + a warn log. New
+     additive `PathReferenceReason` member `unsupported-video-container`.
+   - Disclosed cost (a): a REAL video in a container the sniff table does not
+     know (e.g. AVI) also degrades to the path-note — the agent Read path
+     (`read-video` + transform) handles extension/bytes itself, so the video
+     still works, one hop later; guard test documents this.
+   - Disclosed cost (b): on the inline/replay branch there is no real file on
+     disk — the degrade note references the placeholder path
+     (`attachment-N`).
+   - No audio guard: no audio inline branch exists (audio rides path-note
+     text only).
+   - Precedent: the PDF branch's `isPdfBytes` guard (local read + inline
+     `parseInlinePdfDataUrl`).
+   - Residual (no action): sessions poisoned BEFORE this fix keep their bad
+     history blocks until they roll out of context.
+     The alpha.9 rider that ships with these fixes (raw business-error
+     localization in `formatUserFacingBotError`) is spec'd in
+     specs/bot-message-delivery.md — placement decision disclosed in the spec
+     commit (error-reply text is message-delivery UX, not file delivery).
+
+### Invariants
+
+- The pseudo-extension vocabulary is bounded to exactly {file, image, video,
+  audio} — never grown on pattern guesses. Names with REAL extensions are
+  byte-identical to today (never sniffed, never rewritten).
+- Sniffing stays content-positive-only in every gate shape (extension-less,
+  pseudo-ext): no positive container match → name unchanged.
+- The feishu chosen key is the single source of truth: `id === providerFileId
+=== <chosen key>`; no second key-derivation path. A video message is never
+  silently dropped while any usable key exists (image_key last resort).
+- `filenameSource` never gates behavior: removing it would change only the
+  observability line and tests.
+- The CLI guard emits NO video block on non-container bytes at either branch;
+  real-container videos and the PDF branch are otherwise byte-identical to
+  today; the degrade reuses the existing text path-note shape (no new wire
+  types).
+- Zero behavior change elsewhere: alpha.8 semantics untouched (§7.34②).
+
+### Acceptance scenarios (red-first on 3.14.5-alpha.8; evidence-locked §2j)
+
+1. R1 services (`botInboundAttachments.test.ts`): WeChat-shape token name
+   `<base64>.file` + real MP4 bytes (ftyp isom) → cached filename
+   `<base64>.mp4`, mimeType `video/mp4` (today: stays `.file`).
+2. R2 guard: `<base64>.file` + text bytes → name unchanged.
+3. R3 guards: `clip.mp4` / `report.pdf` with non-matching bytes → names never
+   rewritten.
+4. R4 guard: `.image` + JPEG bytes → unchanged (JPEG is not in the sniff
+   table).
+5. R5 services (`botFileDeliveryFeishu.test.ts`): feishu video-MESSAGE payload
+   (content carries image_key AND file_key AND file_name `.mp4`) → the parsed
+   attachment's `id`/`providerFileId` = file_key AND the download requests
+   `resources/{file_key}?type=file` (today: image_key wins and the cover is
+   fetched).
+6. R6 guards (`botFileDeliveryFeishu.test.ts`): image message → image_key;
+   audio → file_key || audio_key with `type=file`; video message WITHOUT
+   file_key → image_key last resort (documents no-silent-drop); media_key-only
+   video → media_key.
+7. R7 semantic guard: human-named `data.file` + MP4 bytes → renamed
+   `data.mp4` (provider-agnostic gate; red today via the same mechanism as
+   R1).
+8. R8 CLI core suite (`apps/zcode-cli/packages/core/test/`, alpha.5
+   clamp-test precedent; asserts observable resolver output only): (a) WebP
+   bytes named `.mp4` kind=video on the LOCAL branch → NOT inlined as video;
+   text path note instead (red today: inlines garbage); (b) the same garbage
+   shape on the INLINE/dataUrl branch (resume/replay) → equally degraded (red
+   today); (c) real MP4 + kind=video → inlined video block (guard, matches
+   today); (d) AVI bytes (RIFF/AVI, not in the table) → degrades to
+   path-note (documents disclosed cost a); (e) PDF branch unchanged (guard).
+9. R9 rider (spec: specs/bot-message-delivery.md): `[1210][视频输入格式/解析错误]`
+   → wrapped localized text containing the code AND the raw tail; plain
+   `boom` → passthrough verbatim.
+10. R10 observability: `cacheResolvedAttachment` emits the info line carrying
+    `filenameSource` + the sniff verdict (one services test); per-provider
+    parse-site tests pin `filenameSource` population (weixin provided /
+    media-fallback / direct-mint, feishu, telegram).
