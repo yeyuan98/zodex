@@ -1,5 +1,76 @@
 # Changelog
 
+## [3.15.0-alpha.0](https://github.com/yeyuan98/zodex/compare/v3.14.5...v3.15.0-alpha.0) (2026-10-06)
+
+### Features
+
+* **bots:** 权限提示退休与清理——permission_response 处理 + 终态清空 + 孤儿清扫 + 迟到反馈 ([6e68a51](https://github.com/yeyuan98/zodex/commit/6e68a51660a99903cf3684c3fb9a4fead5073061))
+  * watcher 新增 permission_response 事件处理（镜像 elicitation_response，spec §4.1）：按 requestId 清除 pendingPermissionOptions + broadcastTaskListChange(permission_resolved) + 退休聊天侧提示 UX——transient interaction card 存在时补上此前缺失的第三处 finalize，非瞬态渠道（微信文本）补发一条本地化退休注记（permissionResolved，best-effort、非保留，失败仅 warn）。
+  * 终态清理（spec §4.2）：task_complete/task_error 处理器与 /stop drain 路径清空 pendingPermissionOptions（此前终态只清 pendingElicitation；/new writeDraftContext 为既有先例）。
+  * 孤儿清扫（spec §4.1）：文本 /approve、/deny 应答提交成功（或已收口）后清除该 requestId 的 pending 记录，不再滞留到下一次 permission_request 覆盖。
+  * 迟到点击反馈（spec §4.3）：respondPermission 返回 false（CLI 自动拒绝/他端已应答）时回本地化「已被处理/已自动拒绝」反馈（permissionLateHandled，zh/en）；序号按钮路径 handledAt 吞并语义不变。
+  * 清除统一收口到 clearPendingPermissionOptions 助手（writeContext 单写者规则保留 cursor/token 字段），注释标注 W3b（§3c timer 生命周期表）的挂接点：permission_response / 终态 / stop。
+  * 红测转绿：场景4（permission_response 清除 pending）、场景5（task_complete 清空）；新增场景13（迟到点击 ⇒ 反馈 + pending 清扫，fake respondPermission 增加旋钮）；场景4 追加微信文本退休注记断言（transient 卡片 finalize 为 Feishu 专属路径，缺口如实披露）。
+
+* **bots:** 权限无应答 bot 侧落地——deadline 传递 + 提醒/自动拒绝文案 + 超时配置字段 ([4ec16f4](https://github.com/yeyuan98/zodex/commit/4ec16f4835e01dfa5b7efd6d93540e70cb8fab6b))
+  * shared：BotCurrentOptions 新增 permissionTimeoutMinutes（schema 1..1440 整数，写入不注入默认）+ 纯函数 normalizePermissionTimeoutMinutes（读取时默认 10、数值字符串解析、小数截断、clamp；E.19 红测转绿）
+  * shared：新增 BOT_PERMISSION_TIMER_SCALE_ENV（ZCODE_E2E_BOT_PERMISSION_TIMER_SCALE）测试时钟缩放 seam（先例 = ASK_USER_QUESTION_E2E_CLOCK_SCALE_ENV，仅 ZCODE_ENV=test、1..1000、时长除以系数）
+  * bots：建任务 createTask（v4Create 咽喉）按 normalize×60000 携带 permissionAutoDenyMs（仅 ZCode-Agent provider 任务；缺省 10 分钟也携带，避免与 CLI 倒计时脱节）
+  * bots：permission_request 渲染点武装 reminder（deadline−2min，恰一次，≤5min 整体跳过）与 deny-note（deadline 时刻「权限超时未应答，已自动拒绝」）两个策略 timer（spec §3c 声明的受控例外）；deny 权威唯一在 CLI 登记表，timer 只管聊天可见性
+  * bots：两条 timer 文案 best-effort sendOutbound、非保留（不进 channel-dead 保留缓冲）、失败仅 warn；触发时重读 bot 配置，禁用/删除 ⇒ 抑制
+  * bots：timer 清除收口——clearPendingPermissionOptions（permission_response/terminal/stop/text_response）+ stale-watcher 清理（无 note）+ /new writeDraftContext + 服务 dispose；同 requestId 再提示不重设、配置中途变更不重设（§3c 生命周期表）
+  * bots：§B2.3 提示发送失败 stop-deny 分支提前 return，不再武装 timer（先答后不发，防与事实不符的「超时」文案）
+  * ui：Manage bot 表单新增「权限超时（分钟）」数字字段（D2 ruling；空 = 默认 10，提交经 shared helper 归一，zh/en i18n）
+  * test：场景 createTask 传递（7⇒420000 / 缺省⇒600000）+ 场景9a/9b（恰一次提醒/短 deadline 无提醒）+ 场景10（发送失败零保留条目，revival 无序言断言）+ 场景11（elicitation pending 原样存活）+ 场景15（禁用抑制）
+
+* **bots:** 解锁 bot 权限模式（默认 build）+ yolo→build 迁移 + /status 模式行 ([6deb35f](https://github.com/yeyuan98/zodex/commit/6deb35f472648585789979bb555c3d40d382445a))
+  * 解锁（specs/bot-permissions.md §1）：删除 BOT_FORCED_MODE 及三处强制——draft 初始化改读 bot 配置 currentOptions.mode（读取时默认 build、不落盘回写，经既有 repo.readConfig() 单一配置路径解析）；/new 任务继承改用 readCurrentActiveTaskMode 沿用 active task 实际模式；建任务咽喉 applyDraftConfigOptions 下发草稿自身 mode（setMode 仍为唯一前门，provider 不支持跳过分支保留）。
+  * mode.list/mode.set 移除 modeLocked 短路，模式选择走 thoughtLevel 同款通用机械；taskRunning 拒绝保留（桌面平权，运行中任务保持其模式）；messages.ts 退休 modeLocked zh/en key（dep:refs 验证无其他引用）。
+  * 迁移（§2）：状态文件版本 3→4（bot-state.v4.json，v3 降级只读快照）——加载时一次性把 v3 yolo 草稿翻转 build，幂等（版本守卫即迁移，v4 中用户显式选择的 yolo 不再翻转）；v2 legacy 导入路径应用同一 flip；cursor/token 等兄弟字段按 writeContext 单写者规则原样保留；无 draftOptions 的 context 跳过；无聊天通知、无版本分支业务代码。
+  * /status 模式行（§5）：draft 显示 draftOptions.mode、active task 显示其实际模式（readCurrentActiveTaskMode）、缺失显示「未设置/not set」（statusModelUnset 同款 fallback）；新增 statusMode/statusModeUnset zh/en key；断连降级视图同样带模式行。
+  * 修订 force-yolo 出站防泄露边界注释（泄露边界不再依赖权限提示结构性缺席）；botsService.ts:2006、telegramChannelRuntime 游标注释同步状态文件新名。
+  * 测试：botPermissions 场景 1/2/3/6 转绿；新增 §7.14 guard（currentOptions.mode=yolo 的 bot 仍派发 setMode("yolo")）；场景 4/5（permission_response/终态清理，W4）保持红。
+
+* **cli:** 权限无应答自动拒绝——v4 createSession deadline 字段 + 交互登记表 permission kind 扩展 ([863ee37](https://github.com/yeyuan98/zodex/commit/863ee377b4e1f4091657481f9c0aa3090d548e40))
+  * shared：v4 createSession payload 新增 additive 字段 permissionAutoDenyMs（与 offPeakToolEnabled 同模式，非 strict 语义保持——旧 CLI 静默丢弃 = 无 deadline 降级），转绿 createSessionPermissionDeadline 场景一/二（spec §3a.2/§7.6）
+  * services：createTask 参数与 adapter v4Create 分支透传 permissionAutoDenyMs（bot 配置分钟×60000；非 bot 任务不携带，桌面行为不变）
+  * CLI session record seam：ZCodeProtocolSessionRecord/V4SessionRecordView 增加 permissionAutoDenyMs，由 v4 createSession handler 建档后直接写入（deadline 只走 v4，v3 strict schema 不动，spec §6 不变量）
+  * 登记表：V4InteractionRegistrationOptions kind 扩展 "permission" + per-entry autoResolutionMs——注册即武装（不排队头）、无 hiddenGrace（首态 visibleCountdown）、不可 snooze；到期/过期恢复 resolve 无 optionId/action 的 deny-shaped 应答，askUserQuestion 的 accept 空答案与 head-only/全局 gate 语义逐字节不变（spec §3b.1/§3b.2/§3b.4/§3b.5），转红测 A/B/C 且 guard D 保持绿
+  * broker：requestPermission 注册改走 kind "permission"，读 session record deadline + 持久化恢复（SESSION_ENTRY_PERMISSION_AUTO_RESOLUTION 新 entry，与 user_input 同一 store 覆写模式）；抽出纯函数 buildPermissionInteractionRegistrationOptions 并导出 v4AnswerToPermissionResponse（W1 测试去掉临时 cast 与命名空间探测）
+  * 新增 permissionDeadlineWiring 测试：handler 落 record、装配缝 kind/deadline/恢复态透传、gate 边界 guard（问题类关闭不武装、permission 独立于 gate）
+
+
+### Bug Fixes
+
+* **bots:** 折叠 [ulw] 评审修复——timer 清除无条件收口 + 迟到 deny 超时文案 + 卡片 clobber 守卫 ([16b3a2e](https://github.com/yeyuan98/zodex/commit/16b3a2e83edc3a0e9a68d816dbce89e027b67314))
+  * clearPendingPermissionOptions 无条件先清策略 timer（R1-1 MAJOR）：并发权限 A/B 下空 pending early-return 不再拦截清除，杜绝已应答请求补发幽灵 reminder/deny-note（场景R1-1 红转绿钉住）
+  * permission_response 处理器新增事件驱动超时文案选择（R1-2）：decision=deny 且登记表武装 deadline 已过 ⇒ 发 permissionAutoDenied；deadline 前用户 deny 保持通用文案；新增 getArmedPermissionDeadline 查询缝（场景R1-2 红转绿钉住）
+  * transient 卡片记录最后 upsert 的 requestId，permission_response finalize 守卫按 taskId+requestId 双比对，不再终结展示中较新交互的卡片（R1-4）
+  * 序号按钮 permission.respond 迟到点击（respondPermission=false）随反馈清扫该 requestId 的 pending orphan，与文本路径对齐（R1-5）
+  * permissionReply 未渲染时不再武装策略 timer（R1-6）：pending 已写但聊天内无可见提示时补发文案只会误导
+  * botCurrentOptionsSchema permissionTimeoutMinutes 边界复用 BOT_PERMISSION_TIMEOUT_MIN/MAX_MINUTES 常量（R1-7）
+  * /status activeTaskId+草稿过渡形态优先 draftOptions.mode（R1-8）
+  * 登记表测试 pin：permission snooze 返回 false（§7.4）+ 未到期恢复保持原 deadlineAt 不提前不重置（§7.5 前半）
+  * 迁移矩阵 pin（场景3b）：v4 版本守卫不翻转用户重选 yolo、翻转结果幂等、v2 legacy 导入 flip、v3 文件名双文件路径
+  * 场景15 改为确定性窗口（默认 10min 缩放 600ms，禁用覆写先于 deadline）+ 场景6b /status 形态 pin（active-task 模式行/过渡形态/未设置 fallback/en）
+
+
+### Documentation
+
+* **specs:** [ulw] 评审收口——三份 spec Status 引导行翻转至 SHIPPED/train 收官 ([efbc19a](https://github.com/yeyuan98/zodex/commit/efbc19a5d16e93e0aa47c080f84d4a3551547dee))
+  * bot-message-delivery.md：Status 引导行 IN FLIGHT → SHIPPED（train closed at
+  * bot-inbound-resilience.md：IN FLIGHT → SHIPPED（PR #16，release afd21da，
+  * log-diagnostics-hygiene.md：IN FLIGHT → SHIPPED（PR #15，release 527cce5，
+  * 接受残余（记录不修）：CHANGELOG 3.14.5 官方节子条目折行截断为排版瑕疵
+
+* **specs:** bot-permissions [ulw] 评审修正——超时文案选择规则 + 混版残留披露 + 状态行更新 ([ad60ce9](https://github.com/yeyuan98/zodex/commit/ad60ce965c8ae669333ef0f17c8e3f8976c87cbd))
+  * §3c.2/§4.1 新增事件驱动的超时文案选择规则与迟到用户 deny 显示超时文案的接受边界
+  * §3e 新增远端旧 CLI 混版窗口残留披露（deadline 字段被剥离、bot 侧武装无 delivery ack 门控、重连自动收敛）
+  * §4.1 披露本 alpha Telegram 退休为本地化文本注记（键盘编辑推迟到 polish）+ transient 卡片 finalize 按 requestId 比对
+  * 状态行更新为已实现于 agent/coder/bot-permission-parity（W1–W5），待 3.15.0-alpha.0 发版与 rig 验证
+
+* **specs:** bot-permissions 实现注记——deadline 缺省携带语义澄清 + 启动扫描降级为惰性清理 ([d598d8d](https://github.com/yeyuan98/zodex/commit/d598d8d37c11e04f1c04f2c6ddef73d657c80169))
+
 ## [3.14.5](https://github.com/yeyuan98/zodex/compare/v3.14.5-alpha.9...v3.14.5) (2026-10-06)
 
 ### Documentation
