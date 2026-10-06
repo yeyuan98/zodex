@@ -1,13 +1,15 @@
 # Spec: Bot Permission Parity (3.15.0 Track B)
 
-Status: **SHIPPED in `3.15.0-alpha.0`（PR #28，release `5c20edf`，2026-10-06）；
-rig 2026-10-06 晚（bundle zcode-logs-20261006-221723，postmortem =
-handoff `../ZCode-handoff.md` §2k）判定：本地权限问答核心链路可用，但四类
-缺陷待 alpha.1 修复（双通道重复提示、双确认消息、deadline 源失步的虚假
-「已自动拒绝」文案、`/mode` 选项源为空——后者非 remote 专属；remote 门控
-写腿从未被测）。alpha.1 计划 = `../ZCode-trackb-alpha1-plan.md`（[ulw] 评审
-收口 v2；F1 host 收口去重 / F2 deadline 冻结+持久化 / F3 自答 ack 单确认 /
-F4 mode 选项源）。此前记录——SPEC-FIRST（2026-10-06）：owner rulings 已取得：D1 = Option A′
+Status: **alpha.1 IN IMPLEMENTATION（rig-221723 四缺陷 → F1–F4，计划
+`../ZCode-trackb-alpha1-plan.md` v2，owner GO 2026-10-06）。alpha.0 已发版
+（PR #28，release `5c20edf`，2026-10-06）；rig 2026-10-06 晚（bundle
+zcode-logs-20261006-221723，postmortem = handoff `../ZCode-handoff.md` §2k）
+判定：本地权限问答核心链路可用，但四类缺陷证据锁定（D1 双通道重复提示、
+D4 双确认消息、D3 deadline 源失步的虚假「已自动拒绝」文案、RC1 `/mode`
+选项源为空——后者非 remote 专属；remote 门控写腿从未被测）。alpha.1 修订
+= 本文 §8（F1 host 收口去重 / F2 deadline 冻结+持久化 / F3 自答 ack 单确认 /
+F4 mode 选项源），验收场景 §7.16-§7.22 红测先行。此前记录——SPEC-FIRST
+（2026-10-06）：owner rulings 已取得：D1 = Option A′
 （扩展 CLI 既有交互登记表的自动结束机械，经 v4 createSession 增量字段携带 per-bot
 deadline）；D2 = 在 Manage bot 表单（Mobile remote control → Manage bot，
 BotsDialog）新增「权限超时（分钟）」数字字段（默认 10，最小 1）；D3 = 由证据
@@ -141,16 +143,16 @@ Bot 会话与桌面会话共用**同一权限模型**。解锁后 bot 默认 `bu
    兜底。
 3. Timer 生命周期表（每个事件 → 清除/重设/触发）：
 
-   | 事件                                                   | reminder/deny-note timer | 说明                                 |
-   | ------------------------------------------------------ | ------------------------ | ------------------------------------ |
-   | `permission_response`（任何客户端应答或 CLI 自动拒绝） | 清除                     | 权威已收口                           |
-   | `task_complete` / `task_error` / `/stop` drain         | 清除 + pending 清空      | 终态                                 |
-   | stale-watcher 清理（终态事件丢失）                     | 清除（**无** note）      | 不发迟到幽灵文案；CLI 倒计时自行收口 |
-   | bot 禁用/删除                                          | 清除（note 抑制）        | 不向已禁用 bot 的频道发送            |
-   | 服务 dispose                                           | best-effort 清除         | 静默丢失接受（与保留缓冲同规）       |
-   | 服务启动扫描                                           | 清除过期项               | 见 3d                                |
-   | deadline 配置中途变更                                  | 无效（不重设）           | 本次 pending 的 deadline 已定        |
-   | 同 requestId 再提示                                    | 不重设                   | 时钟权威在登记表（3b.4）             |
+   | 事件                                                   | reminder/deny-note timer | 说明                                                                                                                                                                              |
+   | ------------------------------------------------------ | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+   | `permission_response`（任何客户端应答或 CLI 自动拒绝） | 清除                     | 权威已收口                                                                                                                                                                        |
+   | `task_complete` / `task_error` / `/stop` drain         | 清除 + pending 清空      | 终态                                                                                                                                                                              |
+   | stale-watcher 清理（终态事件丢失）                     | 清除（**无** note）      | 不发迟到幽灵文案；CLI 倒计时自行收口                                                                                                                                              |
+   | bot 禁用/删除                                          | 清除（note 抑制）        | 不向已禁用 bot 的频道发送                                                                                                                                                         |
+   | 服务 dispose                                           | best-effort 清除         | 静默丢失接受（与保留缓冲同规）                                                                                                                                                    |
+   | 服务启动扫描                                           | 清除过期项               | 见 3d                                                                                                                                                                             |
+   | deadline 配置中途变更                                  | 无效（不重设）           | 本次 pending 的 deadline 已定；alpha.1（§8 F2）把「已定」落为持久事实——deadline 冻结值随建任务持久化于 bot context，渲染/武装只读该值，配置变更对本次任务不可见（下一个任务生效） |
+   | 同 requestId 再提示                                    | 不重设                   | 时钟权威在登记表（3b.4）                                                                                                                                                          |
 
 ### 3d. 重启对账
 
@@ -257,3 +259,117 @@ Bot 会话与桌面会话共用**同一权限模型**。解锁后 bot 默认 `bu
 13. 迟到点击：自动拒绝后按钮/文本点击 ⇒ 吞并 + 反馈文案。
 14. 回归：yolo 配置 bot 派发 yolo、零权限提示（guard，解锁后仍绿）。
 15. bot 禁用后到期：note 抑制、登记表 deny 照常。
+16. （alpha.1 F1）双通道收口：同一 requestId 经会话事件通道（A）与反向 RPC 通道
+    （B）先后到达 ⇒ 全链路（host+adapter）恰广播一次 `permission_request` 流事件
+    （红：今两条各广播一次 = Telegram 双卡/E9 僵尸卡根因）。
+17. （alpha.1 F1）host 标记陷阱 guard：AskUserQuestion/ExitPlanMode 等待态标记
+    （user-input-backed 工具名）不入 `pendingPermissions` 登记表（pending 仪表
+    不受污染）；`"unknown"` requestId 永不去重（两条 distinct unknown-id 提示都
+    必须广播）。
+18. （alpha.1 F1）watcher 有界 seen-map 防御：同 requestId 重复事件只渲染一次；
+    并发 A/B 时 A 的重复不得覆盖 B 的 pending；空 map 时首提示必须渲染（安全网
+    不得掩盖 host 回归）。
+19. （alpha.1 F2）deadline 冻结持久化：建任务后配置中途调低 ⇒ 已武装 timer 与
+    后续提示的武装仍按建任务时的冻结值（E7 红）；重启后按持久值重武装（不读活
+    配置）；无持久值（miss）⇒ deny-note 不武装（绝不活配置重武装）。
+20. （alpha.1 F2）CLI resume 缺口：重建 session record 携带 `permissionAutoDenyMs`
+    （持久化 session entry 同款机械；红：今 resume 后 deadline 丢失，新提示无
+    权威倒计时）。
+21. （alpha.1 F3）单确认：聊天自答（按钮+文本路径）恰一条消息 = 命令 ack，
+    `permissionResolved` note 被抑制（红：今按钮路径双消息）；跨端/桌面应答 ⇒
+    note 照发（guard）；CLI 自动拒绝 ⇒ `permissionAutoDenied` 超时文案（§3c.2
+    既有规则不变）；迟到点击反馈不变（§7.13 guard）。
+22. （alpha.1 F4）`/mode` 选项源：draft 路径合成 mode select（源自
+    `getZCodeAgentAvailableModes`，当前值读取时默认 `build`；红：今
+    `listDraftConfigOptions` 只合成 thought_level）；active-task 路径列表+设置
+    往返均用 `active.configOptions`（红：今走 `listUserConfigOptions` 死 stub 恒
+    空）；taskRunning 拒绝不变；无模型 draft 仍不列选项（modeMissing 边界
+    pin，与 thoughtLevel 平权）。
+
+## 8. alpha.1 修订（rig-221723）
+
+> 证据与计划：`../ZCode-trackb-alpha1-plan.md`（[ulw] 评审 v2 收口）+
+> handoff §2k postmortem（bundle zcode-logs-20261006-221723）。四项修订
+> （F1–F4）不改变 §0-§7 既有语义，只收口缺陷；冲突处以本节为准。
+
+### 8.1 F1 单一提示（双通道收口）
+
+同一权限以**同一 requestId** 经两条通道到达 bot watcher——(A) CLI 会话事件流
+（`permission-flow.ts` 在 broker 调用前发射 `permission.requested`，adapter
+`mapSessionEvent` 映射）与 (B) 反向 RPC（`interaction/requestPermission` →
+host `emitSessionEvent("permission.request")` → adapter `mapServiceEvent` 映射）。
+alpha.0 的 watcher 无 requestId 去重 ⇒ 双发（Telegram 双卡，答其一后第二卡
+`permissionExpired` 误导）。
+
+1. **单一所有者 = host 既有 `pendingPermissions` 登记表**（§5.14 墓碑语义）：
+   无论哪条通道先到，先到者把该 requestId 标记进登记表；既有 `wasPending`
+   逻辑抑制第二条通道的广播——全链路（desktop 与 bot 消费方）每 requestId
+   恰一次 `permission_request` 流事件。adapter 保持无状态。
+2. **陷阱（评审钉死）**：
+   - host 侧标记**必须过滤 user-input-backed 工具名**（AskUserQuestion /
+     ExitPlanMode 的等待态标记携带不同 requestId）——不过滤会把问题类标记
+     污染进权限登记表与 `agent.pendingPermissions` 仪表。
+   - **永不以 `"unknown"` requestId 去重**（adapter 对缺失 requestId/toolCallId
+     的合成兜底）——混版旧 CLI 窗口可能把两条 distinct 并发提示折叠成一条。
+3. **watcher 有界 seen-map 防御（belt-and-braces）**：bots watcher 侧维护
+   DEDICATED 有界 seen-map（requestId → options hash；有界 map 先例 =
+   `createBotTaskDeliveryRegistry`）。明确**不得**键于 `pendingPermissionOptions`
+   ——后者只保存最新请求，重复 A 的再渲染会覆盖 B 的 pending。空 map 时首提示
+   必须渲染（安全网不得掩盖 host 回归）。
+4. 已验证安全项：requestId 每次 ask 现铸（`permission-flow.ts`），墓碑不会吃掉
+   合法再提示；restore/snapshot 路径不经 bots watcher
+   （`deliveryKind: "bot-channel-continuous"`）。
+
+### 8.2 F2 deadline 冻结 + 持久化
+
+alpha.0 的 bot 侧 timer 在渲染点重读**活配置**（`armBotPermissionPolicyTimers`
+读 `bot.currentOptions.permissionTimeoutMinutes`），而 CLI 自动拒绝用
+createSession **冻结值**（`interaction-broker.ts` ← `createTask
+permissionAutoDenyMs`）——中途改配置 ⇒ 聊天宣称「已自动拒绝」而 CLI 仍按旧
+期限接受迟到 allow（E7 虚假文案类）。
+
+1. **持久化冻结值**：createTask 携带的确切 `permissionAutoDenyMs` 随建任务
+   **持久化于 bot context**（与 task/pending 状态同处）；渲染/武装点
+   （reminder + deny-note timer）**只读该持久值**。
+2. **miss 不武装**：任务早于该字段、或持久映射丢失 ⇒ deny-note 不武装
+   （reminder-only 或全不武装——「不补发避免误导」哲学的推论），**绝不**从
+   活配置重武装（消灭 E7 虚假否认类）。
+3. **中途变更语义**：配置变更对本次任务不可见（§3c 生命周期表「deadline
+   配置中途变更：无效」由本节落为可执行），下一个任务生效（与 mode 同语义）。
+4. **CLI resume 缺口（owner 决策 2026-10-06）**：CLI session record 在 resume
+   时重建且不携带 `permissionAutoDenyMs`（重启后新提示缺权威倒计时）。优先
+   小修：按 permission 自动拒绝 session entry 同款机械持久化 deadline（或
+   reattach 时重投递）；若小修不成比例，在本文披露为残留。
+
+### 8.3 F3 单确认（自答 ack / 外来解析 note）
+
+alpha.0 每次应答同时产生命令 ack（`permissionSubmitted`/`permissionDenied`）
+与 watcher 解析注记（`permissionResolved`），次序竞态不定（D4）。
+
+1. **自答保留 ack 为单确认**（按钮 + 文本路径——WeChat 唯一反馈面）：命令
+   ack 恰一条；watcher 的 `permissionResolved` note **仅对聊天未发起的解析**
+   发射（跨客户端/桌面应答、CLI 自动拒绝、B2.3 stop-deny）。抑制经
+   `permission_response` 处理器查阅的**有界 recently-self-answered requestId
+   集合**实现。
+2. 理由（[ulw] 评审 BLOCKER）：文本路径在 CLI 的 `permission.resolved` 竞速
+   回程前已清 pending，note 对自答不是可靠单消息。
+3. 不变项：`permissionLateHandled` 迟到反馈、失败 ack、deny-note/reminder
+   文案、§3c.2 事件驱动超时文案选择规则（CLI 自动拒绝仍发
+   `permissionAutoDenied` note——它是外来解析，不在抑制范围）。
+
+### 8.4 F4 mode 选项源
+
+解锁后 `/mode` 两条选项源皆空（RC1）：active-task 路径走
+`listProviderConfigOptionsForActiveTask` → `listUserConfigOptions`（三方 CLI
+遗留永久 stub `return []`），正确数据 `active.configOptions`（恒含 mode
+select，thoughtLevel 分支已在用）在同一 handler 里闲置；draft 路径
+`listDraftConfigOptions` 只合成 thought_level。
+
+1. **active-task 路径**：列表与设置两处均改用 `active.configOptions`。
+2. **死 stub 规范移除**：`listUserConfigOptions` 是 BotsService 契约面
+   （`bots.ts` `getUserConfigOptions`）——按契约编辑 + `pnpm dep:refs` 验证
+   无其他消费方后删除；若出现其他消费方则留 tombstone 注释。
+3. **draft 路径**：`listDraftConfigOptions` 从 `getZCodeAgentAvailableModes`
+   （桌面 composer 同源）合成 mode select；当前值 = 读取时默认 `build`。
+4. **接受边界**：无模型 draft 仍不列选项（modeMissing）——与 thoughtLevel
+   平权；rig C1 使用已配置模型的 bot。
