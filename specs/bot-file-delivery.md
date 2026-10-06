@@ -1190,7 +1190,8 @@ and NO model-side change (§2j: the model never rejected a real video).
      (`weixin-attachment-N` / `weixin-image-N.jpg`), weixin direct-mint
      (`${id}.${kind}`), weixin provided names, feishu (`file_name` present vs
      msgType-minted), telegram (`file_name` present vs `telegram-*`
-     fallbacks). Pinned by per-provider tests.
+     fallbacks), webhook (`filename` present vs `${id}.${kind}` mint —
+     [ulw] closure addition). Pinned by per-provider tests.
    - Purpose: closes the V1 H-A/H-B fork (payload-given vs repo-minted
      `.file`) and proves cover-vs-video on the next feishu rig run.
 
@@ -1284,4 +1285,4 @@ and NO model-side change (§2j: the model never rejected a real video).
 10. R10 observability: `cacheResolvedAttachment` emits the info line carrying
     `filenameSource` + the sniff verdict (one services test); per-provider
     parse-site tests pin `filenameSource` population (weixin provided /
-    media-fallback / direct-mint, feishu, telegram).
+    media-fallback / direct-mint, feishu, telegram, webhook).

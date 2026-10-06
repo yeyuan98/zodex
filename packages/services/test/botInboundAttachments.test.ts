@@ -1405,6 +1405,32 @@ test("A9 R7 伪扩展名语义守护：人名 data.file + MP4 字节 → 改名 
   }
 });
 
+test("A9 R7b 伪扩展名大小写守护：clip.FILE + MP4 字节 → 改名 clip.mp4（大小写不敏感门）", async () => {
+  // [ulw] 评审 NIT-1 收口：实现按 toLowerCase() 匹配词汇表（.FILE 同为无信息量
+  // 伪后缀），此处钉住该语义防止未来收窄；extname("clip.FILE")===".FILE" 长度
+  // 与小写一致，替换路径不受影响。
+  const harness = await createHarness();
+  try {
+    await harness.triggerMessage({
+      text: "看下这个视频",
+      attachments: [
+        inboundAttachment("video", "clip.FILE", "application/octet-stream", ftypBytes("isom")),
+      ],
+    });
+    const capture = lastSendPrompt(harness);
+    const attachment = capture.attachments?.[0];
+    assert.ok(attachment);
+    assert.equal(
+      attachment.filename,
+      "clip.mp4",
+      "大写伪后缀 .FILE 同等视为无扩展名：clip.FILE → clip.mp4",
+    );
+    assert.equal(attachment.mimeType, "video/mp4");
+  } finally {
+    await harness.dispose();
+  }
+});
+
 // ---- Alpha 9 rider（specs/bot-message-delivery.md「User-facing business-error
 // localization」；§7.35 裁定 IN）：formatUserFacingBotError 对前置括号数字业务码
 // 做本地化包装并保留原文；纯文本透传不变。经 sendPromptInBackground 失败漏斗驱动
