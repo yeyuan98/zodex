@@ -1,7 +1,14 @@
 # Spec: Bot Permission Parity (3.15.0 Track B)
 
-Status: **alpha.1 IN IMPLEMENTATION（rig-221723 四缺陷 → F1–F4，计划
-`../ZCode-trackb-alpha1-plan.md` v2，owner GO 2026-10-06）。alpha.0 已发版
+Status: **alpha.1 SHIPPED（PR #30，release `7d11594`，tag `v3.15.0-alpha.1`，
+2026-10-06；6 release jobs 绿、43 资产核验、单通道不变量成立；[ulw] 评审
+READY-WITH-NITS 收口——4 NIT，3 折叠于 `21a269e`，transient 卡片自答 finalize
+文案按评审携带为设计；验证全绿：services 351/351、shared 68/68、CLI bootstrap
+32/32、server 10/10、root E2E 10/10、typecheck/lint/fmt/pre-push/architecture
+0 违规；11 条红测 assertion 失败实证后全部转绿）——**awaiting rig C0-C6**（PR
+#30 正文，门=C1/C2/C3/C4/C5；C5 remote 门控写腿为 alpha.0 从未测项）。修订
+= 本文 §8（F1 host 收口去重 / F2 deadline 冻结+持久化 / F3 自答 ack 单确认 /
+F4 mode 选项源），验收场景 §7.16-§7.22。alpha.0 已发版
 （PR #28，release `5c20edf`，2026-10-06）；rig 2026-10-06 晚（bundle
 zcode-logs-20261006-221723，postmortem = handoff `../ZCode-handoff.md` §2k）
 判定：本地权限问答核心链路可用，但四类缺陷证据锁定（D1 双通道重复提示、
