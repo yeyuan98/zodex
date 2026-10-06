@@ -716,6 +716,9 @@ test("feishu filenameSource：file_name 提供时 provided，缺失时兜底命�
   );
 
   const fallback = parseFeishuMessageAttachment("file", { file_key: "file_v2_unnamed_1" });
-  assert.equal(fallback.filename, "file-file_v2_u", "兜底命名 = <msgType>-<key 前 8 字符>");
+  // [main agent 裁定①] W1 字面笔误修正：`file_v2_unnamed_1` 前 8 字符是 `file_v2_`
+  //（原字面 `file-file_v2_u` 误计 9 字符，与本行注释「前 8 字符」及现行
+  // slice(0, 8) 实现矛盾；spec 未钉铸名形状，alpha.9 不变量=其余零行为改动）。
+  assert.equal(fallback.filename, "file-file_v2_", "兜底命名 = <msgType>-<key 前 8 字符>");
   assert.equal(fallback.filenameSource, "fallback", "兜底铸造名必须标 fallback（今天字段缺失）");
 });

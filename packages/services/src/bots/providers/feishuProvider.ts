@@ -620,28 +620,47 @@ function readFeishuAttachment(
   if (!content) {
     return null;
   }
+  const kind = inferFeishuAttachmentKind(msgType);
+  // Alpha 9（specs/bot-file-delivery.md fix 2；§2j F1a）：资源键按 kind 选择，
+  // 取代固定的 image_key 优先链。根因：飞书 video 消息 content 同时携带封面
+  // image_key 与视频本体 file_key，旧序自 v3.14.3 起永远下载 ~62KB WebP 封面。
+  // video 的 image_key 仅作末位兜底——text-less 视频消息绝不静默丢弃（有键可用
+  // 就取，botsService 观测行会标记事实）；audio 不认 image_key/media 兜底之外的键。
+  const fileKey = readString(content, "file_key");
+  const mediaKey = readString(content, "media_key");
+  const imageKey = readString(content, "image_key");
+  const audioKey = readString(content, "audio_key");
   const providerFileId =
-    readString(content, "image_key") ||
-    readString(content, "file_key") ||
-    readString(content, "media_key") ||
-    readString(content, "audio_key") ||
-    readString(content, "key");
+    kind === "video"
+      ? fileKey || mediaKey || imageKey
+      : kind === "audio"
+        ? fileKey || audioKey
+        : kind === "image"
+          ? imageKey
+          : fileKey || mediaKey || readString(content, "key");
   if (!providerFileId) {
     return null;
   }
-  const kind = inferFeishuAttachmentKind(msgType);
   // Alpha 8（§7.33）：兜底命名打标随 sniff 门放宽退役——无扩展名附件一律
   // content-positive-only sniff，provider 给过的名仅在带扩展名时才受保护。
-  const providedFilename = readString(content, "file_name") || readString(content, "filename");
+  // Bugfix（Alpha 9 fix 3 红测钉住）：readString 缺键返回 ""，`||` 链全部缺席时落在
+  // ""，`"" ?? 兜底` 不触发空串合并 → 兜底名从未铸出。链尾补 null 归一为 nullish。
+  const providedFilename =
+    readString(content, "file_name") || readString(content, "filename") || null;
   const filename = providedFilename ?? `${msgType}-${providerFileId.slice(0, 8)}`;
   const mimeType =
     readString(content, "mime_type") ||
     readString(content, "mimeType") ||
     defaultFeishuMimeType(kind);
+  // 所选键同时驱动 id 与 providerFileId（单一事实源）：id 参与附件缓存 digest，
+  // 旧 image-first 选择缓存的封面不可能被视频消息复用（无 stale-cover replay）。
   return {
     id: providerFileId,
     kind,
     filename,
+    // Alpha 9（fix 3）：文件名来源标注——provider 原文 provided / parse 站点兜底
+    // 铸造 fallback。仅由 botsService 观测 info 行与测试消费，绝不参与行为。
+    filenameSource: providedFilename ? "provided" : "fallback",
     mimeType,
     ...(typeof content.size === "number" ? { sizeBytes: content.size } : {}),
     providerFileId,

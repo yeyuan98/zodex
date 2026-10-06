@@ -62,8 +62,9 @@ function parseWebhookAttachment(value: unknown, index: number): BotInboundAttach
     return null;
   }
   const id = typeof value.id === "string" && value.id.trim() ? value.id : `webhook-${index + 1}`;
-  const filename =
-    typeof value.filename === "string" && value.filename.trim() ? value.filename : `${id}.${kind}`;
+  const providedFilename =
+    typeof value.filename === "string" && value.filename.trim() ? value.filename : "";
+  const filename = providedFilename || `${id}.${kind}`;
   const mimeType =
     typeof value.mimeType === "string" && value.mimeType.trim()
       ? value.mimeType
@@ -72,6 +73,9 @@ function parseWebhookAttachment(value: unknown, index: number): BotInboundAttach
     id,
     kind,
     filename,
+    // Alpha 9（fix 3）：文件名来源标注——payload 原文 provided / `${id}.${kind}`
+    // 直铸 fallback。仅由 botsService 观测 info 行与测试消费，绝不参与行为。
+    filenameSource: providedFilename ? "provided" : "fallback",
     mimeType,
     ...(typeof value.sizeBytes === "number" ? { sizeBytes: value.sizeBytes } : {}),
     ...(typeof value.providerFileId === "string" ? { providerFileId: value.providerFileId } : {}),
