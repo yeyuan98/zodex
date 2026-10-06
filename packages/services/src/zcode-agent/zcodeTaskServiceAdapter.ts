@@ -166,6 +166,11 @@ import {
   normalizeAvailableZCodeMode,
   settingsToConfigOptions,
 } from "./zcodeConfigOptions.js";
+import {
+  ASK_USER_QUESTION_TOOL_NAME,
+  EXIT_PLAN_MODE_TOOL_NAME,
+  isUserInputBackedPermissionToolName,
+} from "./permissionToolNames.js";
 import type { CuaProductMcpServerResolver } from "#src/cua-permission-broker/index.js";
 import { registerMemoryDiagnosticsProvider } from "#src/memoryDiagnostics.js";
 
@@ -211,8 +216,6 @@ type ZCodeTerminalStreamEvent =
 const ZCODE_PROVIDER: ZCodeProvider = ZCODE_AGENT_PROVIDER;
 const EMPTY_SLASH_COMMANDS: ZCodeSlashCommand[] = [];
 const logger = createServiceLogger("zcode-task-service");
-const ASK_USER_QUESTION_TOOL_NAME = "AskUserQuestion";
-const EXIT_PLAN_MODE_TOOL_NAME = "ExitPlanMode";
 const EXIT_PLAN_MODE_APPROVAL_QUESTION = "Review this implementation plan.";
 const EXIT_PLAN_MODE_APPROVAL_APPROVE = "approve";
 
@@ -5735,10 +5738,6 @@ function isAskUserQuestionToolName(value: string | undefined): boolean {
 
 function isExitPlanModeToolName(value: string | undefined): boolean {
   return value === EXIT_PLAN_MODE_TOOL_NAME;
-}
-
-function isUserInputBackedPermissionToolName(value: string | undefined): boolean {
-  return isAskUserQuestionToolName(value) || isExitPlanModeToolName(value);
 }
 
 function numberValue(value: unknown): number | undefined {

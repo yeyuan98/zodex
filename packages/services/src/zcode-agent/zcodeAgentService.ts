@@ -7,6 +7,7 @@ import {
 /* oxlint-disable eslint(max-lines) -- Zodex Protocol transport、通知 wiring 和 app-facing session 方法必须共享同一个 client/emitter 上下文。 */
 import { randomUUID } from "node:crypto";
 import { ensureIndependentPlanSupport } from "./independentPlanSupport.js";
+import { isUserInputBackedPermissionToolName } from "./permissionToolNames.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Emitter } from "@zcode/rpc";
@@ -311,8 +312,14 @@ const PLUGIN_OPERATION_CANCEL_REQUEST_TIMEOUT_MS = 5_000;
 const SESSION_COMPACT_REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 interface PendingPermissionRequest {
-  client: ZCodeProtocolClient;
-  protocolRequestId: ZCodeProtocolRequestId;
+  /**
+   * 反向 RPC 载体（通道 B）。F1（specs/bot-permissions.md §8.1）：通道 A（会话事件
+   * permission.requested）先到时的标记条目没有 protocolRequestId——client 仅用于
+   * invalidateWorkspaceClient 的断连清理（与通道 B 条目同规），通道 B 后到时会以
+   * 完整条目覆写并继承墓碑标记。
+   */
+  client?: ZCodeProtocolClient;
+  protocolRequestId?: ZCodeProtocolRequestId;
   /**
    * §5.14 墓碑（specs/log-diagnostics-hygiene.md Amendment 3.14.5-alpha.7）：交互被
    * 解决后标记 resolved——退出 pendingPermissions/pendingUserInputs gauge 计数，但
@@ -330,6 +337,10 @@ interface PendingSessionRuntimePreferencesRequest extends PendingPermissionReque
   request: ZCodeAgentSessionRuntimePreferencesRequest;
   timeout: ReturnType<typeof setTimeout>;
   workspaceKey: string;
+  // 基类字段经 F1（specs/bot-permissions.md §8.1）放宽为可选（通道 A 标记无反向 RPC
+  // 载体）；本表条目由超时路径 respondError 寻址，仍必有载体与协议请求 id。
+  client: ZCodeProtocolClient;
+  protocolRequestId: ZCodeProtocolRequestId;
 }
 
 type SessionCreateCompatField =
@@ -1628,12 +1639,64 @@ export function createZCodeAgentService(
     }
   }
 
+  /**
+   * F1（specs/bot-permissions.md §8.1，rig-221723 D1/E1）：通道 A（CLI 会话事件流
+   * permission.requested）到达时在 pendingPermissions 登记表标记 requestId——host 侧
+   * 收口为单一标记点，先到者标记，后到通道（含通道 B 反向 RPC 的既有 wasPending 逻辑）
+   * 广播被抑制，全链路每 requestId 恰一次 permission_request 流事件；adapter 保持无状态。
+   * 两个评审钉死的陷阱：
+   * - 陷阱 a：user-input-backed 工具名（AskUserQuestion/ExitPlanMode 等待态标记）携带
+   *   不同 requestId 类，不得标记进权限登记表（否则污染 pendingPermissions gauge）；
+   *   其广播保持原样（adapter 既有过滤会丢弃该类标记的普通权限投影）。
+   * - 陷阱 b：requestId 缺失或为 adapter 合成兜底字面量 "unknown" 时永不去重——混版
+   *   旧 CLI 窗口可能把两条 distinct 并发提示折叠成一条。
+   * 返回 false 表示该事件是重复到达（或已被标记），广播必须抑制。
+   */
+  function markPendingPermissionRequestedFromSessionEvent(
+    workspace: ZCodeAgentWorkspaceTarget,
+    event: ZCodeSessionEvent,
+    client: ZCodeProtocolClient,
+  ): boolean {
+    if (event.type !== "permission.requested") {
+      return true;
+    }
+    const payload = event.payload;
+    const record =
+      typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : {};
+    const requestId = typeof record.requestId === "string" ? record.requestId : "";
+    const toolName = typeof record.toolName === "string" ? record.toolName : undefined;
+    if (isUserInputBackedPermissionToolName(toolName)) {
+      return true;
+    }
+    if (!requestId || requestId === "unknown") {
+      return true;
+    }
+    const key = permissionRequestKey({
+      ...workspace,
+      sessionId: event.sessionId,
+      requestId,
+    });
+    // §5.14 同款「键存在即已广播」判定（墓碑键也算）：解决后 agent 重发同一业务
+    // requestId 不得重新广播；先到标记只写最小条目，通道 B 后到时覆写为完整载体条目。
+    const wasPending = pendingPermissions.has(key);
+    if (!wasPending) {
+      pendingPermissions.set(key, { client });
+    }
+    return !wasPending;
+  }
+
   function handleSessionEvent(
     workspace: ZCodeAgentWorkspaceTarget,
     event: ZCodeSessionEvent,
+    client: ZCodeProtocolClient,
   ): void {
     // §5.14 路径 b：resolved 事件先于 live 去重记账（同一 eventId 重复投递幂等）。
     markPendingInteractionsResolvedFromSessionEvent(workspace, event);
+    // F1（spec §8.1）：通道 A 的 permission.requested 先在 host 登记表标记并抑制
+    // 重复广播——与通道 B 的 wasPending 收口共用同一标记点。
+    if (!markPendingPermissionRequestedFromSessionEvent(workspace, event, client)) {
+      return;
+    }
     const normalizedEvent = normalizeSessionEventSeq(workspace, event);
     if (!shouldDeliverLiveSessionEvent(workspace, normalizedEvent)) {
       return;
@@ -1707,7 +1770,7 @@ export function createZCodeAgentService(
         if (message.method === "session/event") {
           const parsed = zcodeSessionEventSchema.safeParse(message.params);
           if (parsed.success) {
-            handleSessionEvent(workspace, parsed.data);
+            handleSessionEvent(workspace, parsed.data, client);
           } else {
             const rawParams =
               typeof message.params === "object" && message.params !== null

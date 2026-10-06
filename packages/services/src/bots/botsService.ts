@@ -31,6 +31,7 @@ import {
   encodeCustomModelValue,
   getPermissionRequestPreview,
   getSupportedBotReplyGranularities,
+  getZCodeAgentAvailableModes,
   normalizeBotReplyGranularity,
   type ZCodeConfigOption,
   type ZCodeElicitationRequest,
@@ -101,7 +102,6 @@ import type {
   BotSaveBotResult,
   BotShareFileTaskDeliveryOptions,
   BotTestResult,
-  BotUserConfigOptionsParams,
   IBotsService,
 } from "./bots.js";
 import {
@@ -813,6 +813,9 @@ const BOT_RETAINED_BUFFER_MAX_BYTES = 64 * 1024;
 const BOT_PERMISSION_REMINDER_OFFSET_MINUTES = 2;
 const BOT_PERMISSION_REMINDER_MIN_DEADLINE_MINUTES = 5;
 const BOT_PERMISSION_REMINDER_OFFSET_MS = BOT_PERMISSION_REMINDER_OFFSET_MINUTES * 60_000;
+// F1（specs/bot-permissions.md §8.1，rig-221723 D1）：watcher 侧 seen-map 的容量上限
+//（有界 map 先例 = BOT_TASK_DELIVERY_REGISTRY_MAX，淘汰最旧防长运行内存增长）。
+const BOT_PERMISSION_PROMPT_SEEN_MAX = 200;
 
 /**
  * specs/bot-permissions.md §3c（3.15.0 Track B）：bot 侧权限策略 timer 的 E2E 时钟缩放
@@ -1379,6 +1382,43 @@ export function createBotsService(
   // E2E 时钟缩放在服务创建时一次解析（CLI 登记表先例：构造期固定，测试在创建 harness
   // 前设置 env）；生产恒为 1。
   const permissionTimerScale = resolveBotPermissionTimerScale(process.env);
+  // F1（specs/bot-permissions.md §8.1，rig-221723 D1/E1）：watcher 侧 DEDICATED 有界
+  // seen-map（requestId → options hash）。host pendingPermissions 登记表是收口权威，
+  // 本表只是 belt-and-braces 防御网（host 回归/混版旧 CLI 窗口下的重复事件兜底）：
+  // - 明确不键于 pendingPermissionOptions——后者只保存最新请求，重复 A 的再渲染会
+  //   把 pending 拖回 A、覆盖并发 B 的记录（场景18b 钉住）；
+  // - 服务实例内存态（跨 watcher 重建存活）；空 map 时首提示必须渲染（安全网不得
+  //   掩盖 host 回归，场景18a 钉住）。
+  const seenPermissionPromptOptionsHashes = new Map<string, string>();
+  /**
+   * F1（spec §8.1）：permission_request 渲染前的 seen 判定——同 requestId 已渲染过
+   * 则抑制第二次渲染。requestId 缺失或为 adapter 合成兜底字面量 "unknown" 时永不去重
+   * （陷阱 b：混版旧 CLI 可能把两条 distinct 并发提示折叠成一条，场景18c 钉住）。
+   * requestId 每次 ask 现铸（permission-flow.ts），seen 键不会吃掉合法再提示。
+   */
+  function rememberBotPermissionPromptSeen(
+    requestId: string,
+    options: readonly ZCodePermissionOption[],
+  ): boolean {
+    if (!requestId || requestId === "unknown") {
+      return true;
+    }
+    if (seenPermissionPromptOptionsHashes.has(requestId)) {
+      return false;
+    }
+    const optionsHash = createHash("sha256")
+      .update(JSON.stringify(options.map((option) => [option.optionId, option.kind])))
+      .digest("hex")
+      .slice(0, 16);
+    seenPermissionPromptOptionsHashes.delete(requestId);
+    seenPermissionPromptOptionsHashes.set(requestId, optionsHash);
+    while (seenPermissionPromptOptionsHashes.size > BOT_PERMISSION_PROMPT_SEEN_MAX) {
+      const oldestKey = seenPermissionPromptOptionsHashes.keys().next().value;
+      if (oldestKey === undefined) break;
+      seenPermissionPromptOptionsHashes.delete(oldestKey);
+    }
+    return true;
+  }
   const streamingCardRequestControllers = new Set<AbortController>();
   const transientInteractionCards = new Map<
     string,
@@ -2758,11 +2798,6 @@ export function createBotsService(
     };
   }
 
-  async function listUserConfigOptions(
-    _params: BotUserConfigOptionsParams,
-  ): Promise<ZCodeConfigOption[]> {
-    return [];
-  }
   async function ensureBotStorageMigrated(): Promise<void> {
     // 单向导入已收口到 Repo；这里只等待初始化，不再读取旧模型字段或重写当前状态。
     if (!botStorageMigrationPromise) {
@@ -3071,17 +3106,6 @@ export function createBotsService(
     return readConfigSelectCurrentValue(options, "mode") ?? task.mode;
   }
 
-  async function listProviderConfigOptionsForActiveTask(
-    task: Pick<ZCodeTaskMeta, "workspacePath" | "workspaceIdentity">,
-    activeProvider: ZCodeProvider,
-  ): Promise<ZCodeConfigOption[]> {
-    return listUserConfigOptions({
-      workspacePath: task.workspacePath,
-      workspaceIdentity: task.workspaceIdentity,
-      provider: activeProvider,
-    });
-  }
-
   function normalizeBotDraftOptions(draftOptions: BotDraftOptions): BotDraftOptions {
     // Bugfix: bot-state 里可能还残留旧三方 CLI 草稿 provider。
     // 如果直接复用，/new 后首条消息会重新创建第三方 runtime，绕过 ZCode Agent 单一事实源。
@@ -3201,19 +3225,41 @@ export function createBotsService(
     const selection = draftOptions.modelSelection
       ? view?.effectiveSelection
       : view?.preferredSelection;
-    if (!selection) return [];
-    const model = view?.providers
-      .find((provider) => provider.providerId === selection.providerId)
-      ?.models.find((candidate) => candidate.modelId === selection.modelId);
-    const spec = model?.config.optionSpecs.reasoningLevel;
-    if (!spec) return [];
+    // F4（spec §8.4 接受边界）：模型不可解析的 draft 仍不列任何选项（modeMissing）——
+    // 与 thoughtLevel 平权（thought_level 依赖 model.optionSpecs，mode 依赖模型已在场）；
+    // rig C1 使用已配置模型的 bot。
+    const model = selection
+      ? view?.providers
+          .find((provider) => provider.providerId === selection.providerId)
+          ?.models.find((candidate) => candidate.modelId === selection.modelId)
+      : undefined;
+    if (!model) return [];
+    // F4（specs/bot-permissions.md §8.4，rig-221723 RC1）：draft /mode 选项源——从
+    // getZCodeAgentAvailableModes（桌面 composer 同源）合成 mode select；当前值 =
+    // 读取时默认 build（draftOptions.mode 缺省即 build，不落盘回写）。此前只合成
+    // thought_level ⇒ 解锁后 draft /mode 恒回 modeMissing。
+    const modeOption: ZCodeConfigOption = {
+      id: "mode",
+      name: "Mode",
+      category: "mode",
+      type: "select",
+      currentValue: draftOptions.mode?.trim() || "build",
+      options: getZCodeAgentAvailableModes().map((mode) => ({
+        value: mode.id,
+        name: mode.id,
+        description: mode.description,
+      })),
+    };
+    const spec = model.config.optionSpecs.reasoningLevel;
+    if (!spec) return [modeOption];
     return [
+      modeOption,
       {
         id: "thought_level",
         name: "Reasoning",
         category: "thought_level",
         type: "select",
-        currentValue: selection.options?.reasoningLevel ?? "",
+        currentValue: selection?.options?.reasoningLevel ?? "",
         options: spec.values.map((value) => ({ value, name: value })),
       },
     ];
@@ -6382,6 +6428,13 @@ export function createBotsService(
         }
       }
       if (event.type === "permission_request") {
+        // F1（specs/bot-permissions.md §8.1）：seen-map 防御判定必须先于一切渲染与
+        // pending 写入——重复事件（host 收口失效/混版窗口）在此整段抑制，否则会二次
+        // 发送提示卡并把 pendingPermissionOptions 拖回旧 requestId（Telegram 双卡 +
+        // E9 僵尸卡的 watcher 侧根因）。
+        if (!rememberBotPermissionPromptSeen(event.requestId, event.options)) {
+          return;
+        }
         const locale = await readMessageLocale();
         stopTyping(event.taskId);
         // Bugfix（F3 specs/bot-message-delivery.md）：交互边界必须先落正文——卡片 provider seal，
@@ -7955,7 +8008,6 @@ export function createBotsService(
     },
     getConfig: () => repo.readConfig(),
     listWorkspaceRefs,
-    getUserConfigOptions: listUserConfigOptions,
     beginFeishuRegistration(params) {
       return beginFeishuAppRegistration(providerRequester, params?.domain);
     },
@@ -8695,12 +8747,15 @@ export function createBotsService(
                   : findSelectConfigOption(optionSource, commandName)?.currentValue;
               const currentValue =
                 typeof rawCurrentValue === "string" ? rawCurrentValue : undefined;
-              const currentLabel = readConfigSelectLabelForValue(
-                optionSource,
-                commandName,
-                currentValue,
-                { locale: auth.locale, provider: draftOptions.provider },
-              );
+              const currentLabel =
+                commandName === "mode"
+                  ? // F4（spec §8.4）：draft /mode 标题与 active 路径同口径——展示原始
+                    // mode token（/status 模式行同款），不经本地化 label。
+                    currentValue
+                  : readConfigSelectLabelForValue(optionSource, commandName, currentValue, {
+                      locale: auth.locale,
+                      provider: draftOptions.provider,
+                    });
               const selectOption = findSelectConfigOption(optionSource, commandName);
               const options = listConfigSelectOptions(optionSource, commandName, {
                 locale: auth.locale,
@@ -8735,23 +8790,22 @@ export function createBotsService(
             }
             const active = await requireActiveTask(message, auth);
             if (!active.ok) return active.reply;
-            const optionSource =
-              commandName === "mode" && active.task.provider
-                ? await listProviderConfigOptionsForActiveTask(
-                    active.task,
-                    normalizeAgentProviderToZCodeAgent(active.task.provider),
-                  )
-                : active.configOptions;
+            // F4（specs/bot-permissions.md §8.4，rig-221723 RC1）：/mode 选项源改用
+            // active.configOptions（thoughtLevel 分支同款先例；恒含 mode select——
+            // zcode-agent-model-state.ts 的 zcodeSessionSettingsToZCodeConfigOptions 保证）。
+            // 原 listProviderConfigOptionsForActiveTask → listUserConfigOptions 是三方
+            // CLI 遗留永久空 stub，解锁后 /mode 恒回 modeMissing。
+            const optionSource = active.configOptions;
             const currentValue =
               commandName === "mode"
                 ? readCurrentActiveTaskMode(active.task, active.configOptions)
                 : readConfigSelectCurrentValue(active.configOptions, commandName);
             const currentLabel =
               commandName === "mode"
-                ? readConfigSelectLabelForValue(optionSource, commandName, currentValue, {
-                    locale: auth.locale,
-                    provider: normalizeAgentProviderToZCodeAgent(active.task.provider),
-                  })
+                ? // F4（spec §8.4）：/mode 标题展示原始 mode token（用户可回传的
+                  // value，与 /status 模式行同口径）——本地化 label（如「计划」）
+                  // 会掩盖可输入值，场景22b 钉住 currentValue 必须可见。
+                  currentValue
                 : readConfigSelectCurrentLabel(active.configOptions, commandName, {
                     locale: auth.locale,
                     provider: normalizeAgentProviderToZCodeAgent(active.task.provider),
@@ -8863,10 +8917,9 @@ export function createBotsService(
             }
             const active = await requireActiveTask(message, auth);
             if (!active.ok) return active.reply;
-            const optionSource =
-              commandName === "mode" && active.task.provider
-                ? await listProviderConfigOptionsForActiveTask(active.task, active.task.provider)
-                : active.configOptions;
+            // F4（spec §8.4）：设置路径选项源与列表路径同源（active.configOptions），
+            // 解析出的 selectOption.id 经 setConfigOption 下发——两扇前门同一后端。
+            const optionSource = active.configOptions;
             const selectOption = findSelectConfigOption(optionSource, commandName);
             const displayOptions = listConfigSelectOptions(optionSource, commandName, {
               locale: auth.locale,
