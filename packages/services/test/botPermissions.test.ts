@@ -479,6 +479,35 @@ test("场景2（红·bot 配置模式）：currentOptions.mode=plan 的 bot ⇒ 
   }
 });
 
+// ---- 场景 14（§7.14 回归 guard）：yolo 配置 bot 派发 yolo（解锁后仍绿） ----
+
+test("场景14（guard·yolo 配置）：currentOptions.mode=yolo 的 bot ⇒ 建任务咽喉 setMode 下发 yolo（解锁后仍绿）", async () => {
+  const harness = await createPermissionsHarness({
+    currentOptions: { mode: "yolo" },
+  });
+  try {
+    const result = await harness.service.handleProviderCallbackResponse(
+      "weixin",
+      weixinInboundPayload([{ id: "wx-msg-guard-yolo-1", text: "开始分析" }]),
+    );
+    assert.equal(result.ok, true, "前置：草稿首发必须成功");
+    assert.ok(
+      await waitForCondition(() => harness.createTaskCalls.length >= 1, 5000),
+      "前置：必须创建 task",
+    );
+    assert.ok(
+      await waitForCondition(() => harness.setModeCalls.length >= 1, 5000),
+      "前置：建任务咽喉必须调用 setMode",
+    );
+    assert.ok(
+      harness.setModeCalls.some((call) => call.mode === "yolo"),
+      "currentOptions.mode=yolo 的 bot 草稿必须继承 yolo 并经 setMode 下发（spec §7.14 guard；yolo=用户显式配置的全自动，解锁不得改变该回归）",
+    );
+  } finally {
+    await harness.dispose();
+  }
+});
+
 // ---- 场景 3（§7.3 迁移）：v3 yolo draft ⇒ 加载后翻转 build，cursor/token 原样 ----
 
 test("场景3（红·迁移）：v3 状态文件 yolo draft 加载 ⇒ mode 翻转为 build，weixin cursor/token 字段原样保留", async () => {

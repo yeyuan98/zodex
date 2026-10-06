@@ -778,8 +778,6 @@ function delay(ms: number): Promise<void> {
 }
 
 const DEFAULT_BOT_ZCODE_PROVIDER: ZCodeProvider = ZCODE_AGENT_PROVIDER;
-// Bot 模式硬锁 yolo：所有 bot task 一律免交互权限，且禁止通过 /mode 切换运行模式。
-const BOT_FORCED_MODE = "yolo";
 const BOT_TYPING_INTERVAL_MS = 4_000;
 const BOT_TASK_META_RETRY_DELAYS_MS = [80, 160, 320] as const;
 const BOT_WORKSPACE_REFS_CACHE_TTL_MS = 5_000;
@@ -1637,7 +1635,12 @@ export function createBotsService(
       workspaceId: workspace.id,
       mode: "draft",
       activeTaskId: null,
-      draftOptions: await buildInitializedDraftOptions(workspace),
+      // specs/bot-permissions.md §1.2：首建 context 的草稿模式读取 bot 配置（默认 build）。
+      draftOptions: await buildInitializedDraftOptions({
+        botId: bot.id,
+        workspacePath: workspace.workspacePath,
+        workspaceIdentity: workspace.workspaceIdentity,
+      }),
       // F4：从仅游标 entry 升级时带回外部队列确认点，避免首次 context 落盘又丢一批游标。
       ...pickPersistedBotCursors(existing),
       updatedAt: Date.now(),
@@ -2003,9 +2006,9 @@ export function createBotsService(
       sizeBytes,
       localPath,
     };
-    // §5.9（specs Alpha 0 §9 amendment，3.14.5 Alpha 7）：Bot 会话今天仍强制 yolo
-    //（BOT_FORCED_MODE 三处生效，权限提示结构性缺席），出站防泄露边界 = workspace-only
-    // 路径策略 + 本审计日志 + 5MB 上限；3.15.0 Track B 解除 force-yolo 后本句须再修订。
+    // §5.9（specs Alpha 0 §9 amendment，3.14.5 Alpha 7；3.15.0 Track B 解锁后修订）：
+    // bot 会话已不再强制 yolo（specs/bot-permissions.md §1），出站防泄露边界与权限
+    // 提示是否出现无关——保持 workspace-only 路径策略 + 本审计日志 + 5MB 上限不变。
     // §5.8：file= 仅当与 path= 取值不同（子目录 basename ≠ 相对路径）才输出。
     botsLogger.info(
       undefined,
@@ -3036,7 +3039,7 @@ export function createBotsService(
   }
 
   async function buildInitializedDraftOptions(
-    context: Pick<BotContextState, "workspacePath" | "workspaceIdentity">,
+    context: Pick<BotContextState, "botId" | "workspacePath" | "workspaceIdentity">,
     provider?: ZCodeProvider,
   ): Promise<BotDraftOptions> {
     const requestedProvider = normalizeAgentProviderToZCodeAgent(
@@ -3048,9 +3051,15 @@ export function createBotsService(
       return { provider: requestedProvider };
     }
     const resolvedProvider = requestedProvider;
+    // specs/bot-permissions.md §1.2/§2.2（3.15.0 Track B 解锁）：草稿模式改读 bot 配置
+    // currentOptions.mode，缺省读取时视为 build，不落盘回写。bot 配置经既有
+    // repo.readConfig() 单一配置读取路径按 botId 解析（writeWeixinGetUpdatesBuf 的
+    // findBot 同款先例），仅在草稿首次初始化时读取一次，不新增第二条配置存储。
+    const configuredBot = findBot(await repo.readConfig(), context.botId);
+    const configuredMode = configuredBot?.currentOptions.mode?.trim() || "build";
     return {
       provider: resolvedProvider,
-      mode: BOT_FORCED_MODE,
+      mode: configuredMode,
     };
   }
 
@@ -3063,8 +3072,14 @@ export function createBotsService(
       () => [],
     );
     const resolvedProvider = normalizeAgentProviderToZCodeAgent(activeTask.provider);
-    // Bot 硬锁 yolo：继承当前 task 时也强制 yolo，不沿用原 task 的 mode。
-    const forcedMode = resolveSupportedDraftMode(configOptions, BOT_FORCED_MODE, resolvedProvider);
+    // specs/bot-permissions.md §1.2（解锁）：/new 继承草稿改为沿用 active task 的实际
+    // 模式（readCurrentActiveTaskMode），不再强制 yolo；provider 不支持时经
+    // resolveSupportedDraftMode 省略 mode（保持该 provider 自身默认）。
+    const inheritedMode = resolveSupportedDraftMode(
+      configOptions,
+      readCurrentActiveTaskMode(activeTask, configOptions),
+      resolvedProvider,
+    );
     const currentModel = readCurrentActiveTaskModel(activeTask, configOptions);
     const parsedSelection = currentModel ? parseBotModelOptionValue(currentModel) : undefined;
     const reasoningLevel = readConfigSelectCurrentValue(configOptions, "thoughtLevel");
@@ -3077,7 +3092,7 @@ export function createBotsService(
     return {
       provider: resolvedProvider,
       ...(modelSelection ? { modelSelection } : {}),
-      ...(forcedMode ? { mode: forcedMode } : {}),
+      ...(inheritedMode ? { mode: inheritedMode } : {}),
     };
   }
 
@@ -3166,24 +3181,26 @@ export function createBotsService(
     const modeOption = configOptions.find(
       (option) => option.category === "mode" && option.type === "select",
     );
-    // Bot 硬锁 yolo：无论草稿/继承的 mode 是什么，建 task 时一律下发 yolo。
-    // 这是 mode 真正进入 agent session 的唯一咽喉，保证任何 bot task 都免交互权限。
-    const forcedDraftMode = resolveSupportedDraftMode(
+    // specs/bot-permissions.md §1.2（3.15.0 Track B 解锁）：建 task 时下发草稿自身的
+    // mode（bot 配置模式 / /mode 选择 / 任务继承；未初始化草稿读取时默认 build），
+    // 不再强制 yolo。setMode 仍是 mode 进入 agent session 的唯一建任务咽喉。
+    const draftMode = draftOptions.mode ?? "build";
+    const resolvedDraftMode = resolveSupportedDraftMode(
       configOptions,
-      BOT_FORCED_MODE,
+      draftMode,
       draftOptions.provider,
     );
-    if (modeOption?.id && forcedDraftMode) {
+    if (modeOption?.id && resolvedDraftMode) {
       const zcodeTaskService = await resolveZCodeTaskServiceForContext(context);
       await zcodeTaskService.setMode({
         taskId,
-        mode: forcedDraftMode as ZCodeTaskMode,
+        mode: resolvedDraftMode as ZCodeTaskMode,
       });
     } else if (modeOption?.id) {
-      // provider 不支持 yolo（非 ZCode Agent）：保持其自身默认模式，避免首条消息回调失败。
+      // provider 不支持该模式（非 ZCode Agent）：保持其自身默认模式，避免首条消息回调失败。
       botsLogger.debug(
         traceId,
-        `skip forced yolo mode unsupported provider=${draftOptions.provider}`,
+        `skip draft mode unsupported provider=${draftOptions.provider} mode=${draftMode}`,
       );
     }
   }
@@ -6935,6 +6952,13 @@ export function createBotsService(
             locale,
           ),
         ),
+        // specs/bot-permissions.md §5：断连降级视图同样带模式行（草稿模式或未设置
+        // fallback；远端断连下无法读取 active task 实际模式，不猜测）。
+        formatStatusLine(
+          locale,
+          "statusMode",
+          draftOptions?.mode?.trim() || msg(locale, "statusModeUnset"),
+        ),
         "------",
         formatStatusLine(locale, "statusTask", context.activeTaskId ?? msg(locale, "statusDraft")),
         formatStatusLine(
@@ -6996,12 +7020,22 @@ export function createBotsService(
       statusTask?.model ??
       formatBotModelSelectionValue(draftEffectiveSelection ?? undefined);
     const statusModelLabel = await formatStatusModelLabel(statusModel, context, locale);
+    // specs/bot-permissions.md §5（3.15.0 Track B）：/status 新增模式行——active task
+    // 显示其实际模式（readCurrentActiveTaskMode）；草稿显示 draftOptions.mode；缺失
+    // 显示「未设置/not set」（formatStatusModelLabel 的 statusModelUnset 同款 fallback）。
+    const statusMode = (
+      statusTask
+        ? readCurrentActiveTaskMode(statusTask, activeTaskConfigOptions)
+        : (readConfigSelectCurrentValue(activeTaskConfigOptions, "mode") ?? draftOptions?.mode)
+    )?.trim();
+    const statusModeValue = statusMode || msg(locale, "statusModeUnset");
     return (
       [
         formatStatusLine(locale, "statusWorkspace", workspace?.label ?? context.workspacePath),
         // Bugfix: active task 显示真实 task 状态；草稿态显示 draftOptions。
         // /new 后草稿继承自当前 task，继续显示 "-" 会让用户误以为继承失败。
         formatStatusLine(locale, "statusModel", statusModelLabel),
+        formatStatusLine(locale, "statusMode", statusModeValue),
         "------",
         statusTask
           ? formatStatusTaskLine(statusTask, msg(locale, "statusTask"))
@@ -8287,12 +8321,10 @@ export function createBotsService(
             const commandName = command.type === "mode.list" ? "mode" : "thoughtLevel";
             const auth = await withAuthorizedContext(message, commandName);
             if (!auth.ok) return auth.reply;
-            if (command.type === "mode.list") {
-              // Bot 硬锁 yolo：不提供模式选择。
-              return [createOutbound(message.actor, msg(auth.locale, "modeLocked"))];
-            }
             if (await isContextActiveTaskRunning(auth.context)) {
               // Bugfix: task 运行中不展示模式/思考级别选择，避免和正在执行的上下文配置混淆。
+              // specs/bot-permissions.md §0/§1（解锁）：模式选择与桌面平权，运行中任务
+              // 保持其模式——taskRunning 拒绝保留（与 thoughtLevel 同语义）。
               return [createOutbound(message.actor, msg(auth.locale, "taskRunning"))];
             }
             if (auth.context.mode === "draft" || !auth.context.activeTaskId) {
@@ -8402,11 +8434,9 @@ export function createBotsService(
             const commandName = command.type === "mode.set" ? "mode" : "thoughtLevel";
             const auth = await withAuthorizedContext(message, commandName);
             if (!auth.ok) return auth.reply;
-            if (command.type === "mode.set") {
-              // Bot 硬锁 yolo：拒绝任何模式切换请求。
-              return [createOutbound(message.actor, msg(auth.locale, "modeLocked"))];
-            }
             if (await isContextActiveTaskRunning(auth.context)) {
+              // specs/bot-permissions.md §0/§1（解锁）：/mode 切换与桌面平权；模式属于
+              // 下一次提交，运行中任务保持其模式——taskRunning 拒绝保留。
               return [createOutbound(message.actor, msg(auth.locale, "taskRunning"))];
             }
             if (auth.context.mode === "draft" || !auth.context.activeTaskId) {

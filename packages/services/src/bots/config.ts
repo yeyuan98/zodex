@@ -16,7 +16,10 @@ export const BOTS_CONFIG_FILE = "bot-config.v3.json";
 export const BOTS_LEGACY_CONFIG_FILE = "bot-config.json";
 export const BOTS_LEGACY_STATE_FILE = "bot-state.json";
 export const BOTS_V2_STATE_FILE = "bot-state.v2.json";
-export const BOTS_STATE_FILE = "bot-state.v3.json";
+// Bugfix（specs/bot-permissions.md §2.1）：状态文件 v3→v4（yolo 草稿迁移）；
+// v3 文件降级为只读快照，与 v2 同规则——绝不回写，v4 存在即唯一事实源。
+export const BOTS_V3_STATE_FILE = "bot-state.v3.json";
+export const BOTS_STATE_FILE = "bot-state.v4.json";
 export const BOTS_LEGACY_MODEL_CACHE_FILE = "bots-model-cache.json";
 export const BOTS_MODEL_CACHE_FILE = "bots-model-cache.v2.json";
 const BOT_CREDENTIAL_PREFIX = "bot";

@@ -1,7 +1,9 @@
 import {
+  botsStateFileSchema,
   decodeCustomModelValue,
   modelSelectionSchema,
   ZCODE_AGENT_PROVIDER,
+  type BotsStateFile,
   type ModelSelection,
 } from "@zcode/shared";
 import { normalizeBotCurrentOptions, normalizeBotDraftOptions } from "./config.js";
@@ -58,22 +60,67 @@ export function importLegacyBotConfig(value: unknown): unknown {
   };
 }
 
+/**
+ * Bugfix（specs/bot-permissions.md §2.1，3.15.0 Track B 迁移）：解锁 force-yolo 后，
+ * v3 状态里历史 yolo 草稿在加载时一次性翻转为 build。只按 version===3 触发——
+ * 解锁后用户经 /mode 显式选择的 yolo 已存为 v4，不得被再次翻转（幂等 + 版本守卫即迁移）。
+ * 无 draftOptions 的 context 原样跳过；cursor/token 等兄弟字段按单写者规则原样保留。
+ */
+function flipLegacyYoloDraftModes(bots: unknown): unknown {
+  if (!isRecord(bots)) {
+    return bots;
+  }
+  return Object.fromEntries(
+    Object.entries(bots).map(([id, state]) => {
+      if (!isRecord(state) || !isRecord(state.draftOptions)) return [id, state];
+      if (state.draftOptions.mode !== "yolo") return [id, state];
+      return [id, { ...state, draftOptions: { ...state.draftOptions, mode: "build" } }];
+    }),
+  );
+}
+
+/**
+ * 状态文件 v3→v4 迁移（specs/bot-permissions.md §2.1）：v3 内容翻转 yolo 草稿后以
+ * v4 通过 schema 校验返回；v4 内容原样通过。changed 标记是否需要把迁移结果写回磁盘
+ *（v4 原样通过时不写回，避免读路径写抖动）。
+ */
+export function migrateBotStateFileToV4(value: unknown): {
+  state: BotsStateFile;
+  changed: boolean;
+} {
+  if (isRecord(value) && value.version === 3) {
+    return {
+      state: botsStateFileSchema.parse({
+        ...value,
+        version: 4,
+        bots: flipLegacyYoloDraftModes(value.bots),
+      }),
+      changed: true,
+    };
+  }
+  return { state: botsStateFileSchema.parse(value), changed: false };
+}
+
 export function importLegacyBotState(value: unknown): unknown {
   if (!isRecord(value) || !isRecord(value.bots)) return value;
   const bots = Object.entries(value.bots).map(([id, state]) => {
     if (!isRecord(state) || !isRecord(state.draftOptions)) return [id, state];
     const options = state.draftOptions;
+    const draftOptions = normalizeBotDraftOptions({
+      provider: ZCODE_AGENT_PROVIDER,
+      modelSelection: migrateSelection(options),
+      ...(typeof options.mode === "string" ? { mode: options.mode } : {}),
+    });
+    // Bugfix（specs/bot-permissions.md §2.1）：迟到的 v2 legacy 导入同样不得重新引入
+    // yolo——与 v3→v4 迁移应用同一 flip，输出直接落在 v4。
     return [
       id,
       {
         ...state,
-        draftOptions: normalizeBotDraftOptions({
-          provider: ZCODE_AGENT_PROVIDER,
-          modelSelection: migrateSelection(options),
-          ...(typeof options.mode === "string" ? { mode: options.mode } : {}),
-        }),
+        draftOptions:
+          draftOptions.mode === "yolo" ? { ...draftOptions, mode: "build" } : draftOptions,
       },
     ];
   });
-  return { ...value, version: 3, bots: Object.fromEntries(bots) };
+  return { ...value, version: 4, bots: Object.fromEntries(bots) };
 }

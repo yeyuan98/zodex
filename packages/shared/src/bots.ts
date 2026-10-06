@@ -273,7 +273,7 @@ export interface BotState {
 export type BotContextState = BotState;
 
 export interface BotsStateFile {
-  version: 3;
+  version: 4;
   bots: Record<string, BotState>;
 }
 
@@ -590,7 +590,9 @@ export const botsConfigFileSchema = z
 
 export const botsStateFileSchema = z
   .object({
-    version: z.literal(3),
+    // Bugfix（specs/bot-permissions.md §2.1，3.15.0 Track B）：状态文件版本 3→4——
+    // 版本守卫即迁移，v3 加载时一次性把 yolo 草稿翻转 build 后以 v4 落盘。
+    version: z.literal(4),
     bots: z.record(
       z.string(),
       z.object({
