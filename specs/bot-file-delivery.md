@@ -25,20 +25,26 @@ Inbound attachment UX (3.14.5 Alpha 6: >4-attachment notice, per-file oversize
 single-check rejection, unnamed-attachment container sniffing, attachment-cache lazy
 prune, Telegram/Feishu read-side size re-check) **shipped** in `3.14.5-alpha.6` (PR #19,
 release `99359f6`). Outbound polish (3.14.5 Alpha 7: shared byte-budget filename helper,
-inline image kinds widening, audit field dedup, image/audio dataBase64 strip) **spec'd
-2026-10-05** — see "Outbound attachment naming & inline kinds (3.14.5 Alpha 7)" below;
-implementation pending. §5.5 (share-file timeout wording) is CLI-only and rides the same
-alpha without a spec section here (apps/zcode-cli has had a core unit-test harness since
-3.14.5-alpha.5 — `node --test --import ./test/registerTsLoader.mjs "test/*.test.ts"` in
+inline image kinds widening, audit field dedup, image/audio dataBase64 strip) **shipped**
+in `3.14.5-alpha.7` (PR #20, release `c1cc660`; rig 2026-10-05 §2i: B3/B4/B5-image
+PASS-by-evidence，B1/B2 未行使=单测覆盖不阻塞). §5.5 (share-file timeout wording) is
+CLI-only and rode the same alpha without a spec section here (apps/zcode-cli has had a
+core unit-test harness since 3.14.5-alpha.5 — `node --test --import ./test/registerTsLoader.mjs "test/*.test.ts"` in
 `apps/zcode-cli/packages/core`; rig B6 covers it).
+Alpha 8 (sniff gate widened to any extension-less name + feishu resource `type=file`)
+**shipped** in `3.14.5-alpha.8` (PR #23, release `b3e8d3c`; rig FAILED V1+F1 → §2j
+postmortem，代码不回滚 §7.34②，修复 = alpha.9).
 Alpha 9 (pseudo-extension sniff widening + feishu kind-aware resource keys + prompt
 inline video byte validation + attachment observability) **spec'd 2026-10-06** from
 ../ZCode-alpha9-plan.md (§2j postmortem evidence — bundles `zcode-logs-20261005-224253.zip`
 and `-234804.zip` incl. model-io rollouts; rulings §7.34, rider §7.35) — see
 "Pseudo-extension sniff, feishu kind-aware keys & prompt inline video validation
-(3.14.5 Alpha 9)" below; red tests written first, implementation pending. The alpha.9
+(3.14.5 Alpha 9)" below; **shipped** in `3.14.5-alpha.9` (PR #24, release `7f57abe`;
+[ulw] 评审 READY-WITH-NITS 收口 `0272ad8`; **rig-validated 2026-10-06: V1′+F1′（含
+F1-local 腿）owner 判定 PASS**). The alpha.9
 error-localization rider lives in specs/bot-message-delivery.md (placement disclosed in
 the spec commit: error-reply text is message-delivery UX, not file delivery).
+**Train complete → official `3.14.5` (2026-10-06).**
 
 Full-feature playbook: ../ZCode-handoff.md.
 Owners: bots service (`packages/services/src/bots/botsService.ts`) — command admission, path
