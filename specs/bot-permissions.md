@@ -1,9 +1,13 @@
 # Spec: Bot Permission Parity (3.15.0 Track B)
 
-Status: **已实现于 agent/coder/bot-permission-parity 分支（W1–W5），待 3.15.0-alpha.0
-发版与 rig 验证（[ulw] 评审修复已折叠：timer 清除收口、迟到 deny 超时文案、transient
-卡片 clobber 守卫、迟到序号点击清扫、无渲染不武装、schema 边界常量化、/status 过渡
-形态）。此前记录——SPEC-FIRST（2026-10-06）：owner rulings 已取得：D1 = Option A′
+Status: **SHIPPED in `3.15.0-alpha.0`（PR #28，release `5c20edf`，2026-10-06）；
+rig 2026-10-06 晚（bundle zcode-logs-20261006-221723，postmortem =
+handoff `../ZCode-handoff.md` §2k）判定：本地权限问答核心链路可用，但四类
+缺陷待 alpha.1 修复（双通道重复提示、双确认消息、deadline 源失步的虚假
+「已自动拒绝」文案、`/mode` 选项源为空——后者非 remote 专属；remote 门控
+写腿从未被测）。alpha.1 计划 = `../ZCode-trackb-alpha1-plan.md`（[ulw] 评审
+收口 v2；F1 host 收口去重 / F2 deadline 冻结+持久化 / F3 自答 ack 单确认 /
+F4 mode 选项源）。此前记录——SPEC-FIRST（2026-10-06）：owner rulings 已取得：D1 = Option A′
 （扩展 CLI 既有交互登记表的自动结束机械，经 v4 createSession 增量字段携带 per-bot
 deadline）；D2 = 在 Manage bot 表单（Mobile remote control → Manage bot，
 BotsDialog）新增「权限超时（分钟）」数字字段（默认 10，最小 1）；D3 = 由证据
