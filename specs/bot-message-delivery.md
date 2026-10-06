@@ -1,6 +1,7 @@
 # Spec: Bot Outbound Message Delivery Reliability (3.14.5 Alpha 1)
 
-Status: **IN FLIGHT — 3.14.5-alpha.1**. **Amended in 3.14.5-alpha.4（channel-death
+Status: **SHIPPED — train closed at official `3.14.5` (2026-10-06)**; 本 spec 基线为
+`3.14.5-alpha.1`. **Amended in 3.14.5-alpha.4（channel-death
 retention 三分类 + revival 语义——证据锁定 §2d；见 F1.4/F2/Typing/Invariants 各条修订
 与"Retention buffer"小节）**. **Appended in 3.14.5-alpha.9（rider：用户可见业务错误码
 本地化包装——见文末「User-facing business-error localization」小节；随
