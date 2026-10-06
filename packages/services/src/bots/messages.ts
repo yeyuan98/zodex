@@ -95,6 +95,11 @@ const messages = {
     // 迟到点击（CLI 自动拒绝/他端已应答）反馈——均为 best-effort、非保留。
     permissionResolved: "该权限请求已处理。",
     permissionLateHandled: "该权限请求已被处理（或已自动拒绝）。",
+    // 3.15.0 Track B（specs/bot-permissions.md §3c.1）：bot 侧权限策略 timer 文案——
+    // reminder（deadline − 2 分钟）与 deny-note（deadline 时刻）。均为 best-effort、
+    // 非保留；deny 权威唯一在 CLI 登记表，deny-note 只负责聊天可见性。
+    permissionDeadlineReminder: "权限请求将在 {minutes} 分钟后自动拒绝",
+    permissionAutoDenied: "权限超时未应答，已自动拒绝",
     elicitationExpired: "问答请求已过期，请在 zcode UI 中处理。",
     elicitationHandled: "问答请求已处理。",
     elicitationSubmitted: "已提交问答响应。",
@@ -254,6 +259,11 @@ const messages = {
     // and late-click feedback (CLI auto-deny / answered elsewhere) — both best-effort, non-retained.
     permissionResolved: "This permission request has been resolved.",
     permissionLateHandled: "This permission request was already handled (or auto-denied).",
+    // 3.15.0 Track B (specs/bot-permissions.md §3c.1): bot-side permission policy timer
+    // texts — reminder (deadline − 2 min) and deny-note (at deadline). Both best-effort,
+    // non-retained; deny authority lives solely in the CLI registry.
+    permissionDeadlineReminder: "This permission request will be auto-denied in {minutes} minutes.",
+    permissionAutoDenied: "Permission timed out without a response and was auto-denied.",
     elicitationExpired: "This question request has expired. Please handle it in the zcode UI.",
     elicitationHandled: "Question request has already been handled.",
     elicitationSubmitted: "Question response submitted.",

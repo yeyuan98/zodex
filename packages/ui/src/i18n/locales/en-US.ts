@@ -403,6 +403,9 @@ const enUS: Record<string, string> = {
   "bots.feishuRegistration.error": "Registration failed.",
   "bots.enabledToggle": "Enable {name}",
   "bots.replyGranularity": "Bot reply granularity",
+  "bots.permissionTimeout": "Permission timeout (minutes)",
+  "bots.permissionTimeout.description":
+    "How long an unanswered permission request waits before being auto-denied. Leave empty for the 10-minute default.",
   "bots.replyGranularity.description": "Message detail level.",
   "bots.replyGranularity.assistantChanges": "Standard reply",
   "bots.replyGranularity.assistantChanges.description":

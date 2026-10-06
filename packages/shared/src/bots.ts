@@ -175,6 +175,41 @@ export interface BotCurrentOptions {
   mode?: string;
   sandboxMode?: string;
   approvalPolicy?: string;
+  /**
+   * specs/bot-permissions.md §3a.1（3.15.0 Track B）：bot 权限无应答 deadline（分钟）。
+   * 写入侧不注入默认值（W2 先例：读取时默认经 normalizePermissionTimeoutMinutes 归一，
+   * 缺省 = 10）；schema 校验 1..1440 整数。
+   */
+  permissionTimeoutMinutes?: number;
+}
+
+/** 权限超时读取时默认（分钟）——spec §3a.1/D2：默认 10、最小 1。 */
+export const BOT_PERMISSION_TIMEOUT_DEFAULT_MINUTES = 10;
+export const BOT_PERMISSION_TIMEOUT_MIN_MINUTES = 1;
+export const BOT_PERMISSION_TIMEOUT_MAX_MINUTES = 1440;
+
+/**
+ * specs/bot-permissions.md §3a.1（3.15.0 Track B，验收 E.19）：permissionTimeoutMinutes
+ * 的读取时归一——undefined/非法/缺席 ⇒ 10；数值字符串照常解析（"7" ⇒ 7）；小数截断
+ * （2.5 ⇒ 2，向零取整）；NaN/非数值 ⇒ 10；最终 clamp 到 [1, 1440]。纯函数，无 IO。
+ */
+export function normalizePermissionTimeoutMinutes(input: unknown): number {
+  let value: number;
+  if (typeof input === "number") {
+    value = input;
+  } else if (typeof input === "string" && input.trim() !== "") {
+    value = Number(input.trim());
+  } else {
+    return BOT_PERMISSION_TIMEOUT_DEFAULT_MINUTES;
+  }
+  if (!Number.isFinite(value)) {
+    return BOT_PERMISSION_TIMEOUT_DEFAULT_MINUTES;
+  }
+  const truncated = Math.trunc(value);
+  return Math.min(
+    BOT_PERMISSION_TIMEOUT_MAX_MINUTES,
+    Math.max(BOT_PERMISSION_TIMEOUT_MIN_MINUTES, truncated),
+  );
 }
 
 export type BotReplyMode = BotReplyGranularity;
@@ -504,6 +539,9 @@ export const botCurrentOptionsSchema = z
     mode: z.string().min(1).optional(),
     sandboxMode: z.string().min(1).optional(),
     approvalPolicy: z.string().min(1).optional(),
+    // specs/bot-permissions.md §3a.1：bot 权限无应答 deadline（分钟）；strict schema
+    // 校验 1..1440 整数，写入侧不注入默认（读取时默认见 normalizePermissionTimeoutMinutes）。
+    permissionTimeoutMinutes: z.number().int().min(1).max(1440).optional(),
     // 兼容旧 bot-config.json；CLI provider 现在统一由 ZCode Protocol 侧配置决定。
     cli: z.literal(ZCODE_AGENT_PROVIDER).optional(),
   })

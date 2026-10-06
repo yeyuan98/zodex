@@ -66,11 +66,16 @@ export function normalizeBotCurrentOptions(
   const modelSelection = parsedSelection.success ? parsedSelection.data : undefined;
   // 旧 model/thoughtLevel 只在 Repository 的一次性导入读取，普通保存只认新字段。
   // Bugfix: /cli 命令移除后，历史 currentOptions.cli 只作为旧配置兼容读取，不再保存。
+  // specs/bot-permissions.md §3a.1：permissionTimeoutMinutes 透传已配置值；写入侧不注入
+  // 默认（读取时默认经 shared normalizePermissionTimeoutMinutes 归一，W2 先例）。
   return {
     ...(modelSelection ? { modelSelection } : {}),
     ...(options.mode ? { mode: options.mode } : {}),
     ...(options.sandboxMode ? { sandboxMode: options.sandboxMode } : {}),
     ...(options.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
+    ...(options.permissionTimeoutMinutes !== undefined
+      ? { permissionTimeoutMinutes: options.permissionTimeoutMinutes }
+      : {}),
   };
 }
 

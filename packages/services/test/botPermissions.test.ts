@@ -10,7 +10,7 @@ import type {
   BotInboundMessage,
   BotOutboundMessage,
 } from "@zcode/shared";
-import { ZCODE_AGENT_PROVIDER } from "@zcode/shared";
+import { BOT_PERMISSION_TIMER_SCALE_ENV, ZCODE_AGENT_PROVIDER } from "@zcode/shared";
 import { createBotsService } from "../src/bots/botsService.js";
 import { BOTS_CONFIG_FILE, BOTS_STATE_FILE } from "../src/bots/config.js";
 import { getAppConfigDir, setDataBaseDir } from "../src/paths.js";
@@ -27,21 +27,26 @@ import type { BotProviderAdapter } from "../src/bots/providers/types.js";
  *
  * - 场景 1/2（§7.1-§7.2 解锁）：无配置模式的 bot 草稿首发 setMode("build")
  *   （红：今 BOT_FORCED_MODE 强制 yolo）；currentOptions.mode="plan" 的 bot
- *   setMode("plan")（红：今 yolo）。
+ *   setMode("plan"）。
  * - 场景 3（§7.3 迁移）：v3 状态 yolo draft 加载后 mode 翻转 build，weixin
- *   cursor/token 字段原样保留（红：今原样保留 yolo）。
+ *   cursor/token 字段原样保留。
  * - 场景 4（§7.7 permission_response 清理）：CLI 侧 deny 经 permission_response
- *   事件到达 ⇒ 清除 pendingPermissionOptions（红：今 watcher 无该 case）。
- * - 场景 5（§7.8 终态清理）：task_complete 清空 pendingPermissionOptions
- *   （红：今终态只清 pendingElicitation）。
+ *   事件到达 ⇒ 清除 pendingPermissionOptions。
+ * - 场景 5（§7.8 终态清理）：task_complete 清空 pendingPermissionOptions。
  * - 场景 13（§7.13 迟到点击）：自动拒绝（或他端应答）后文本 /deny ⇒
- *   respondPermission=false ⇒ 本地化「已被处理/已自动拒绝」反馈 + pending 清扫
- *   （红：今回复 permissionHandled 文案且 pending 滞留到下一次覆盖）。
- * - 场景 6（§7.12 /status 模式行）：/status 回复包含模式行（红：今
- *   buildStatusText 无模式行）。
+ *   respondPermission=false ⇒ 本地化「已被处理/已自动拒绝」反馈 + pending 清扫。
+ * - 场景 6（§7.12 /status 模式行）：/status 回复包含模式行。
+ * - W3b（§3a/§3c）：createTask permissionAutoDenyMs 传递 + 场景 9（reminder
+ *   恰一次/短 deadline 无 reminder）+ 场景 10（非保留）+ 场景 11（elicitation
+ *   边界 guard）+ 场景 15（禁用抑制）。
  */
 
 const WEIXIN_BOT_ID = "bot-wx-perms";
+/** messages.ts zh 文案钉住值（§3c.1 reminder/deny-note；场景 9/10/15 断言用）。 */
+const PERMISSION_REMINDER_ZH = "权限请求将在 2 分钟后自动拒绝";
+const PERMISSION_AUTO_DENIED_ZH = "权限超时未应答，已自动拒绝";
+/** botChannelRetention.test.ts 同款 revival 序言（zh）——场景 10 断言其缺席。 */
+const RETAINED_PREAMBLE_PREFIX_ZH = "断线期间积压的";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -76,7 +81,12 @@ async function waitForCondition(condition: () => boolean, timeoutMs = 5000): Pro
 
 interface TaskServiceControls {
   sentMessages: BotOutboundMessage[];
+  sendAttempts: string[];
+  /** 场景10 旋钮：命中 failPattern 的出站 throw（errorFactory 缺省用通用错误）。 */
+  sendControl: { failPattern?: RegExp; errorFactory?: () => Error };
   createTaskCalls: string[];
+  /** W3b（§3a.2）：fake createTask 捕获的 permissionAutoDenyMs（未携带 = undefined）。 */
+  createTaskPermissionAutoDenyMs: Array<number | undefined>;
   sendPromptCalls: string[];
   /** setMode 调用记录：场景 1/2 断言建任务咽喉下发的模式（今天被 fake 忽略）。 */
   setModeCalls: Array<{ taskId: string; mode: string }>;
@@ -90,8 +100,9 @@ function buildFakeTaskService(controls: TaskServiceControls) {
   return {
     listDeletedTaskIds: async () => [] as string[],
     resumeTask: async () => undefined,
-    createTask: async () => {
+    createTask: async (params?: { permissionAutoDenyMs?: number }) => {
       controls.createTaskCalls.push(`create-${controls.createTaskCalls.length + 1}`);
+      controls.createTaskPermissionAutoDenyMs.push(params?.permissionAutoDenyMs);
       createdCount += 1;
       return { taskId: `task-created-${createdCount}` };
     },
@@ -294,7 +305,7 @@ async function waitForStateBotField(
 interface PermissionsHarnessOptions {
   /** 覆盖默认草稿 state entry（场景 3 迁移 / 场景 4-5 task 模式 fixture）。 */
   stateEntry?: (botId: string, workspace: string) => Record<string, unknown>;
-  /** bot 配置 currentOptions（场景 2：mode "plan"）。 */
+  /** bot 配置 currentOptions（场景 2：mode "plan"；W3b：permissionTimeoutMinutes）。 */
   currentOptions?: BotCurrentOptions;
   /** 场景13：fake respondPermission 初始返回值（false = 已收口，迟到点击）。 */
   respondPermissionResult?: boolean;
@@ -304,12 +315,17 @@ interface PermissionsHarness {
   service: IBotsService & { disposeAllAndWait(): Promise<void> };
   configDir: string;
   sentMessages: BotOutboundMessage[];
+  sendAttempts: string[];
+  sendControl: { failPattern?: RegExp; errorFactory?: () => Error };
   createTaskCalls: string[];
+  createTaskPermissionAutoDenyMs: Array<number | undefined>;
   sendPromptCalls: string[];
   setModeCalls: Array<{ taskId: string; mode: string }>;
   streamEventHandlers: Map<string, (event: unknown) => Promise<void>>;
   /** 场景13：运行中翻转 fake respondPermission 返回值（false = 已被收口）。 */
   setRespondPermissionResult(value: boolean): void;
+  /** 场景15：直接覆写 bot-config.v3.json 顶层字段（enabled:false 等）。 */
+  overwriteBotConfig(patch: Record<string, unknown>): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -336,7 +352,10 @@ async function createPermissionsHarness(
 
   const controls: TaskServiceControls = {
     sentMessages: [],
+    sendAttempts: [],
+    sendControl: {},
     createTaskCalls: [],
+    createTaskPermissionAutoDenyMs: [],
     sendPromptCalls: [],
     setModeCalls: [],
     streamEventHandlers: new Map(),
@@ -353,6 +372,12 @@ async function createPermissionsHarness(
   const fakeWeixinAdapter: BotProviderAdapter = {
     test: async () => ({ ok: true, message: "stub" }),
     send: async (_bot, message) => {
+      controls.sendAttempts.push(message.text);
+      if (controls.sendControl.failPattern?.test(message.text)) {
+        throw controls.sendControl.errorFactory
+          ? controls.sendControl.errorFactory()
+          : new Error("provider send rejected (test)");
+      }
       controls.sentMessages.push(message);
     },
     parseCallback: (payload): BotInboundMessage[] => {
@@ -403,12 +428,25 @@ async function createPermissionsHarness(
     service,
     configDir,
     sentMessages: controls.sentMessages,
+    sendAttempts: controls.sendAttempts,
+    sendControl: controls.sendControl,
     createTaskCalls: controls.createTaskCalls,
+    createTaskPermissionAutoDenyMs: controls.createTaskPermissionAutoDenyMs,
     sendPromptCalls: controls.sendPromptCalls,
     setModeCalls: controls.setModeCalls,
     streamEventHandlers: controls.streamEventHandlers,
     setRespondPermissionResult(value: boolean) {
       controls.respondPermissionResult = value;
+    },
+    async overwriteBotConfig(patch: Record<string, unknown>) {
+      const path = join(configDir, BOTS_CONFIG_FILE);
+      const config = JSON.parse(await readFile(path, "utf8")) as {
+        bots: Array<Record<string, unknown>>;
+      };
+      config.bots = config.bots.map((bot) =>
+        bot.id === WEIXIN_BOT_ID ? { ...bot, ...patch } : bot,
+      );
+      await writeFile(path, JSON.stringify(config));
     },
     async dispose() {
       await service.disposeAllAndWait().catch(() => undefined);
@@ -790,4 +828,367 @@ test("场景6（红·/status 模式行）：/status 回复必须包含带非空�
   } finally {
     await harness.dispose();
   }
+});
+
+// ---- W3b（§3a/§3c）：deadline 传递 + 提醒/自动拒绝文案 + 超时配置 ----
+
+/**
+ * 策略 timer 的 E2E 时钟缩放（spec §3c；先例 = ASK_USER_QUESTION_E2E_CLOCK_SCALE_ENV）：
+ * 仅在 ZCODE_ENV=test 且显式设置 BOT_PERMISSION_TIMER_SCALE_ENV 时生效；必须在
+ * createPermissionsHarness（服务创建期解析系数）之前设置，测试结束恢复现场。
+ */
+async function withPermissionTimerScale(scale: string, run: () => Promise<void>): Promise<void> {
+  const previousZcodeEnv = process.env.ZCODE_ENV;
+  const previousScale = process.env[BOT_PERMISSION_TIMER_SCALE_ENV];
+  process.env.ZCODE_ENV = "test";
+  process.env[BOT_PERMISSION_TIMER_SCALE_ENV] = scale;
+  try {
+    await run();
+  } finally {
+    if (previousZcodeEnv === undefined) {
+      delete process.env.ZCODE_ENV;
+    } else {
+      process.env.ZCODE_ENV = previousZcodeEnv;
+    }
+    if (previousScale === undefined) {
+      delete process.env[BOT_PERMISSION_TIMER_SCALE_ENV];
+    } else {
+      process.env[BOT_PERMISSION_TIMER_SCALE_ENV] = previousScale;
+    }
+  }
+}
+
+function permissionRequestEvent(taskId: string, requestId: string): unknown {
+  return {
+    type: "permission_request",
+    taskId,
+    traceId: "trace-perm-w3b",
+    requestId,
+    description: "run a command",
+    kind: "execute",
+    options: [
+      {
+        optionId: "option-allow",
+        kind: "allow",
+        name: "Allow",
+        response: { decision: "allow" },
+      },
+      {
+        optionId: "option-deny",
+        kind: "deny",
+        name: "Deny",
+        response: { decision: "deny" },
+      },
+    ],
+    raw: {},
+  };
+}
+
+/** 场景 9/10/11/15 通用前置：task 模式 warmup（建立 stream watcher）。 */
+async function warmupTaskWatcher(
+  harness: PermissionsHarness,
+  taskId: string,
+  messageId: string,
+): Promise<void> {
+  const result = await harness.service.handleProviderCallbackResponse(
+    "weixin",
+    weixinInboundPayload([{ id: messageId, text: "开始分析" }]),
+  );
+  assert.equal(result.ok, true, "前置：warmup 消息必须成功");
+  assert.ok(
+    await waitForCondition(() => harness.streamEventHandlers.has(taskId), 5000),
+    "前置：必须建立 task stream watcher",
+  );
+}
+
+/** channel-dead 判别源（botChannelRetention.test.ts 同款）：weixinRet=-2 打标错误。 */
+function channelDeadWeixinRetError(): Error {
+  const error = new Error("Weixin iLink /sendmessage failed: ret=-2");
+  (error as Error & { weixinRet?: number }).weixinRet = -2;
+  return error;
+}
+
+test("场景 createTask 传递（§3a.2）：permissionTimeoutMinutes=7 ⇒ permissionAutoDenyMs=420000；缺省 ⇒ 600000（读取时默认 10）", async () => {
+  const configured = await createPermissionsHarness({
+    currentOptions: { permissionTimeoutMinutes: 7 },
+  });
+  try {
+    const result = await configured.service.handleProviderCallbackResponse(
+      "weixin",
+      weixinInboundPayload([{ id: "wx-msg-deadline-7", text: "开始分析" }]),
+    );
+    assert.equal(result.ok, true, "前置：草稿首发必须成功");
+    assert.ok(
+      await waitForCondition(() => configured.createTaskCalls.length >= 1, 5000),
+      "前置：必须创建 task",
+    );
+    assert.equal(
+      configured.createTaskPermissionAutoDenyMs.at(-1),
+      7 * 60_000,
+      "createTask 必须携带 permissionAutoDenyMs = 分钟×60000（spec §3a.2；7 分钟 ⇒ 420000）",
+    );
+  } finally {
+    await configured.dispose();
+  }
+
+  const unconfigured = await createPermissionsHarness({});
+  try {
+    const result = await unconfigured.service.handleProviderCallbackResponse(
+      "weixin",
+      weixinInboundPayload([{ id: "wx-msg-deadline-default", text: "开始分析" }]),
+    );
+    assert.equal(result.ok, true, "前置：草稿首发必须成功");
+    assert.ok(
+      await waitForCondition(() => unconfigured.createTaskCalls.length >= 1, 5000),
+      "前置：必须创建 task",
+    );
+    assert.equal(
+      unconfigured.createTaskPermissionAutoDenyMs.at(-1),
+      600_000,
+      "未配置 permissionTimeoutMinutes 的 bot 建任务也必须携带默认 deadline（读取时默认 10 分钟 ⇒ 600000；缺省无倒计时会造成 bot 侧文案与 CLI 事实脱节）",
+    );
+  } finally {
+    await unconfigured.dispose();
+  }
+});
+
+test("场景9a（§7.9）：deadline 10min（缩放后 600ms）⇒ 恰一次 T-2min 提醒先于 deny-note", async () => {
+  await withPermissionTimerScale("1000", async () => {
+    const harness = await createPermissionsHarness({
+      stateEntry: (botId, workspace) =>
+        taskStateEntry(botId, workspace, { activeTaskId: "task-perm-9a", isWeixin: true }),
+    });
+    try {
+      await warmupTaskWatcher(harness, "task-perm-9a", "wx-msg-perm-9a-0");
+      await harness.streamEventHandlers
+        .get("task-perm-9a")?.(permissionRequestEvent("task-perm-9a", "req-perm-9a"))
+        .catch(() => undefined);
+      assert.ok(
+        await waitForCondition(
+          () =>
+            harness.sentMessages.some((message) =>
+              (message.text ?? "").includes(PERMISSION_REMINDER_ZH),
+            ) &&
+            harness.sentMessages.some((message) =>
+              (message.text ?? "").includes(PERMISSION_AUTO_DENIED_ZH),
+            ),
+          5000,
+        ),
+        "deadline 10min（缩放后 600ms）：reminder 与 deny-note 都必须发出",
+      );
+      const reminderCount = harness.sentMessages.filter((message) =>
+        (message.text ?? "").includes(PERMISSION_REMINDER_ZH),
+      ).length;
+      const denyNoteCount = harness.sentMessages.filter((message) =>
+        (message.text ?? "").includes(PERMISSION_AUTO_DENIED_ZH),
+      ).length;
+      assert.equal(reminderCount, 1, "reminder 必须恰发一次（spec §3c.1/§7.9）");
+      assert.equal(denyNoteCount, 1, "deny-note 必须恰发一次（spec §3c.1）");
+      assert.ok(
+        harness.sentMessages
+          .map((message) => message.text ?? "")
+          .findIndex((text) => text.includes(PERMISSION_REMINDER_ZH)) <
+          harness.sentMessages
+            .map((message) => message.text ?? "")
+            .findIndex((text) => text.includes(PERMISSION_AUTO_DENIED_ZH)),
+        "reminder（deadline − 2min）必须先于 deny-note（deadline）",
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+});
+
+test("场景9b（§7.9）：deadline 1min（缩放后 60ms，≤5min）⇒ 无提醒，deny-note 照发", async () => {
+  await withPermissionTimerScale("1000", async () => {
+    const harness = await createPermissionsHarness({
+      currentOptions: { permissionTimeoutMinutes: 1 },
+      stateEntry: (botId, workspace) =>
+        taskStateEntry(botId, workspace, { activeTaskId: "task-perm-9b", isWeixin: true }),
+    });
+    try {
+      await warmupTaskWatcher(harness, "task-perm-9b", "wx-msg-perm-9b-0");
+      await harness.streamEventHandlers
+        .get("task-perm-9b")?.(permissionRequestEvent("task-perm-9b", "req-perm-9b"))
+        .catch(() => undefined);
+      assert.ok(
+        await waitForCondition(
+          () =>
+            harness.sentMessages.some((message) =>
+              (message.text ?? "").includes(PERMISSION_AUTO_DENIED_ZH),
+            ),
+          5000,
+        ),
+        "deadline 1min：deny-note 必须照发（缩放后 ~60ms）",
+      );
+      // deny-note 已到 ⇒ deadline 已过；再等一个缩放后窗口确认 reminder 始终不发。
+      await sleep(200);
+      assert.equal(
+        harness.sentMessages.filter((message) =>
+          (message.text ?? "").includes(PERMISSION_REMINDER_ZH),
+        ).length,
+        0,
+        "deadline ≤ 5 分钟必须整体跳过 reminder（spec §3c.1/§7.9）",
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+});
+
+test("场景10（§7.10 非保留）：reminder/deny-note 发送失败（channel-dead）⇒ 保留缓冲零新增条目", async () => {
+  await withPermissionTimerScale("1000", async () => {
+    const harness = await createPermissionsHarness({
+      stateEntry: (botId, workspace) =>
+        taskStateEntry(botId, workspace, { activeTaskId: "task-perm-10", isWeixin: true }),
+    });
+    try {
+      await warmupTaskWatcher(harness, "task-perm-10", "wx-msg-perm-10-0");
+      // 只让两条策略 timer 文案失败（权限提示本身照常送达，timer 正常武装）。
+      harness.sendControl.failPattern = new RegExp(
+        `${PERMISSION_REMINDER_ZH.slice(0, 6)}|${PERMISSION_AUTO_DENIED_ZH.slice(0, 6)}`,
+        "u",
+      );
+      harness.sendControl.errorFactory = channelDeadWeixinRetError;
+      await harness.streamEventHandlers
+        .get("task-perm-10")?.(permissionRequestEvent("task-perm-10", "req-perm-10"))
+        .catch(() => undefined);
+      assert.ok(
+        await waitForCondition(
+          () =>
+            harness.sendAttempts.some((text) => text.includes(PERMISSION_REMINDER_ZH)) &&
+            harness.sendAttempts.some((text) => text.includes(PERMISSION_AUTO_DENIED_ZH)),
+          5000,
+        ),
+        "前置：两条策略 timer 都必须真实尝试发送（失败路径已被走到）",
+      );
+      // 通道恢复 + 任意 weixin 入站 ⇒ revival 扫描：保留缓冲若被写入必发序言+补发。
+      harness.sendControl.failPattern = undefined;
+      harness.sendControl.errorFactory = undefined;
+      await harness.service.handleProviderCallbackResponse(
+        "weixin",
+        weixinInboundPayload([{ id: "wx-msg-perm-10-revive", text: "继续" }]),
+      );
+      await sleep(200);
+      assert.equal(
+        harness.sentMessages.filter((message) =>
+          (message.text ?? "").startsWith(RETAINED_PREAMBLE_PREFIX_ZH),
+        ).length,
+        0,
+        "策略 timer 文案失败不得进入保留缓冲（revival 无序言 = 零积压条目；spec §3c.2/§7.10）",
+      );
+      assert.equal(
+        harness.sentMessages.some((message) =>
+          (message.text ?? "").includes(PERMISSION_REMINDER_ZH),
+        ),
+        false,
+        "失败的 reminder 不得经 revival 迟到补发（即时性消息，延迟到达令人困惑）",
+      );
+      assert.equal(
+        harness.sentMessages.some((message) =>
+          (message.text ?? "").includes(PERMISSION_AUTO_DENIED_ZH),
+        ),
+        false,
+        "失败的 deny-note 不得经 revival 迟到补发",
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+});
+
+test("场景11（§7.11 边界 guard）：permission deadline 触发不触碰 pending user input（elicitation 原样存活）", async () => {
+  await withPermissionTimerScale("1000", async () => {
+    // pendingElicitation 归属另一 actor（actorKey 不同）：warmup 文本不被问答路径吞并，
+    // 场景聚焦「permission timer 与问题类 pending 互不影响」的边界（spec §3e.1）。
+    const otherActorKey = `${WEIXIN_BOT_ID}::weixin::wx-other-user`;
+    const pendingElicitation = {
+      taskId: "task-perm-11",
+      requestId: "req-el-11",
+      runId: "run-el-11",
+      actorKey: otherActorKey,
+      currentQuestionIndex: 0,
+      questions: [
+        {
+          question: "选颜色？",
+          header: "颜色",
+          options: [
+            { value: "red", label: "红" },
+            { value: "blue", label: "蓝" },
+          ],
+        },
+      ],
+      answers: {},
+    };
+    const harness = await createPermissionsHarness({
+      stateEntry: (botId, workspace) => ({
+        ...taskStateEntry(botId, workspace, { activeTaskId: "task-perm-11", isWeixin: true }),
+        pendingElicitation,
+      }),
+    });
+    try {
+      await warmupTaskWatcher(harness, "task-perm-11", "wx-msg-perm-11-0");
+      await harness.streamEventHandlers
+        .get("task-perm-11")?.(permissionRequestEvent("task-perm-11", "req-perm-11"))
+        .catch(() => undefined);
+      assert.ok(
+        await waitForCondition(
+          () =>
+            harness.sentMessages.some((message) =>
+              (message.text ?? "").includes(PERMISSION_AUTO_DENIED_ZH),
+            ),
+          5000,
+        ),
+        "前置：permission deadline（缩放后 ~60ms 默认走 10min=600ms）必须触发 deny-note",
+      );
+      const entry = await readStateBotEntryAnywhere(harness.configDir, WEIXIN_BOT_ID);
+      assert.deepEqual(
+        entry.pendingElicitation,
+        pendingElicitation,
+        "permission deadline 触发后 pendingElicitation 必须原样存活（spec §3e.1：deadline 只作用于 permission kind；问题类行为不变）",
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+});
+
+test("场景15（§7.15）：deadline 前禁用 bot ⇒ note 抑制不发送", async () => {
+  await withPermissionTimerScale("1000", async () => {
+    const harness = await createPermissionsHarness({
+      currentOptions: { permissionTimeoutMinutes: 1 },
+      stateEntry: (botId, workspace) =>
+        taskStateEntry(botId, workspace, { activeTaskId: "task-perm-15", isWeixin: true }),
+    });
+    try {
+      await warmupTaskWatcher(harness, "task-perm-15", "wx-msg-perm-15-0");
+      await harness.streamEventHandlers
+        .get("task-perm-15")?.(permissionRequestEvent("task-perm-15", "req-perm-15"))
+        .catch(() => undefined);
+      assert.ok(
+        await waitForCondition(
+          () => harness.sendAttempts.some((text) => text.includes("允许") || text.includes("拒绝")),
+          5000,
+        ),
+        "前置：权限提示必须已送达（timer 已武装）",
+      );
+      // deadline（缩放后 60ms）前覆写 bot 配置禁用——触发时重读配置 ⇒ 抑制。
+      await harness.overwriteBotConfig({ enabled: false });
+      await sleep(500);
+      assert.equal(
+        harness.sendAttempts.some((text) => text.includes(PERMISSION_AUTO_DENIED_ZH)),
+        false,
+        "bot 禁用后到期必须抑制 note（不向已禁用 bot 的频道发送；spec §3c 生命周期表/§7.15）",
+      );
+      assert.equal(
+        harness.sentMessages.some((message) =>
+          (message.text ?? "").includes(PERMISSION_AUTO_DENIED_ZH),
+        ),
+        false,
+        "禁用抑制 = 零投递（含 revival 等任何迟到路径）",
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
 });
