@@ -187,6 +187,12 @@ drops (handoff §2 telemetry defects). Full logging contract:
 - **命令回复不保留（owner 决定 §7.23，2026-10-04 rig 后）**：命令是"即时"动作，
   延迟到达的保留命令回复令人困惑——命令回复发送失败照旧（上抛/丢弃；/status 的
   待补发行只在存活通道上可见）。保留面 = 任务回复正文 + 终态文书，二者之外不扩。
+- **权限提醒/拒绝文案不保留（3.15.0 Track B amendment，`specs/bot-permissions.md`
+  §3c）**：permission reminder（deadline 前 ~2min）、deny-note（「权限超时
+  未应答，已自动拒绝」）、迟到应答反馈（「已被处理/已自动拒绝」）三类为
+  best-effort **非保留**消息——发送失败即诚实丢弃，不进入 per-peer 保留缓冲
+  （与 §7.23 同 rationale：即时性消息，延迟到达令人困惑；deny 的后果由 agent
+  的后续正文承载，正文本身照常保留）。权限提示本体不保留（既有边界不变）。
 - 服务进程 dispose 时保留缓冲静默丢失（接受的残余，与桌面会话一致）。
 - 保留缓冲 cap 为**字节**口径（~64KB 尾部 + 头部截断标记）；per-peer 串行化
   （promise chain，botId+peerKey）覆盖 streamEventQueue / 入站队列 / 出队 drain
