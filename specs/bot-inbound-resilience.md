@@ -1,6 +1,8 @@
 # Spec: Bot Inbound Resilience (3.14.5-alpha.3)
 
-Status: **IN FLIGHT — 3.14.5-alpha.3（owner 决定 §7.12–18，2026-10-03 GO）**. 依据 §2b 事故
+Status: **SHIPPED in `3.14.5-alpha.3` (PR #16, release `afd21da`) — rig T1–T4
+PASSED 2026-10-03（T5–T8 subsumed by §2d investigation）；train 随 official
+`3.14.5`（2026-10-06）收官**. 依据 §2b 事故
 （WeChat 毒消息死锁：无模型草稿 throw → 游标永不提交 → 同批消息无限重投 + 队头阻塞，
 52 次重处理 / 7 分钟，跨重启与禁用启用存活）。上一个 deferral（bot-provider-network.md
 F4 "retry-forever, 有真实循环证据再 revisit"）由本次 rig 证据落地（见该 spec 的

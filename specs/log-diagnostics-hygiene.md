@@ -1,7 +1,8 @@
 # Spec: Log Diagnostics Hygiene (3.14.5-alpha.2)
 
-Status: **IN FLIGHT — 3.14.5-alpha.2（PR1 = instrumentation-only；每个 PR 各发一个
-alpha，测试者只通过已发布 alpha 收到更新）**. 依据：R1/16:42 两次事故
+Status: **SHIPPED in `3.14.5-alpha.2` (PR #15, release `527cce5`) — rig H1–H5
+VERIFIED 2026-10-04（§2f.5；H6 部分未行使不阻塞）；train 随 official
+`3.14.5`（2026-10-06）收官**. 依据：R1/16:42 两次事故
 复盘（../ZCode-handoff.md §2）证明日志无法回答基本问题（失败无 ret/errcode、成功无记录、
 bots 计数器恒零），且 63% 日志量为单一轮询 OK 行（2026-10-02 实测 20,442/32,515 行）。
 本 spec 只改"写什么日志"；**任何业务行为（flush/drop/notice、typing 节奏、token 处理、
