@@ -1,5 +1,37 @@
 # Changelog
 
+## [3.15.0-alpha.1](https://github.com/yeyuan98/zodex/compare/v3.15.0-alpha.0...v3.15.0-alpha.1) (2026-10-06)
+
+### Features
+
+* **bots:** alpha.1 F1+F4——权限提示双通道 host 收口 + /mode 选项源双侧修复 ([c92cca2](https://github.com/yeyuan98/zodex/commit/c92cca27004a21b2243ddb23cd461746cfe80d51))
+  * F1 host pendingPermissions 登记表收口双通道（通道 A permission.requested 先到标记、wasPending 抑制后到广播；陷阱 a user-input-backed 工具名过滤不入表、陷阱 b "unknown" requestId 永不去重），adapter 保持无状态（场景16/17 红转绿+guard；单通道桌面 pin 保持绿）
+  * F1 watcher 有界 seen-map 防御（requestId→options hash，独立于只存最新请求的 pendingPermissionOptions；空 map 首提示必渲染）（场景18a/18b 红转绿）
+  * F1 user-input-backed 工具名判定抽到 permissionToolNames.ts，host 标记与 adapter 投影共用同一事实源
+  * F4 active-task /mode 列表与设置改用 active.configOptions（thoughtLevel 同款先例）；draft 路径经 getZCodeAgentAvailableModes（桌面 composer 同源）合成 mode select，当前值读取时默认 build；/mode 标题改显原始 mode token（与 /status 模式行同口径）（场景22a/22b 红转绿，22a2/22c guard 保持绿）
+  * F4 死代码 listUserConfigOptions 契约面规范移除（IBotsService.getUserConfigOptions + BotUserConfigOptionsParams；dep:refs 验证无消费方）
+
+* **bots:** alpha.1 F2+F3——deadline 冻结持久化武装 + 自答单确认/外来解析注记 ([43fa0a4](https://github.com/yeyuan98/zodex/commit/43fa0a448e89617efb214056cd01fcd5f0d4b0d0))
+  * F2 createTask 冻结 permissionAutoDenyMs 持久化于 bot context（BotState 单字段=当前 active task 冻结值，经 botsStateFileSchema 透传防 zod 剥离；/new//workspace/删除任务替换//task 切换清理，终态//stop/permission_response 不清——场景19a 的 task_complete 后续跑重建靠此存活），armBotPermissionPolicyTimers 只读持久值（E7 虚假超时文案根因——今读活配置）
+  * F2 miss（任务早于字段/映射丢失）⇒ reminder/deny-note 均不武装，绝不活配置重武装；重启按持久值重武装（场景19a/19b/19c 红转绿）；alpha.0 timer 测试 fixture 补种持久化冻结值（9a/9b/10/11/15/R1-1/R1-2——F2 后武装不再读活配置，各测试钉住的 timer 语义不变）
+  * F2 CLI resume 缺口最小修：会话级 permission-deadline entry（v4 createSession 建档写 record 字段同时经 host 钩子 persistSessionPermissionDeadline 直写 store，稳定 id overwrite 与 permission-auto-resolution 同模式）+ broker resolvePermissionDeadline 在 record 缺席时回落读 entry（场景20 红转绿；无 entry 不武装/建档主源不变两 guard 保持）
+  * F3 permission_response 处理器查阅有界 recently-self-answered 集合（cap 200/TTL 60s，仅 respondPermission submitted=true 记录）：自答（按钮+文本）ack 为单确认、note 抑制但清理照常（pending 清除/broadcast/timer 清除/卡片退休 UX）；跨端应答/CLI 自动拒绝（permissionAutoDenied §3c.2 选择规则不变）/B2.3 stop-deny 照发 note（场景21a/21a2 红转绿，21b guard 保持）
+  * spec §8.2 补 W3 实现注记（context 字段 keying/清理缝、watchAutomationRun miss 语义、CLI 小修落地形状）
+
+
+### Bug Fixes
+
+* **bots:** 折叠 [ulw] 评审 NIT——draft/active mode label 同口径 + spec 显示注记 + 场景16 稳态窗提速 ([61ea468](https://github.com/yeyuan98/zodex/commit/61ea468c35ae247600488ed89f0eb6f7a8a703ea))
+  * draft mode 选项 label 改用 mode.name（与 active.configOptions 显示口径一致，消除 draft=build/active=Ask before changes 分裂）
+  * spec §8.4 补实现注记：两路径 label 统一 mode.name；/mode 标题显示原始 mode token（与 /status 模式行同口径）
+  * 场景16 改为首条广播 + 1.5s 稳态窗断言恰一次（> rig 实测 A→B 间隔 330-650ms），修复后不再恒烧 10s
+  * NIT-4（transient 卡片 finalize 自答文案）按评审携带为设计，不改动
+
+
+### Documentation
+
+* **specs:** bot-permissions Status——alpha.0 已发版 + rig §2k 缺陷与 alpha.1 计划指针 ([0d75e21](https://github.com/yeyuan98/zodex/commit/0d75e21934659d453fb062f8cb3486cf78f0710c))
+
 ## [3.15.0-alpha.0](https://github.com/yeyuan98/zodex/compare/v3.14.5...v3.15.0-alpha.0) (2026-10-06)
 
 ### Features
