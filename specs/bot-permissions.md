@@ -12,12 +12,13 @@ BotsDialog）新增「权限超时（分钟）」数字字段（默认 10，最�
 Owners: bots 服务（`packages/services/src/bots/botsService.ts`）——解锁/迁移/
 提醒与拒绝文案/`permission_response` 清理/`/status`；CLI v4 交互登记表
 （`apps/zcode-cli/packages/bootstrap/src/zcode-protocol-v4/interaction-registry.ts`
-+ `zcode-protocol/interaction-broker.ts`）——权限自动拒绝的倒计时与应答；
-`packages/shared`（`zcode-protocol-v4/command.ts` createSession payload）——
-deadline 增量字段；桌面 UI（`packages/ui/src/BotsDialog.tsx`）——超时字段。
-Related: `bot-inbound-resilience.md`（B2.3 休眠分支 = 同一 respondPermission
-seam 的发送失败触发器）、`bot-message-delivery.md`（保留面——本文新增的消息
-类别为非保留）、`off-peak-local-admission.md`（auto-deny 先例语义）。
+
+- `zcode-protocol/interaction-broker.ts`）——权限自动拒绝的倒计时与应答；
+  `packages/shared`（`zcode-protocol-v4/command.ts` createSession payload）——
+  deadline 增量字段；桌面 UI（`packages/ui/src/BotsDialog.tsx`）——超时字段。
+  Related: `bot-inbound-resilience.md`（B2.3 休眠分支 = 同一 respondPermission
+  seam 的发送失败触发器）、`bot-message-delivery.md`（保留面——本文新增的消息
+  类别为非保留）、`off-peak-local-admission.md`（auto-deny 先例语义）。
 
 ## 0. 语义总览（plain）
 
@@ -109,8 +110,8 @@ Bot 会话与桌面会话共用**同一权限模型**。解锁后 bot 默认 `bu
 ### 3c. Bot 侧提醒与文案（非权威、非保留）
 
 1. Bot 侧为每个 pending permission 武装**两个轻量策略 timer**（bots 服务内，
-  `botId+peerKey+requestId` 寻址；本 spec 显式声明为「无新 timer」交付管线
-  不变量的受控例外——策略 timer，非 flush/retention 机械）：
+   `botId+peerKey+requestId` 寻址；本 spec 显式声明为「无新 timer」交付管线
+   不变量的受控例外——策略 timer，非 flush/retention 机械）：
    - **reminder**：deadline − 2 分钟发送一次本地化提醒（deadline ≤ 5 分钟时
      不发）；仅提醒，无任何应答权威。
    - **deny-note**：deadline 时刻发送「权限超时未应答，已自动拒绝」本地化
@@ -124,16 +125,16 @@ Bot 会话与桌面会话共用**同一权限模型**。解锁后 bot 默认 `bu
    即时性消息，延迟到达令人困惑；agent 的后续正文已承载拒绝后果）。
 3. Timer 生命周期表（每个事件 → 清除/重设/触发）：
 
-   | 事件 | reminder/deny-note timer | 说明 |
-   |---|---|---|
-   | `permission_response`（任何客户端应答或 CLI 自动拒绝） | 清除 | 权威已收口 |
-   | `task_complete` / `task_error` / `/stop` drain | 清除 + pending 清空 | 终态 |
-   | stale-watcher 清理（终态事件丢失） | 清除（**无** note） | 不发迟到幽灵文案；CLI 倒计时自行收口 |
-   | bot 禁用/删除 | 清除（note 抑制） | 不向已禁用 bot 的频道发送 |
-   | 服务 dispose | best-effort 清除 | 静默丢失接受（与保留缓冲同规） |
-   | 服务启动扫描 | 清除过期项 | 见 3d |
-   | deadline 配置中途变更 | 无效（不重设） | 本次 pending 的 deadline 已定 |
-   | 同 requestId 再提示 | 不重设 | 时钟权威在登记表（3b.4） |
+   | 事件                                                   | reminder/deny-note timer | 说明                                 |
+   | ------------------------------------------------------ | ------------------------ | ------------------------------------ |
+   | `permission_response`（任何客户端应答或 CLI 自动拒绝） | 清除                     | 权威已收口                           |
+   | `task_complete` / `task_error` / `/stop` drain         | 清除 + pending 清空      | 终态                                 |
+   | stale-watcher 清理（终态事件丢失）                     | 清除（**无** note）      | 不发迟到幽灵文案；CLI 倒计时自行收口 |
+   | bot 禁用/删除                                          | 清除（note 抑制）        | 不向已禁用 bot 的频道发送            |
+   | 服务 dispose                                           | best-effort 清除         | 静默丢失接受（与保留缓冲同规）       |
+   | 服务启动扫描                                           | 清除过期项               | 见 3d                                |
+   | deadline 配置中途变更                                  | 无效（不重设）           | 本次 pending 的 deadline 已定        |
+   | 同 requestId 再提示                                    | 不重设                   | 时钟权威在登记表（3b.4）             |
 
 ### 3d. 重启对账
 
