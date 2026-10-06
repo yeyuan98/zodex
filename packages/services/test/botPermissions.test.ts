@@ -96,6 +96,8 @@ interface TaskServiceControls {
   sendPromptCalls: string[];
   /** setMode 调用记录：场景 1/2 断言建任务咽喉下发的模式（今天被 fake 忽略）。 */
   setModeCalls: Array<{ taskId: string; mode: string }>;
+  /** F4（§7.22）：fake setConfigOption 捕获（active-task /mode set 往返）。 */
+  setConfigOptionCalls: Array<{ taskId: string; configId: string; value: string }>;
   streamEventHandlers: Map<string, (event: unknown) => Promise<void>>;
   /** 场景13 旋钮：fake respondPermission 返回值（false = 已被 CLI 自动拒绝/他端收口）。 */
   respondPermissionResult: boolean;
@@ -147,6 +149,28 @@ function buildFakeTaskService(controls: TaskServiceControls) {
     setMode: async (params: { taskId: string; mode: string }) => {
       controls.setModeCalls.push({ taskId: params.taskId, mode: params.mode });
     },
+    setConfigOption: async (params: { taskId: string; configId: string; value: string }) => {
+      controls.setConfigOptionCalls.push({
+        taskId: params.taskId,
+        configId: params.configId,
+        value: params.value,
+      });
+      // 真实链路返回应用后的 configOptions；fake 复用 getTaskConfigOptions 同一形状。
+      return [
+        {
+          id: "mode",
+          name: "Mode",
+          category: "mode",
+          type: "select",
+          currentValue: params.value,
+          options: [
+            { value: "build", name: "Build" },
+            { value: "plan", name: "Plan" },
+            { value: "yolo", name: "Yolo" },
+          ],
+        },
+      ];
+    },
     onDynamicStreamEvent:
       (taskId: string) =>
       (handler: (event: unknown) => Promise<void>): IDisposable => {
@@ -160,7 +184,7 @@ function buildFakeTaskService(controls: TaskServiceControls) {
   };
 }
 
-function buildModelSelectionService() {
+function buildModelSelectionService(withModelInView?: boolean) {
   const modelSelection = {
     providerId: ZCODE_AGENT_PROVIDER,
     modelId: "glm-test",
@@ -169,7 +193,24 @@ function buildModelSelectionService() {
     getView: async () =>
       ({
         revision: 1,
-        providers: [],
+        // F4（§7.22）：withModelInView=true 时 view 可解析出所选模型（含 reasoning
+        // spec，thoughtLevel 同源可用）——draft /mode 的「已配模型」形态；缺省保持
+        // 原 harness 形态（providers 空 = 模型不可解析 = model-less 边界 pin）。
+        providers: withModelInView
+          ? [
+              {
+                providerId: ZCODE_AGENT_PROVIDER,
+                models: [
+                  {
+                    modelId: "glm-test",
+                    config: {
+                      optionSpecs: { reasoningLevel: { values: ["low", "medium", "high"] } },
+                    },
+                  },
+                ],
+              },
+            ]
+          : [],
         preferredSelection: modelSelection,
         effectiveSelection: modelSelection,
       }) as unknown as Awaited<ReturnType<IModelSelectionService["getView"]>>,
@@ -325,11 +366,20 @@ interface PermissionsHarnessOptions {
   stateFile?: { name: string; version: number };
   /** 场景6b：注入 settingService locale（en-US 断言用；缺省无 settingService = zh）。 */
   locale?: "en-US";
+  /** F4（§7.22）：view 中包含所选模型（draft /mode「已配模型」形态）。 */
+  modelInView?: boolean;
+  /**
+   * F2（§7.19 重启重武装）：复用既有数据目录建第二个服务实例（模拟服务重启；状态
+   * 文件保留在磁盘上）。传入时不再写初始 bot 文件。
+   */
+  reuseDirs?: { dataRoot: string; workspace: string; configDir: string };
 }
 
 interface PermissionsHarness {
   service: IBotsService & { disposeAllAndWait(): Promise<void> };
   configDir: string;
+  /** F2 重启用：数据三目录（dispose(true) 后可经 reuseDirs 复用）。 */
+  dirs: { dataRoot: string; workspace: string; configDir: string };
   sentMessages: BotOutboundMessage[];
   sendAttempts: string[];
   sendControl: { failPattern?: RegExp; errorFactory?: () => Error };
@@ -337,6 +387,7 @@ interface PermissionsHarness {
   createTaskPermissionAutoDenyMs: Array<number | undefined>;
   sendPromptCalls: string[];
   setModeCalls: Array<{ taskId: string; mode: string }>;
+  setConfigOptionCalls: Array<{ taskId: string; configId: string; value: string }>;
   streamEventHandlers: Map<string, (event: unknown) => Promise<void>>;
   /** 场景13：运行中翻转 fake respondPermission 返回值（false = 已被收口）。 */
   setRespondPermissionResult(value: boolean): void;
@@ -345,12 +396,25 @@ interface PermissionsHarness {
   /** 场景15：直接覆写 bot-config.v3.json 顶层字段（enabled:false 等）。 */
   overwriteBotConfig(patch: Record<string, unknown>): Promise<void>;
   dispose(): Promise<void>;
+  /**
+   * F2（§7.19 重启重武装）：dispose 但保留数据目录（供 reuseDirs 建第二个服务实例）。
+   */
+  dispose(keepDirs?: boolean): Promise<void>;
+  dispose(): Promise<void>;
 }
 
 async function createPermissionsHarness(
   options: PermissionsHarnessOptions,
 ): Promise<PermissionsHarness> {
-  const { dataRoot, workspace, configDir } = await prepareWorkspaceDirs("zcode-bot-perms");
+  let dataRoot: string;
+  let workspace: string;
+  let configDir: string;
+  if (options.reuseDirs) {
+    ({ dataRoot, workspace, configDir } = options.reuseDirs);
+    setDataBaseDir(dataRoot);
+  } else {
+    ({ dataRoot, workspace, configDir } = await prepareWorkspaceDirs("zcode-bot-perms"));
+  }
 
   const botConfig: BotConfig = {
     id: WEIXIN_BOT_ID,
@@ -362,12 +426,15 @@ async function createPermissionsHarness(
     ...(options.currentOptions ? { currentOptions: options.currentOptions } : {}),
     replyMode: "assistant_changes",
   };
-  await writeBotFiles(
-    configDir,
-    botConfig,
-    options.stateEntry?.(botConfig.id, workspace) ?? draftStateEntry(botConfig.id, workspace, true),
-    options.stateFile,
-  );
+  if (!options.reuseDirs) {
+    await writeBotFiles(
+      configDir,
+      botConfig,
+      options.stateEntry?.(botConfig.id, workspace) ??
+        draftStateEntry(botConfig.id, workspace, true),
+      options.stateFile,
+    );
+  }
 
   const controls: TaskServiceControls = {
     sentMessages: [],
@@ -377,12 +444,13 @@ async function createPermissionsHarness(
     createTaskPermissionAutoDenyMs: [],
     sendPromptCalls: [],
     setModeCalls: [],
+    setConfigOptionCalls: [],
     streamEventHandlers: new Map(),
     respondPermissionResult: options.respondPermissionResult ?? true,
     listTasksResult: [],
   };
   const fakeTaskService = buildFakeTaskService(controls);
-  const modelSelectionService = buildModelSelectionService();
+  const modelSelectionService = buildModelSelectionService(options.modelInView);
   const credentialService = {
     load: async () => "wx-token-perms",
   } as unknown as ICredentialService;
@@ -455,6 +523,7 @@ async function createPermissionsHarness(
   return {
     service,
     configDir,
+    dirs: { dataRoot, workspace, configDir },
     sentMessages: controls.sentMessages,
     sendAttempts: controls.sendAttempts,
     sendControl: controls.sendControl,
@@ -462,6 +531,7 @@ async function createPermissionsHarness(
     createTaskPermissionAutoDenyMs: controls.createTaskPermissionAutoDenyMs,
     sendPromptCalls: controls.sendPromptCalls,
     setModeCalls: controls.setModeCalls,
+    setConfigOptionCalls: controls.setConfigOptionCalls,
     streamEventHandlers: controls.streamEventHandlers,
     setRespondPermissionResult(value: boolean) {
       controls.respondPermissionResult = value;
@@ -479,9 +549,12 @@ async function createPermissionsHarness(
       );
       await writeFile(path, JSON.stringify(config));
     },
-    async dispose() {
+    async dispose(keepDirs?: boolean) {
       await service.disposeAllAndWait().catch(() => undefined);
       setDataBaseDir(null);
+      if (keepDirs) {
+        return;
+      }
       await rm(dataRoot, { recursive: true, force: true });
       await rm(workspace, { recursive: true, force: true });
     },
@@ -1687,4 +1760,577 @@ test("场景R1-2（迟到 deny 文案）：deadline 后到达的 permission_resp
       await afterDeadline.dispose();
     }
   });
+});
+
+// =====================================================================================
+// alpha.1（rig-221723）红测套件——specs/bot-permissions.md §7.16-§7.22 / §8 F1-F4。
+// W1 提交、未实现必红；随 W2（F1+F4）/W3（F2+F3）转绿。guard 用例（今天即绿）钉住
+// 修复不得破坏的边界，文件头 harness 约定不变。
+// =====================================================================================
+
+/**
+ * F1/F§7.18 watcher 直驱探针事件：description 用作提示文案唯一标记（经
+ * formatBotPermissionRequestSummary → preview.title 进入 selection 回复正文），
+ * 供「重复抑制/并发不互踩/unknown 不去重」按标记计数渲染次数。
+ */
+function probePermissionRequestEvent(taskId: string, requestId: string, marker: string): unknown {
+  return {
+    type: "permission_request",
+    taskId,
+    traceId: "trace-alpha1-probe",
+    requestId,
+    description: marker,
+    kind: "execute",
+    options: [
+      {
+        optionId: "option-allow",
+        kind: "allow",
+        name: "Allow",
+        response: { decision: "allow" },
+      },
+      {
+        optionId: "option-deny",
+        kind: "deny",
+        name: "Deny",
+        response: { decision: "deny" },
+      },
+    ],
+    raw: {},
+  };
+}
+
+/** §7.18 计数辅助：正文含 marker 的出站消息数（每次提示渲染恰发一条 selection 回复）。 */
+function countPromptRenders(harness: PermissionsHarness, marker: string): number {
+  return harness.sentMessages.filter((message) => (message.text ?? "").includes(marker)).length;
+}
+
+// ---- 场景 18（§7.18 / §8.1 F1 watcher 有界 seen-map 防御） ----
+
+test("场景18a（红·F1 watcher 重复抑制）：同 requestId 重复 permission_request ⇒ 第二次渲染必须抑制；空 map 首提示必渲染（安全网不掩盖 host 回归）", async () => {
+  const harness = await createPermissionsHarness({
+    stateEntry: (botId, workspace) =>
+      taskStateEntry(botId, workspace, { activeTaskId: "task-f1-dup", isWeixin: true }),
+  });
+  try {
+    await warmupTaskWatcher(harness, "task-f1-dup", "wx-msg-f1-dup-0");
+    // 首提示（seen-map 为空）：必须渲染——防御网存在的原因是双通道，不是吞首提示。
+    await harness.streamEventHandlers
+      .get("task-f1-dup")?.(
+        probePermissionRequestEvent("task-f1-dup", "req-f1-dup", "probe-f1-dup"),
+      )
+      .catch(() => undefined);
+    assert.ok(
+      await waitForCondition(() => countPromptRenders(harness, "probe-f1-dup") >= 1, 5000),
+      "前置（guard）：空 seen-map 下首提示必须渲染（spec §8.1：安全网不得掩盖 host 回归）",
+    );
+    // 同 requestId 重复（host 收口失效/混版窗口下的 belt-and-braces）：必须抑制。
+    await harness.streamEventHandlers
+      .get("task-f1-dup")?.(
+        probePermissionRequestEvent("task-f1-dup", "req-f1-dup", "probe-f1-dup"),
+      )
+      .catch(() => undefined);
+    await sleep(300);
+    assert.equal(
+      countPromptRenders(harness, "probe-f1-dup"),
+      1,
+      "同 requestId 的重复 permission_request 在 watcher 必须抑制第二次渲染（spec §8.1 watcher 防御；今天无 seen-map ⇒ 双发 = Telegram 双卡根因的 watcher 侧复现）",
+    );
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("场景18b（红·F1 并发不互踩）：A→B 并发后 A 的重复 ⇒ pending 仍属 B（不得被 A 的重复渲染覆盖）", async () => {
+  const harness = await createPermissionsHarness({
+    stateEntry: (botId, workspace) =>
+      taskStateEntry(botId, workspace, { activeTaskId: "task-f1-conc", isWeixin: true }),
+  });
+  try {
+    await warmupTaskWatcher(harness, "task-f1-conc", "wx-msg-f1-conc-0");
+    await harness.streamEventHandlers
+      .get("task-f1-conc")?.(
+        probePermissionRequestEvent("task-f1-conc", "req-conc-a", "probe-conc-a"),
+      )
+      .catch(() => undefined);
+    await harness.streamEventHandlers
+      .get("task-f1-conc")?.(
+        probePermissionRequestEvent("task-f1-conc", "req-conc-b", "probe-conc-b"),
+      )
+      .catch(() => undefined);
+    // A 的重复到达（同 requestId 再渲染）：seen-map 必须抑制，且不得覆盖 B 的 pending。
+    await harness.streamEventHandlers
+      .get("task-f1-conc")?.(
+        probePermissionRequestEvent("task-f1-conc", "req-conc-a", "probe-conc-a"),
+      )
+      .catch(() => undefined);
+    await sleep(300);
+    const entry = await readStateBotEntryAnywhere(harness.configDir, WEIXIN_BOT_ID);
+    const pendingRequestIds = (
+      (entry.pendingPermissionOptions as Array<{ requestId: string }> | undefined) ?? []
+    ).map((option) => option.requestId);
+    assert.ok(pendingRequestIds.length > 0, "前置：并发 B 之后 pending 必须有记录");
+    assert.deepEqual(
+      [...new Set(pendingRequestIds)],
+      ["req-conc-b"],
+      "A 的重复渲染不得覆盖 B 的 pendingPermissionOptions（spec §8.1：seen-map 不得键于只存最新请求的 pendingPermissionOptions——重复 A 会把 pending 拖回 A；今天重复 A 直接重写 pending ⇒ [req-conc-a]）",
+    );
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test('场景18c（guard·F1 unknown 不去重）：requestId="unknown" 的两条 distinct 提示 ⇒ 都必须渲染（adapter 合成兜底永不去重）', async () => {
+  const harness = await createPermissionsHarness({
+    stateEntry: (botId, workspace) =>
+      taskStateEntry(botId, workspace, { activeTaskId: "task-f1-unknown", isWeixin: true }),
+  });
+  try {
+    await warmupTaskWatcher(harness, "task-f1-unknown", "wx-msg-f1-unknown-0");
+    // adapter 对缺失 requestId/toolCallId 的合成兜底是字面量 "unknown"（zcodeTaskServiceAdapter
+    // permissionPayloadToStreamEvent）：混版旧 CLI 窗口可能出现两条 distinct 提示同携
+    // "unknown"——dedupe 键永不得取该字面量（spec §8.1 陷阱 b）。
+    await harness.streamEventHandlers
+      .get("task-f1-unknown")?.(
+        probePermissionRequestEvent("task-f1-unknown", "unknown", "probe-unknown-one"),
+      )
+      .catch(() => undefined);
+    await harness.streamEventHandlers
+      .get("task-f1-unknown")?.(
+        probePermissionRequestEvent("task-f1-unknown", "unknown", "probe-unknown-two"),
+      )
+      .catch(() => undefined);
+    await sleep(300);
+    assert.equal(countPromptRenders(harness, "probe-unknown-one"), 1, "unknown-id 提示一必须渲染");
+    assert.equal(
+      countPromptRenders(harness, "probe-unknown-two"),
+      1,
+      'unknown-id 提示二必须同样渲染——"unknown" requestId 永不去重（spec §8.1 陷阱 b；guard 今天即绿，W2/W3 引入 seen-map 后必须跳过该字面量）',
+    );
+  } finally {
+    await harness.dispose();
+  }
+});
+
+// ---- 场景 19（§7.19 / §8.2 F2 deadline 冻结持久化） ----
+
+test("场景19a（红·F2 冻结武装）：建任务(timeout=10min)后配置调低至 1min ⇒ 后续提示武装仍按冻结 10min（E7），不读活配置", async () => {
+  await withPermissionTimerScale("1000", async () => {
+    const harness = await createPermissionsHarness({});
+    try {
+      // 1) 草稿首发：createTask 携带默认 600000，context 切 task 模式并建 watcher。
+      const result = await harness.service.handleProviderCallbackResponse(
+        "weixin",
+        weixinInboundPayload([{ id: "wx-msg-f2a-1", text: "开始分析" }]),
+      );
+      assert.equal(result.ok, true, "前置：草稿首发必须成功");
+      assert.ok(
+        await waitForCondition(() => harness.createTaskCalls.length >= 1, 5000),
+        "前置：必须创建 task",
+      );
+      assert.equal(
+        harness.createTaskPermissionAutoDenyMs.at(-1),
+        600_000,
+        "前置：默认配置 ⇒ createTask 冻结值 600000",
+      );
+      const taskId = "task-created-1";
+      assert.ok(
+        await waitForCondition(() => harness.streamEventHandlers.has(taskId), 5000),
+        "前置：watcher 建立",
+      );
+      // 2) 终态 drain watcher——复现 E7 的真实形态：下一轮消息以新读配置重建 watcher
+      //    （watchTaskStream 捕获的 bot 是 watcher 建立时的配置快照）。
+      await harness.streamEventHandlers
+        .get(taskId)?.({ type: "task_complete", taskId, traceId: "trace-f2a" })
+        .catch(() => undefined);
+      // 3) E7：任务运行期间把超时调低到 1 分钟。
+      await harness.overwriteBotConfig({
+        currentOptions: { permissionTimeoutMinutes: 1 },
+      });
+      // 4) 续跑消息重建 watcher + 新权限提示。
+      const resumed = await harness.service.handleProviderCallbackResponse(
+        "weixin",
+        weixinInboundPayload([{ id: "wx-msg-f2a-2", text: "继续" }]),
+      );
+      assert.equal(resumed.ok, true, "前置：续跑消息必须成功");
+      assert.ok(
+        await waitForCondition(() => harness.streamEventHandlers.has(taskId), 5000),
+        "前置：watcher 重建",
+      );
+      await harness.streamEventHandlers
+        .get(taskId)?.(probePermissionRequestEvent(taskId, "req-f2a", "probe-f2a-frozen"))
+        .catch(() => undefined);
+      // 5) 冻结语义：任务建于 10min ⇒ reminder 必须发出（10min > 5min 阈值；缩放后
+      //    reminder ~480ms）。今天渲染点重读活配置 1min ⇒ 无 reminder 且 deny-note
+      //    60ms 早发（E7 虚假「已自动拒绝」的测试内复现）。
+      assert.ok(
+        await waitForCondition(
+          () =>
+            harness.sentMessages.some((message) =>
+              (message.text ?? "").includes(PERMISSION_REMINDER_ZH),
+            ),
+          5000,
+        ),
+        "建任务时冻结的 10min deadline 必须决定武装（reminder 发出，spec §8.2；今天渲染点读活配置 1min ⇒ 整体跳过 reminder）",
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+});
+
+test("场景19b（红·F2 重启重武装）：服务重启后按持久化冻结值武装（不读活配置、不重读）", async () => {
+  await withPermissionTimerScale("1000", async () => {
+    let dirs: { dataRoot: string; workspace: string; configDir: string } | undefined;
+    const first = await createPermissionsHarness({});
+    try {
+      const result = await first.service.handleProviderCallbackResponse(
+        "weixin",
+        weixinInboundPayload([{ id: "wx-msg-f2b-1", text: "开始分析" }]),
+      );
+      assert.equal(result.ok, true, "前置：草稿首发必须成功");
+      assert.ok(
+        await waitForCondition(() => first.createTaskCalls.length >= 1, 5000),
+        "前置：必须创建 task",
+      );
+      assert.equal(first.createTaskPermissionAutoDenyMs.at(-1), 600_000);
+      const persisted = await waitForStateBotField(
+        WEIXIN_BOT_ID,
+        (entry) => (entry.activeTaskId === "task-created-1" ? "task" : undefined),
+        5000,
+      );
+      assert.equal(persisted, "task", "前置：task 模式 context 必须已持久化到状态文件");
+      // 重启前配置调低（磁盘上的 bot-config 即第二个实例将读到的活配置）。
+      await first.overwriteBotConfig({
+        currentOptions: { permissionTimeoutMinutes: 1 },
+      });
+      dirs = first.dirs;
+    } finally {
+      await first.dispose(true);
+    }
+    const second = await createPermissionsHarness({ reuseDirs: dirs });
+    try {
+      const resumed = await second.service.handleProviderCallbackResponse(
+        "weixin",
+        weixinInboundPayload([{ id: "wx-msg-f2b-2", text: "继续" }]),
+      );
+      assert.equal(resumed.ok, true, "前置：重启后续跑消息必须成功");
+      assert.ok(
+        await waitForCondition(() => second.streamEventHandlers.has("task-created-1"), 5000),
+        "前置：重启后 watcher 重建",
+      );
+      await second.streamEventHandlers
+        .get("task-created-1")?.(
+          probePermissionRequestEvent("task-created-1", "req-f2b", "probe-f2b-restart"),
+        )
+        .catch(() => undefined);
+      assert.ok(
+        await waitForCondition(
+          () =>
+            second.sentMessages.some((message) =>
+              (message.text ?? "").includes(PERMISSION_REMINDER_ZH),
+            ),
+          5000,
+        ),
+        "重启后必须按持久化的冻结 600000 重武装（reminder 发出）；今天读活配置 1min ⇒ 无 reminder（spec §8.2：渲染/武装只读持久值）",
+      );
+    } finally {
+      await second.dispose();
+    }
+  });
+});
+
+test("场景19c（红·F2 miss 不武装）：无持久化 deadline（任务早于字段/映射丢失）⇒ deny-note 不武装，绝不活配置重武装", async () => {
+  await withPermissionTimerScale("1000", async () => {
+    const harness = await createPermissionsHarness({
+      stateEntry: (botId, workspace) =>
+        taskStateEntry(botId, workspace, { activeTaskId: "task-f2c", isWeixin: true }),
+    });
+    try {
+      await warmupTaskWatcher(harness, "task-f2c", "wx-msg-f2c-0");
+      await harness.streamEventHandlers
+        .get("task-f2c")?.(probePermissionRequestEvent("task-f2c", "req-f2c", "probe-f2c-miss"))
+        .catch(() => undefined);
+      // 跨过缩放后的默认 10min（600ms）与 reminder（480ms）两个触发点。
+      await sleep(900);
+      assert.equal(
+        harness.sentMessages.filter((message) =>
+          (message.text ?? "").includes(PERMISSION_AUTO_DENIED_ZH),
+        ).length,
+        0,
+        "无持久化 deadline ⇒ deny-note 不得武装（spec §8.2 miss 不武装、「不补发避免误导」；今天活配置默认 10min 武装并在 ~600ms 发出「已自动拒绝」——对 miss 任务该文案无事实依据）",
+      );
+      assert.equal(
+        harness.sentMessages.filter((message) =>
+          (message.text ?? "").includes(PERMISSION_REMINDER_ZH),
+        ).length,
+        0,
+        "miss ⇒ reminder 同样不武装",
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+});
+
+// ---- 场景 21（§7.21 / §8.3 F3 单确认：自答 ack / 外来解析 note） ----
+// CLI 自动拒绝 ⇒ permissionAutoDenied note 的 §3c.2 选择规则由既有场景R1-2 钉住；
+// 迟到点击反馈（permissionLateHandled）不变由既有场景13 钉住，此处不重复。
+
+test("场景21a（红·F3 自答单确认·按钮路径）：/permission 1 自答 ack 后 CLI permission_response 回程 ⇒ permissionResolved note 必须抑制", async () => {
+  const harness = await createPermissionsHarness({
+    stateEntry: (botId, workspace) =>
+      taskStateEntry(botId, workspace, { activeTaskId: "task-f3btn", isWeixin: true }),
+  });
+  try {
+    await warmupTaskWatcher(harness, "task-f3btn", "wx-msg-f3btn-0");
+    await harness.streamEventHandlers
+      .get("task-f3btn")?.(
+        probePermissionRequestEvent("task-f3btn", "req-f3btn", "probe-f3-button"),
+      )
+      .catch(() => undefined);
+    assert.ok(
+      harness.sendAttempts.some((text) => text.includes("允许") || text.includes("拒绝")),
+      "前置：权限提示必须已送达",
+    );
+    // 按钮路径（permission.respond 序号 1 = 排序后的 allow 选项）。
+    const answered = await harness.service.handleProviderCallbackResponse(
+      "weixin",
+      weixinInboundPayload([{ id: "wx-msg-f3btn-1", text: "/permission 1" }]),
+    );
+    assert.equal(answered.ok, true, "前置：按钮应答必须成功");
+    assert.ok(
+      (answered.replies[0]?.text ?? "").includes("已提交权限响应"),
+      "前置：自答必须回命令 ack（permissionSubmitted——单确认，spec §8.3）",
+    );
+    // CLI 的 permission.resolved（allow 生效）竞速回程到 watcher。
+    await harness.streamEventHandlers
+      .get("task-f3btn")?.({
+        type: "permission_response",
+        taskId: "task-f3btn",
+        traceId: "trace-f3btn",
+        requestId: "req-f3btn",
+        optionId: "option-allow",
+        response: { decision: "allow" },
+      })
+      .catch(() => undefined);
+    await sleep(300);
+    assert.equal(
+      harness.sentMessages.filter((message) => (message.text ?? "").includes("该权限请求已处理"))
+        .length,
+      0,
+      "自答的 permission_response 回程不得再发 permissionResolved note（spec §8.3：自答以 ack 为单确认；今天按钮路径 pending 滞留 handledAt 条目 ⇒ hadPendingPrompt=true ⇒ 双确认 D4）",
+    );
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("场景21a2（红·F3 自答单确认·文本路径）：/approve 自答 ack 后回程 note 必须抑制（今 watcher 侧 pending 副本未随文本清理解 ⇒ 双确认）", async () => {
+  const harness = await createPermissionsHarness({
+    stateEntry: (botId, workspace) =>
+      taskStateEntry(botId, workspace, { activeTaskId: "task-f3txt", isWeixin: true }),
+  });
+  try {
+    await warmupTaskWatcher(harness, "task-f3txt", "wx-msg-f3txt-0");
+    await harness.streamEventHandlers
+      .get("task-f3txt")?.(probePermissionRequestEvent("task-f3txt", "req-f3txt", "probe-f3-text"))
+      .catch(() => undefined);
+    const answered = await harness.service.handleProviderCallbackResponse(
+      "weixin",
+      weixinInboundPayload([{ id: "wx-msg-f3txt-1", text: "/approve req-f3txt option-allow" }]),
+    );
+    assert.equal(answered.ok, true, "前置：文本应答必须成功");
+    assert.ok(
+      (answered.replies[0]?.text ?? "").includes("已提交权限响应"),
+      "前置：文本自答必须回命令 ack",
+    );
+    await harness.streamEventHandlers
+      .get("task-f3txt")?.({
+        type: "permission_response",
+        taskId: "task-f3txt",
+        traceId: "trace-f3txt",
+        requestId: "req-f3txt",
+        optionId: "option-allow",
+        response: { decision: "allow" },
+      })
+      .catch(() => undefined);
+    await sleep(300);
+    assert.equal(
+      harness.sentMessages.filter((message) => (message.text ?? "").includes("该权限请求已处理"))
+        .length,
+      0,
+      "文本自答的回程 note 必须抑制（spec §8.3；实测今天 watcher 闭包持有的 pending 副本不随文本路径清理 ⇒ hadPendingPrompt=true ⇒ 双确认 D4 的文本路径形态——W3 必须经 recently-self-answered 集合抑制，不得依赖 pending 清理竞态）",
+    );
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("场景21b（guard·F3 外来解析）：跨端/桌面应答（聊天未自答）⇒ permissionResolved note 照发恰一条", async () => {
+  const harness = await createPermissionsHarness({
+    stateEntry: (botId, workspace) =>
+      taskStateEntry(botId, workspace, { activeTaskId: "task-f3x", isWeixin: true }),
+  });
+  try {
+    await warmupTaskWatcher(harness, "task-f3x", "wx-msg-f3x-0");
+    await harness.streamEventHandlers
+      .get("task-f3x")?.(probePermissionRequestEvent("task-f3x", "req-f3x", "probe-f3-cross"))
+      .catch(() => undefined);
+    // 桌面 UI/手机远控应答：聊天侧只收到 permission_response 事件（无自答）。
+    await harness.streamEventHandlers
+      .get("task-f3x")?.({
+        type: "permission_response",
+        taskId: "task-f3x",
+        traceId: "trace-f3x",
+        requestId: "req-f3x",
+        optionId: "option-allow",
+        response: { decision: "allow" },
+      })
+      .catch(() => undefined);
+    assert.ok(
+      await waitForCondition(
+        () =>
+          harness.sentMessages.some((message) => (message.text ?? "").includes("该权限请求已处理")),
+        5000,
+      ),
+      "外来解析（跨端应答）必须仍发 permissionResolved note——聊天内唯一的确认消息（spec §8.3：note 仅对外来解析；guard 今天即绿，W3 抑制集合不得误伤）",
+    );
+  } finally {
+    await harness.dispose();
+  }
+});
+
+// ---- 场景 22（§7.22 / §8.4 F4 /mode 选项源） ----
+
+/** active-task /mode 用任务元数据（provider 必须在场：ZCode-Agent 任务才会命中死 stub 分支）。 */
+function activeTaskMetaFixture(taskId: string, workspaceIdentity?: string) {
+  return [
+    {
+      taskId,
+      traceId: `trace-${taskId}`,
+      title: "Active task",
+      workspacePath: "/tmp/zcode-mode-ws",
+      ...(workspaceIdentity ? { workspaceIdentity } : {}),
+      createdAt: Date.now() - 60_000,
+      updatedAt: Date.now(),
+      mode: "build",
+      status: "completed",
+      provider: ZCODE_AGENT_PROVIDER,
+    },
+  ];
+}
+
+test("场景22a（红·F4 draft 合成）：已配模型 draft 的 /mode ⇒ 列出模式选择（build/plan/yolo），当前值 build；今只合成 thought_level ⇒ modeMissing", async () => {
+  const harness = await createPermissionsHarness({
+    modelInView: true,
+    stateEntry: (botId, workspace) => draftStateEntry(botId, workspace, true),
+  });
+  try {
+    const result = await harness.service.handleProviderCallbackResponse(
+      "weixin",
+      weixinInboundPayload([{ id: "wx-msg-mode-draft", text: "/mode" }]),
+    );
+    assert.equal(result.ok, true, "前置：/mode 必须成功");
+    const replyText = result.replies[0]?.text ?? "";
+    assert.ok(
+      replyText.includes("选择模式"),
+      "draft /mode 必须列出模式选择（spec §8.4：listDraftConfigOptions 从 getZCodeAgentAvailableModes 合成 mode select；今天只合成 thought_level ⇒ 回「未找到模式。」）",
+    );
+    assert.ok(replyText.includes("build"), "模式列表必须包含 build（读取时默认/当前值）");
+    assert.ok(!replyText.includes("未找到模式"), "已配模型的 draft 不得回 modeMissing");
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("场景22a2（guard·F4 model-less 边界）：模型不可解析的 draft /mode ⇒ 仍不列选项（modeMissing，与 thoughtLevel 平权）", async () => {
+  const harness = await createPermissionsHarness({
+    // 缺省 modelInView=false：view providers 为空 = 模型不可解析。
+    stateEntry: (botId, workspace) => draftStateEntry(botId, workspace, true),
+  });
+  try {
+    const result = await harness.service.handleProviderCallbackResponse(
+      "weixin",
+      weixinInboundPayload([{ id: "wx-msg-mode-boundary", text: "/mode" }]),
+    );
+    assert.equal(result.ok, true, "前置：/mode 必须成功");
+    assert.ok(
+      (result.replies[0]?.text ?? "").includes("未找到模式"),
+      "无模型 draft 的 /mode 必须保持 modeMissing（spec §8.4 接受边界——与 thoughtLevel 平权；guard 今天即绿，合成不得对 model-less draft 凭空列选项）",
+    );
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("场景22b（红·F4 active 列表+设置往返）：active task 的 /mode 列表来自 active.configOptions；/mode plan ⇒ setConfigOption(mode,plan)（今走死 stub 恒空）", async () => {
+  // (1) 列表：task meta 带 remote-shaped workspaceIdentity（远端形态负载经同一 stub 缝）。
+  {
+    const harness = await createPermissionsHarness({
+      stateEntry: (botId, workspace) =>
+        taskStateEntry(botId, workspace, { activeTaskId: "task-mode-active", isWeixin: true }),
+    });
+    try {
+      harness.setListTasksResult(activeTaskMetaFixture("task-mode-active", "remote:ssh:host-1/ws"));
+      const result = await harness.service.handleProviderCallbackResponse(
+        "weixin",
+        weixinInboundPayload([{ id: "wx-msg-mode-active", text: "/mode" }]),
+      );
+      assert.equal(result.ok, true, "前置：active-task /mode 必须成功");
+      const replyText = result.replies[0]?.text ?? "";
+      assert.ok(
+        replyText.includes("选择模式"),
+        "active-task /mode 必须从 active.configOptions 列出模式选择（spec §8.4；今天 listProviderConfigOptionsForActiveTask → listUserConfigOptions 死 stub return [] ⇒ modeMissing，rig RC1 本地/远端同形失败）",
+      );
+      assert.ok(replyText.includes("build"), "列表必须含 build（configOptions 当前值）");
+    } finally {
+      await harness.dispose();
+    }
+  }
+  // (2) 设置往返：/mode plan ⇒ 经 setConfigOption(configId=mode, value=plan) 下发。
+  {
+    const harness = await createPermissionsHarness({
+      stateEntry: (botId, workspace) =>
+        taskStateEntry(botId, workspace, { activeTaskId: "task-mode-set", isWeixin: true }),
+    });
+    try {
+      harness.setListTasksResult(activeTaskMetaFixture("task-mode-set"));
+      const result = await harness.service.handleProviderCallbackResponse(
+        "weixin",
+        weixinInboundPayload([{ id: "wx-msg-mode-set", text: "/mode plan" }]),
+      );
+      assert.equal(result.ok, true, "前置：/mode plan 必须成功");
+      assert.ok(
+        harness.setConfigOptionCalls.some(
+          (call) =>
+            call.taskId === "task-mode-set" && call.configId === "mode" && call.value === "plan",
+        ),
+        "active-task /mode 设置必须经 active.configOptions 解析选项并下发 setConfigOption(mode, plan)（spec §8.4；今天选项源为死 stub ⇒ 解析失败回「未找到模式。」）",
+      );
+    } finally {
+      await harness.dispose();
+    }
+  }
+});
+
+test("场景22c（guard·F4 taskRunning 拒绝不变）：任务运行中 /mode ⇒ taskRunning 拒绝（解锁语义 guard）", async () => {
+  const harness = await createPermissionsHarness({
+    stateEntry: (botId, workspace) =>
+      taskStateEntry(botId, workspace, { activeTaskId: "task-mode-running", isWeixin: true }),
+  });
+  try {
+    // warmup 续跑消息把任务置 running（runningTasks）并建 watcher。
+    await warmupTaskWatcher(harness, "task-mode-running", "wx-msg-mode-running-0");
+    const result = await harness.service.handleProviderCallbackResponse(
+      "weixin",
+      weixinInboundPayload([{ id: "wx-msg-mode-running-1", text: "/mode" }]),
+    );
+    assert.equal(result.ok, true, "前置：运行中 /mode 必须成功处理（拒绝路径）");
+    assert.ok(
+      (result.replies[0]?.text ?? "").includes("当前任务正在运行"),
+      "任务运行中 /mode 必须保持 taskRunning 拒绝（spec §0/§8.4：模式属于下一次提交；guard 今天即绿）",
+    );
+  } finally {
+    await harness.dispose();
+  }
 });
