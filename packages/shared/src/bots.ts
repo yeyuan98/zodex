@@ -308,6 +308,13 @@ export interface BotInboundAttachment {
   filename: string;
   mimeType: string;
   sizeBytes?: number;
+  /**
+   * Alpha 9（specs/bot-file-delivery.md「Attachment observability line」）：文件名
+   * 来源标注——provider 原文 given 还是 parse 站点兜底铸造。仅被 cacheResolvedAttachment
+   * 的观测 info 行与测试消费，绝不参与行为判定（退役的 filenameIsFallback 曾门控
+   * sniff，本字段不得重蹈）。
+   */
+  filenameSource?: "provided" | "fallback";
   providerFileId?: string;
   downloadUrl?: string;
   dataBase64?: string;

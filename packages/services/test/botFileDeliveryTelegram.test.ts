@@ -294,3 +294,48 @@ test("telegram sendAttachment：>5MB 本地文件读侧复检 → 报 5MB 上限
     await rm(dirname(localPath), { recursive: true, force: true });
   }
 });
+
+// ---- Alpha 9（specs/bot-file-delivery.md「Attachment observability line」fix 3）：
+// filenameSource 在 telegram parse 站点填充（provider file_name → provided；
+// telegram-photo.jpg / telegram-video.mp4 等兜底名 → fallback）。红测先行——
+// 今天字段从不填充。经 provider.parseCallback 驱动真实解析（无网络）。----
+
+test("A9 filenameSource（telegram）：document 带 file_name → provided；photo 兜底名 → fallback（今天不填充 → 红）", () => {
+  const provider = createTelegramBotProvider({
+    loadCredential: async () => TELEGRAM_TOKEN,
+    requester: createBotProviderRequester(),
+  });
+  const messages = provider.parseCallback({
+    botId: "bot-telegram-1",
+    update: {
+      message: {
+        message_id: 7001,
+        text: "看下这两个文件",
+        chat: { id: TELEGRAM_CHAT_ID, type: "private" },
+        from: { id: 4242, username: "tg_user" },
+        document: { file_id: "tg-file-1", file_name: "notes.txt", file_size: 12 },
+        photo: [{ file_id: "tg-photo-1", file_size: 8 }],
+      },
+    },
+  });
+  const attachments = messages[0]?.attachments ?? [];
+  assert.equal(attachments.length, 2, "document + photo 都必须解析");
+
+  const document = attachments.find((item) => item.kind === "file");
+  assert.ok(document, "document 附件必须存在");
+  assert.equal(document.filename, "notes.txt");
+  assert.equal(
+    document.filenameSource,
+    "provided",
+    "telegram file_name 提供时必须标 provided（今天字段缺失）",
+  );
+
+  const photo = attachments.find((item) => item.kind === "image");
+  assert.ok(photo, "photo 附件必须存在");
+  assert.equal(photo.filename, "telegram-photo.jpg", "photo 兜底名形状回归钉");
+  assert.equal(
+    photo.filenameSource,
+    "fallback",
+    "telegram 兜底铸造名必须标 fallback（今天字段缺失）",
+  );
+});

@@ -548,3 +548,174 @@ test("feishu downloadAttachment 守护：image → 仍请求 type=image", async 
   assert.ok(resourceCall, "必须发起资源下载请求");
   assert.equal(new URL(resourceCall.url).searchParams.get("type"), "image");
 });
+
+// ---- Alpha 9（specs/bot-file-delivery.md「Pseudo-extension sniff, feishu
+// kind-aware keys & prompt inline video validation (3.14.5 Alpha 9)」fix 2/fix 3）：
+// 飞书 kind-aware 资源键 + filenameSource 填充。红测先行（../ZCode-alpha9-plan.md
+// Part 2 items 5/6/10；证据 §2j F1a：video 消息同时携带封面 image_key 与视频
+// file_key，现行固定 image_key 优先 → 下载的是 62,710B WebP 封面而非视频）。----
+
+/**
+ * 经 provider.parseCallback 驱动真实解析路径（无需网络）：构造飞书 im 事件
+ * payload，返回解析出的第一个附件。msgType 决定 inferFeishuAttachmentKind。
+ */
+function parseFeishuMessageAttachment(
+  msgType: string,
+  content: Record<string, unknown>,
+): BotInboundAttachment {
+  const provider = createFeishuBotProvider({
+    loadCredential: async () => "feishu-app-secret-value",
+    requester: createBotProviderRequester(),
+  });
+  const messages = provider.parseCallback({
+    botId: "bot-feishu-1",
+    event: {
+      message: {
+        message_type: msgType,
+        content: JSON.stringify(content),
+        chat_id: "oc_feishu_chat_1",
+        chat_type: "p2p",
+        message_id: "om_alpha9_1001",
+      },
+      sender: { sender_id: { open_id: FEISHU_OPEN_ID } },
+    },
+  });
+  const attachment = messages[0]?.attachments?.[0];
+  assert.ok(attachment, `必须解析出附件：msgType=${msgType}`);
+  return attachment;
+}
+
+test("feishu kind-aware 键：video 消息同时携带 image_key+file_key → 选 file_key（id 与 providerFileId 一致），下载请求 resources/{file_key}?type=file（今天 image_key 优先 → 红）", async () => {
+  // §2j F1a 实测形状：飞书 video 消息 content 同时带封面 image_key 与视频
+  // file_key；现行 readFeishuAttachment 固定 image_key 优先 → 缓存里是 WebP
+  // 封面、名字却是 .mp4。新语义（spec fix 2）：video → file_key || media_key
+  // || image_key（末位兜底），所选键同时驱动 id（缓存 digest）与 providerFileId。
+  const attachment = parseFeishuMessageAttachment("video", {
+    image_key: "img_v2_cover_key_1",
+    file_key: "file_v2_video_key_1",
+    file_name: "IMG_20261005.mp4",
+  });
+  assert.equal(
+    attachment.providerFileId,
+    "file_v2_video_key_1",
+    "video 消息必须选视频的 file_key，而非封面的 image_key（今天 image_key 赢）",
+  );
+  assert.equal(
+    attachment.id,
+    "file_v2_video_key_1",
+    "所选键必须同时驱动 id（缓存 digest 防旧封面复用）",
+  );
+  assert.equal(attachment.kind, "video");
+  assert.equal(attachment.filename, "IMG_20261005.mp4");
+
+  // 下载路径以所选键请求资源（沿用 Alpha 8 type=file 语义）。
+  const payload = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
+  const stub = installProviderStub((call) => {
+    if (call.url.includes("/open-apis/auth/v3/tenant_access_token/internal")) {
+      return jsonResponse({ code: 0, tenant_access_token: FEISHU_TOKEN, expire: 7200 });
+    }
+    if (call.url.includes("/open-apis/im/v1/messages/") && call.url.includes("/resources/")) {
+      return new Response(payload, { status: 200 });
+    }
+    throw new Error(`unexpected feishu fetch: ${call.url}`);
+  });
+  try {
+    const provider = createFeishuBotProvider({
+      loadCredential: async () => "feishu-app-secret-value",
+      requester: createBotProviderRequester(),
+    });
+    const downloadAttachment = provider.downloadAttachment;
+    assert.ok(downloadAttachment);
+    const actor: BotActor = {
+      provider: "feishu",
+      botId: "bot-feishu-1",
+      providerUserId: FEISHU_OPEN_ID,
+      chatType: "private",
+      chatId: "oc_feishu_chat_1",
+      providerMessageId: "om_alpha9_1001",
+    };
+    await downloadAttachment(buildFeishuBot("cli_9000000000000001"), attachment, actor);
+    const resourceCall = stub.calls.find(
+      (call) => call.url.includes("/open-apis/im/v1/messages/") && call.url.includes("/resources/"),
+    );
+    assert.ok(resourceCall, "必须发起资源下载请求");
+    const url = new URL(resourceCall.url);
+    assert.ok(
+      url.pathname.endsWith("/resources/file_v2_video_key_1"),
+      `下载必须请求视频的 file_key（今天请求封面 image_key）：${url.pathname}`,
+    );
+    assert.equal(url.searchParams.get("type"), "file");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("feishu kind-aware 键守护：image 消息 → image_key；audio → file_key 优先且 type=file；audio 仅 audio_key → audio_key", async () => {
+  // spec fix 2 守卫矩阵：image → image_key（不变）；audio → file_key || audio_key
+  //（现行固定序在 audio 场景本就命中 file_key —— 前向守护）。
+  const image = parseFeishuMessageAttachment("image", { image_key: "img_v2_pic_1" });
+  assert.equal(image.providerFileId, "img_v2_pic_1");
+  assert.equal(image.id, "img_v2_pic_1");
+
+  const audio = parseFeishuMessageAttachment("audio", {
+    file_key: "file_v2_audio_1",
+    audio_key: "audio_v2_1",
+  });
+  assert.equal(audio.providerFileId, "file_v2_audio_1", "audio 有 file_key 时必须优先 file_key");
+  assert.equal(audio.id, "file_v2_audio_1");
+
+  const audioOnly = parseFeishuMessageAttachment("audio", { audio_key: "audio_v2_2" });
+  assert.equal(audioOnly.providerFileId, "audio_v2_2", "audio 无 file_key 时退到 audio_key");
+});
+
+test("feishu kind-aware 键守护：video 缺 file_key → image_key 末位兜底（绝不静默丢弃）；仅 media_key 的 video → media_key", async () => {
+  // spec fix 2 末位兜底语义：text-less 的 video 消息即使只剩封面键也不能丢附件
+  //（warn 可观测）；现行 image_key 优先恰好同值 —— 前向守护（防止 W2 把兜底删掉）。
+  const videoCoverOnly = parseFeishuMessageAttachment("video", {
+    image_key: "img_v2_cover_only_1",
+  });
+  assert.ok(videoCoverOnly, "缺 file_key 的 video 消息不得被丢弃");
+  assert.equal(videoCoverOnly.providerFileId, "img_v2_cover_only_1", "image_key 仅作末位兜底");
+
+  const videoMediaKeyOnly = parseFeishuMessageAttachment("media", { media_key: "mediav2_video_1" });
+  assert.equal(
+    videoMediaKeyOnly.providerFileId,
+    "mediav2_video_1",
+    "仅 media_key 的 video → media_key",
+  );
+  assert.equal(videoMediaKeyOnly.kind, "video");
+});
+
+test("feishu kind-aware 键：video 无 file_key 但同时有 media_key 与 image_key → media_key 优先于封面 image_key（今天 image_key 赢 → 红）", async () => {
+  // 钉住新键序的中间优先级：video → file_key || media_key || image_key。
+  // media_key 指向视频本体（media 消息），image_key 指向封面——次序必须 media_key 在前。
+  const attachment = parseFeishuMessageAttachment("video", {
+    media_key: "mediav2_video_2",
+    image_key: "img_v2_cover_2",
+  });
+  assert.equal(
+    attachment.providerFileId,
+    "mediav2_video_2",
+    "media_key 必须优先于 image_key（今天固定 image_key 优先 → 取到封面键）",
+  );
+  assert.equal(attachment.id, "mediav2_video_2");
+});
+
+test("feishu filenameSource：file_name 提供时 provided，缺失时兜底命名 fallback（今天不填充 → 红）", async () => {
+  // spec fix 3：filenameSource 必须在全部 parse 站点填充（本用例钉住 feishu 两个
+  // 分支），仅由观测 info 行与测试消费，绝不参与行为。
+  const provided = parseFeishuMessageAttachment("file", {
+    file_key: "file_v2_named_1",
+    file_name: "annual-report.pdf",
+  });
+  assert.equal(provided.filename, "annual-report.pdf");
+  assert.equal(
+    provided.filenameSource,
+    "provided",
+    "provider 给过 file_name 必须标 provided（今天字段缺失）",
+  );
+
+  const fallback = parseFeishuMessageAttachment("file", { file_key: "file_v2_unnamed_1" });
+  assert.equal(fallback.filename, "file-file_v2_u", "兜底命名 = <msgType>-<key 前 8 字符>");
+  assert.equal(fallback.filenameSource, "fallback", "兜底铸造名必须标 fallback（今天字段缺失）");
+});
