@@ -91,6 +91,10 @@ const messages = {
     permissionHandled: "权限请求已处理。",
     permissionDenied: "已拒绝权限请求。",
     permissionSubmitted: "已提交权限响应。",
+    // 3.15.0 Track B（specs/bot-permissions.md §4.1/§4.3）：permission_response 退休注记与
+    // 迟到点击（CLI 自动拒绝/他端已应答）反馈——均为 best-effort、非保留。
+    permissionResolved: "该权限请求已处理。",
+    permissionLateHandled: "该权限请求已被处理（或已自动拒绝）。",
     elicitationExpired: "问答请求已过期，请在 zcode UI 中处理。",
     elicitationHandled: "问答请求已处理。",
     elicitationSubmitted: "已提交问答响应。",
@@ -246,6 +250,10 @@ const messages = {
     permissionHandled: "Permission request has already been handled.",
     permissionDenied: "Permission request denied.",
     permissionSubmitted: "Permission response submitted.",
+    // 3.15.0 Track B (specs/bot-permissions.md §4.1/§4.3): permission_response retirement note
+    // and late-click feedback (CLI auto-deny / answered elsewhere) — both best-effort, non-retained.
+    permissionResolved: "This permission request has been resolved.",
+    permissionLateHandled: "This permission request was already handled (or auto-denied).",
     elicitationExpired: "This question request has expired. Please handle it in the zcode UI.",
     elicitationHandled: "Question request has already been handled.",
     elicitationSubmitted: "Question response submitted.",

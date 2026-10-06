@@ -5314,6 +5314,38 @@ export function createBotsService(
     await writeContext({ ...context, pendingElicitation: undefined });
   }
 
+  // specs/bot-permissions.md §4（提示退休与清理）：pendingPermissionOptions 的清除统一收口到
+  // clearPendingPermissionOptions。W3b（§3c reminder/deny-note timer）在下列同一调用点挂接
+  // timer 清除即可，无需改动任何调用方（§3c 生命周期表对应行）：
+  //   - permission_response（watcher，按 requestId 过滤）——「permission_response：清除」；
+  //   - task_complete / task_error（watcher 终态，整体清空）——「终态：清除 + pending 清空」；
+  //   - /stop drain（stop 命令分支，整体清空）——「/stop drain：清除 + pending 清空」；
+  //   - 文本 /approve //deny 孤儿清扫（按 requestId 过滤；§4.1 文本路径 orphan，无 timer 语义）。
+  async function clearPendingPermissionOptions(
+    context: BotContextState,
+    reason: "permission_response" | "terminal" | "stop" | "text_response",
+    requestId?: string,
+  ): Promise<boolean> {
+    const pending = context.pendingPermissionOptions;
+    if (!pending || pending.length === 0) {
+      return false;
+    }
+    // 修复原因（specs/bot-permissions.md §4.1/§4.2）：pendingPermissionOptions 此前只在下一次
+    // permission_request 覆盖或 /new 草稿时清空——外部应答（桌面 UI/手机远控/CLI 自动拒绝）
+    // 与终态之后聊天侧记录滞留成 orphan，Telegram 序号按钮/文本命令会继续命中已失效的
+    // requestId。这里按 requestId 过滤（无 requestId = 整体清空，终态语义）；持久化走
+    // writeContext 既有单写者规则（weixin cursor/token 等字段原样保留，M5 先例）。
+    const remaining = requestId ? pending.filter((option) => option.requestId !== requestId) : [];
+    const next = remaining.length > 0 ? remaining : undefined;
+    Object.assign(context, { pendingPermissionOptions: next });
+    await writeContext({ ...context, pendingPermissionOptions: next });
+    botsLogger.info(
+      undefined,
+      `bot permission pending cleared bot=${context.botId} task=${context.activeTaskId ?? "-"} reason=${reason} requestId=${requestId ?? "-"} remaining=${remaining.length}`,
+    );
+    return true;
+  }
+
   // specs/bot-inbound-resilience.md §B2.1：submitPendingElicitation 一次 respondElicitation
   // 调用 resolve 整个 pending 组（多题一组，无逐题机械）。旧返回 BotOutboundMessage[]
   // 无法区分"respondElicitation 真正 resolve（确认送达）"与 expired/handled 兜底回复——
@@ -6235,6 +6267,42 @@ export function createBotsService(
         }
         return;
       }
+      if (event.type === "permission_response") {
+        // specs/bot-permissions.md §4.1：CLI 登记表自动拒绝（W3a deadline）或任意客户端
+        // （桌面 UI/手机远控）应答以 permission_response 事件上行（镜像 elicitation_response）
+        // ——权威已收口，聊天侧 pending 记录与提示 UX 必须一并退休。
+        const hadPendingPrompt = await clearPendingPermissionOptions(
+          context,
+          "permission_response",
+          event.requestId,
+        );
+        await broadcastTaskListChange(context, event.taskId, "permission_resolved", {
+          requestId: event.requestId,
+        });
+        // 退休聊天侧提示 UX：transient interaction card 存在于该 actor+task 时补上此前缺失的
+        // 第三处 finalize（既有 helper 自行 warn 不上抛）；非瞬态提示（如微信文本）时发一条
+        // 本地化注记——best-effort、非保留（spec §3c.2），失败仅 warn 不上抛。
+        const transientCard = transientInteractionCards.get(getActorContextKey(actor));
+        if (transientCard?.taskId === event.taskId) {
+          await finalizeTransientInteractionCard(
+            actor,
+            createOutbound(actor, msg(await readMessageLocale(), "permissionResolved")),
+          );
+          return;
+        }
+        if (hadPendingPrompt) {
+          await sendOutbound(
+            bot,
+            createOutbound(actor, msg(await readMessageLocale(), "permissionResolved")),
+          ).catch((error: unknown) => {
+            botsLogger.warn(
+              undefined,
+              `bot permission resolved note failed provider=${bot.provider} bot=${bot.id} task=${event.taskId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+        }
+        return;
+      }
       if (event.type === "elicitation_request") {
         // Bugfix（F3 specs/bot-message-delivery.md）：与 permission_request 同一交互边界语义。
         if (supportsStreamingCardReply()) {
@@ -6260,6 +6328,10 @@ export function createBotsService(
           clearPendingElicitationSelection(context.pendingElicitation);
           await writeContext({ ...context, pendingElicitation: undefined });
         }
+        // specs/bot-permissions.md §4.2：终态清空 pendingPermissionOptions（此前终态只清
+        // pendingElicitation；/new writeDraftContext 为既有先例）——任务终态后聊天侧
+        // 权限按钮不得再命中已失效的 requestId。
+        await clearPendingPermissionOptions(context, "terminal");
         const transientCard = transientInteractionCards.get(getActorContextKey(actor));
         if (transientCard?.taskId === event.taskId) {
           const pendingElicitation = context.pendingElicitation;
@@ -8646,6 +8718,10 @@ export function createBotsService(
               ];
             }
             runningTasks.delete(auth.context.activeTaskId);
+            // specs/bot-permissions.md §4.2：/stop drain 清空 pendingPermissionOptions——
+            // watcher 随即拆除、终态通知不会再发，这里是停止路径的法定清空点
+            // （/new writeDraftContext 为既有先例）。
+            await clearPendingPermissionOptions(auth.context, "stop");
             // Bugfix（F1 specs/bot-message-delivery.md）：/stop 是 watcher 的法定 drain 点。
             // 顺序为 stopGeneration → drain → 状态回复：drain 把未送出的部分回复作为独立
             // 消息立即送达（owner 决定语义：文本已在桌面 UI 可见，丢弃即信息损失，扣押它
@@ -8691,7 +8767,10 @@ export function createBotsService(
               `permission callback respond task=${auth.context.activeTaskId} requestId=${option.requestId} optionId=${option.optionId} submitted=${submitted}`,
             );
             if (!submitted) {
-              return [createOutbound(message.actor, msg(auth.locale, "permissionHandled"))];
+              // specs/bot-permissions.md §4.3：序号按钮迟到点击（CLI 自动拒绝/他端已应答）——
+              // respondPermission 返回 false 即已收口；反馈「已被处理/已自动拒绝」。本路径的
+              // first-wins 吞并语义（handledAt 标记、不清空 pending）不变，重复点击幂等。
+              return [createOutbound(message.actor, msg(auth.locale, "permissionLateHandled"))];
             }
             await writeContext({
               ...auth.context,
@@ -8762,8 +8841,16 @@ export function createBotsService(
               optionId: command.optionId,
               response: pendingOption.response,
             });
-            if (!submitted)
-              return [createOutbound(message.actor, msg(auth.locale, "permissionHandled"))];
+            if (!submitted) {
+              // specs/bot-permissions.md §4.3：文本 /approve 迟到点击（CLI 自动拒绝/他端已
+              // 应答）——反馈「已被处理/已自动拒绝」，并随反馈清扫该 requestId 的 pending
+              // 记录（今天滞留到下一次 permission_request 覆盖，成为 orphan）。
+              await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);
+              return [createOutbound(message.actor, msg(auth.locale, "permissionLateHandled"))];
+            }
+            // specs/bot-permissions.md §4.1：文本路径应答提交成功后同样清扫 pending 记录
+            // （/new writeDraftContext 为既有先例），避免陈旧按钮继续命中已失效的 requestId。
+            await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);
             await broadcastTaskListChange(
               auth.context,
               auth.context.activeTaskId,
@@ -8793,8 +8880,15 @@ export function createBotsService(
                 reason: "Denied by bot command",
               },
             });
-            if (!submitted)
-              return [createOutbound(message.actor, msg(auth.locale, "permissionHandled"))];
+            if (!submitted) {
+              // specs/bot-permissions.md §4.3：文本 /deny 迟到点击（CLI 自动拒绝/他端已应答）
+              // ——反馈「已被处理/已自动拒绝」，并随反馈清扫该 requestId 的 pending 记录。
+              await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);
+              return [createOutbound(message.actor, msg(auth.locale, "permissionLateHandled"))];
+            }
+            // specs/bot-permissions.md §4.1：文本路径拒绝提交成功后同样清扫 pending 记录
+            // （/new writeDraftContext 为既有先例）。
+            await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);
             await broadcastTaskListChange(
               auth.context,
               auth.context.activeTaskId,

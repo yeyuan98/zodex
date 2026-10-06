@@ -34,6 +34,9 @@ import type { BotProviderAdapter } from "../src/bots/providers/types.js";
  *   事件到达 ⇒ 清除 pendingPermissionOptions（红：今 watcher 无该 case）。
  * - 场景 5（§7.8 终态清理）：task_complete 清空 pendingPermissionOptions
  *   （红：今终态只清 pendingElicitation）。
+ * - 场景 13（§7.13 迟到点击）：自动拒绝（或他端应答）后文本 /deny ⇒
+ *   respondPermission=false ⇒ 本地化「已被处理/已自动拒绝」反馈 + pending 清扫
+ *   （红：今回复 permissionHandled 文案且 pending 滞留到下一次覆盖）。
  * - 场景 6（§7.12 /status 模式行）：/status 回复包含模式行（红：今
  *   buildStatusText 无模式行）。
  */
@@ -78,6 +81,8 @@ interface TaskServiceControls {
   /** setMode 调用记录：场景 1/2 断言建任务咽喉下发的模式（今天被 fake 忽略）。 */
   setModeCalls: Array<{ taskId: string; mode: string }>;
   streamEventHandlers: Map<string, (event: unknown) => Promise<void>>;
+  /** 场景13 旋钮：fake respondPermission 返回值（false = 已被 CLI 自动拒绝/他端收口）。 */
+  respondPermissionResult: boolean;
 }
 
 function buildFakeTaskService(controls: TaskServiceControls) {
@@ -92,7 +97,7 @@ function buildFakeTaskService(controls: TaskServiceControls) {
     },
     deleteTask: async () => undefined,
     stopGeneration: async () => undefined,
-    respondPermission: async () => true,
+    respondPermission: async () => controls.respondPermissionResult,
     respondElicitation: async () => true,
     getTaskModelSelection: async () => ({
       providerId: ZCODE_AGENT_PROVIDER,
@@ -291,6 +296,8 @@ interface PermissionsHarnessOptions {
   stateEntry?: (botId: string, workspace: string) => Record<string, unknown>;
   /** bot 配置 currentOptions（场景 2：mode "plan"）。 */
   currentOptions?: BotCurrentOptions;
+  /** 场景13：fake respondPermission 初始返回值（false = 已收口，迟到点击）。 */
+  respondPermissionResult?: boolean;
 }
 
 interface PermissionsHarness {
@@ -301,6 +308,8 @@ interface PermissionsHarness {
   sendPromptCalls: string[];
   setModeCalls: Array<{ taskId: string; mode: string }>;
   streamEventHandlers: Map<string, (event: unknown) => Promise<void>>;
+  /** 场景13：运行中翻转 fake respondPermission 返回值（false = 已被收口）。 */
+  setRespondPermissionResult(value: boolean): void;
   dispose(): Promise<void>;
 }
 
@@ -331,6 +340,7 @@ async function createPermissionsHarness(
     sendPromptCalls: [],
     setModeCalls: [],
     streamEventHandlers: new Map(),
+    respondPermissionResult: options.respondPermissionResult ?? true,
   };
   const fakeTaskService = buildFakeTaskService(controls);
   const modelSelectionService = buildModelSelectionService();
@@ -397,6 +407,9 @@ async function createPermissionsHarness(
     sendPromptCalls: controls.sendPromptCalls,
     setModeCalls: controls.setModeCalls,
     streamEventHandlers: controls.streamEventHandlers,
+    setRespondPermissionResult(value: boolean) {
+      controls.respondPermissionResult = value;
+    },
     async dispose() {
       await service.disposeAllAndWait().catch(() => undefined);
       setDataBaseDir(null);
@@ -620,6 +633,18 @@ test("场景4（红·permission_response 清理）：CLI deny 经 permission_res
       "cleared",
       "permission_response 必须清除 pendingPermissionOptions（spec §4.1/§7.7；今天 watcher 无该 case，pending 原样滞留）",
     );
+    // 非瞬态（微信文本）提示渠道的退休注记：best-effort、非保留（spec §4.1/§3c.2）。
+    // transient interaction card 的 finalize-on-permission_response 为 Feishu streaming_card
+    // 专属路径，本 weixin harness 不覆盖（诚实披露该缺口；由 permissionResolved 文案路径钉住
+    // 退休语义）。
+    assert.ok(
+      await waitForCondition(
+        () =>
+          harness.sentMessages.some((message) => (message.text ?? "").includes("该权限请求已处理")),
+        5000,
+      ),
+      "permission_response 必须在非瞬态提示渠道补发一条本地化退休注记（spec §4.1/§7.7）",
+    );
   } finally {
     await harness.dispose();
   }
@@ -671,6 +696,70 @@ test("场景5（红·终态清理）：task_complete ⇒ 清空 pendingPermissio
       cleared,
       "cleared",
       "task_complete 必须清空 pendingPermissionOptions（spec §4.2/§7.8；今天终态只清 pendingElicitation）",
+    );
+  } finally {
+    await harness.dispose();
+  }
+});
+
+// ---- 场景 13（§7.13 迟到点击）：自动拒绝后文本 /deny ⇒ 吞并 + 反馈 + pending 清扫 ----
+
+test("场景13（迟到点击）：已收口后文本 /deny ⇒ respondPermission=false ⇒ 本地化反馈 + pending 清扫", async () => {
+  const harness = await createPermissionsHarness({
+    stateEntry: (botId, workspace) =>
+      taskStateEntry(botId, workspace, {
+        activeTaskId: "task-perm-late",
+        isWeixin: true,
+        pendingPermissionOptions: [
+          {
+            requestId: "req-late-1",
+            optionId: "allow_once",
+            command: "approve",
+            label: "允许",
+            response: { decision: "allow" },
+          },
+          {
+            requestId: "req-late-1",
+            optionId: "deny",
+            command: "deny",
+            label: "拒绝",
+            response: { decision: "deny" },
+          },
+        ],
+      }),
+    // CLI 登记表已自动拒绝（或他端已应答）：respondPermission 返回 false = 迟到点击。
+    respondPermissionResult: false,
+  });
+  try {
+    // 普通消息续跑任务并建立 stream watcher（场景 4/5 同构前置）。
+    const warmup = await harness.service.handleProviderCallbackResponse(
+      "weixin",
+      weixinInboundPayload([{ id: "wx-msg-perm-late-0", text: "开始分析" }]),
+    );
+    assert.equal(warmup.ok, true);
+    assert.ok(
+      await waitForCondition(() => harness.streamEventHandlers.has("task-perm-late"), 5000),
+      "前置：必须建立 task stream watcher",
+    );
+    const result = await harness.service.handleProviderCallbackResponse(
+      "weixin",
+      weixinInboundPayload([{ id: "wx-msg-perm-late-1", text: "/deny req-late-1" }]),
+    );
+    assert.equal(result.ok, true, "前置：/deny 迟到点击必须被吞并处理");
+    const feedback = result.replies[0]?.text ?? "";
+    assert.ok(
+      feedback.includes("已被处理"),
+      "迟到点击必须回本地化「已被处理/已自动拒绝」反馈（spec §4.3/§7.13；今天回复 permissionHandled 文案且 pending 滞留）",
+    );
+    const cleared = await waitForStateBotField(
+      WEIXIN_BOT_ID,
+      (entry) => (entry.pendingPermissionOptions === undefined ? "cleared" : undefined),
+      5000,
+    );
+    assert.equal(
+      cleared,
+      "cleared",
+      "迟到点击吞并后必须清扫 pendingPermissionOptions orphan（spec §4.1；今天滞留到下一次 permission_request 覆盖）",
     );
   } finally {
     await harness.dispose();
