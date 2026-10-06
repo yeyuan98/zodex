@@ -237,6 +237,12 @@ export interface IZCodeTaskService {
     deferPersistenceUntilFirstPrompt?: boolean;
     /** Bot/host 使用 v4 原生 createSession 建立 draft，再配置并发送。 */
     v4Create?: boolean;
+    /**
+     * bot 权限无应答 deadline（毫秒，来自 bot 配置 permissionTimeoutMinutes，
+     * specs/bot-permissions.md §3a.1-§3a.2）；经 v4 createSession payload 落入 CLI
+     * session record。非 bot 任务不携带（桌面会话行为不变）。
+     */
+    permissionAutoDenyMs?: number;
   }): Promise<ZCodeTaskCreateResult>;
 
   /** 发送 prompt 到指定 task */

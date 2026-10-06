@@ -5,6 +5,7 @@ import {
   AMEND_WORKFLOW_TOOL_NAME,
   CREATE_WORKFLOW_TOOL_NAME,
   EXIT_PLAN_MODE_TOOL_NAME,
+  SESSION_ENTRY_PERMISSION_AUTO_RESOLUTION,
   SESSION_ENTRY_USER_INPUT_AUTO_RESOLUTION,
   type AskUserQuestion,
   type PermissionBrokerPort,
@@ -67,6 +68,15 @@ async function requestPermission(
     ...request,
     optionsPolicy: toLegacyPermissionOptionsPolicy(request.optionsPolicy),
   });
+  // spec §3a.3/§3b（bot-permissions）：权限交互按 kind "permission" 注册；所属
+  // session 携带 permissionAutoDenyMs 时登记表为该条目武装无应答倒计时（到期代答
+  // deny-shaped，落入下方映射的 deny 兜底）。无 deadline（桌面会话/未配置 bot）=
+  // 无倒计时，行为与今天的 "other" kind 逐字节一致。
+  const permissionRegistration = buildPermissionInteractionRegistrationOptions(
+    request,
+    await resolvePermissionDeadline(context, request),
+    createPermissionAutoResolutionPersistence(context, request),
+  );
   const response = await raceClientRequestWithV4Interaction(
     context,
     request.requestId,
@@ -98,7 +108,7 @@ async function requestPermission(
         : response;
     },
     {
-      ...createInteractionRegistrationOptions(request, "other"),
+      ...permissionRegistration,
       ...(!request.origin &&
       !request.optionsPolicy &&
       options?.claimResponse &&
@@ -144,7 +154,9 @@ async function requestPermission(
  * CreateWorkflow 工具伪造该 optionId，都落到既有 deny 兜底且不带 reasonSource——
  * 反馈升级为 user message 的通道必须只对真实用户输入开放。
  */
-function v4AnswerToPermissionResponse(
+// 同 v4AnswerToUserInputResponse——导出供测试直测映射（spec §7.4：permission 到期
+// deny-shaped 应答经该映射落 deny 兜底）；仅测试消费，不属于包对外 API。
+export function v4AnswerToPermissionResponse(
   answer: V4InteractionAnswer,
   permissionOptions: ZCodePermissionOption[],
   toolName: string,
@@ -568,16 +580,115 @@ function createInteractionRegistrationOptions(
   };
 }
 
+/**
+ * spec §3a.3/§3b.1（bot-permissions）：权限交互登记表选项装配（纯函数，持久化回调
+ * 由调用方注入，便于单测钉住 kind/deadline 边界）——kind "permission" + 会话
+ * permissionAutoDenyMs 作为 per-entry autoResolutionMs；重启恢复时附带持久化的
+ * initialAutoResolution（绝对时间，登记表恢复同一 deadlineAt，不重置时钟）。
+ */
+export function buildPermissionInteractionRegistrationOptions(
+  request: PermissionBrokerRequest,
+  deadline: {
+    permissionAutoDenyMs?: number;
+    initialAutoResolution?: V4InteractionRegistrationOptions["initialAutoResolution"];
+  } = {},
+  onAutoResolutionUpdated?: V4InteractionRegistrationOptions["onAutoResolutionUpdated"],
+): V4InteractionRegistrationOptions {
+  return {
+    sessionId: String(request.sessionId),
+    kind: "permission",
+    ...(deadline.permissionAutoDenyMs !== undefined
+      ? { autoResolutionMs: deadline.permissionAutoDenyMs }
+      : {}),
+    ...(deadline.initialAutoResolution
+      ? { initialAutoResolution: deadline.initialAutoResolution }
+      : {}),
+    ...(onAutoResolutionUpdated ? { onAutoResolutionUpdated } : {}),
+  };
+}
+
+/**
+ * spec §3a.3：deadline 事实源是 CLI session record（v4 createSession 写入的
+ * permissionAutoDenyMs）；重启后 record 经 resume 重建不携带该值，倒计时恢复改由
+ * 持久化 session entry 的绝对时间承担（两者并列，登记表侧 initialAutoResolution
+ * 优先于重新武装）。
+ */
+async function resolvePermissionDeadline(
+  context: ZCodeProtocolAgentServerContext,
+  request: PermissionBrokerRequest,
+): Promise<{
+  permissionAutoDenyMs?: number;
+  initialAutoResolution?: V4InteractionRegistrationOptions["initialAutoResolution"];
+}> {
+  const sessionRecord = context.sessions.get(String(request.sessionId));
+  const permissionAutoDenyMs = sessionRecord?.permissionAutoDenyMs;
+  const initialAutoResolution = await readPersistedAutoResolution(
+    context,
+    request,
+    "permission",
+  );
+  return {
+    ...(permissionAutoDenyMs !== undefined ? { permissionAutoDenyMs } : {}),
+    ...(initialAutoResolution ? { initialAutoResolution } : {}),
+  };
+}
+
+/**
+ * spec §3b.4：permission 倒计时持久化——与 askUserQuestion 同一 session-entry 覆写
+ * 模式（按 interactionId 稳定 id，只保留最终状态）。deadline 是 bootstrap 会话概念
+ * （v4 createSession 字段），不进 core 事件面，由 broker 直写 store；写失败仅 warn，
+ * 不阻断交互（倒计时权威在登记表内存态，持久化只服务重启恢复）。
+ */
+function createPermissionAutoResolutionPersistence(
+  context: ZCodeProtocolAgentServerContext,
+  request: PermissionBrokerRequest,
+): V4InteractionRegistrationOptions["onAutoResolutionUpdated"] {
+  return async (autoResolution) => {
+    const sessionStore = context.deps?.sessionStore;
+    if (!sessionStore?.saveSessionEntry) return;
+    try {
+      await sessionStore.saveSessionEntry({
+        id: `permission-auto-resolution:${request.requestId}`,
+        sessionID: request.sessionId,
+        type: SESSION_ENTRY_PERMISSION_AUTO_RESOLUTION,
+        time: {
+          created: autoResolution.startedAt,
+          updated: Date.now(),
+        },
+        data: {
+          interactionId: request.requestId,
+          toolCallId: request.toolCallId,
+          autoResolution,
+          traceId: request.traceId,
+          ...(request.turnId ? { turnId: request.turnId } : {}),
+        },
+      });
+    } catch (error) {
+      context.logger?.warn("Failed to persist permission auto-resolution state", {
+        error: error instanceof Error ? error.message : String(error),
+        event: "zcode_protocol.permission_auto_resolution_persist_failed",
+        interactionId: request.requestId,
+        module: "bootstrap.zcode_protocol",
+        sessionId: request.sessionId,
+      });
+    }
+  };
+}
+
 async function readPersistedAutoResolution(
   context: ZCodeProtocolAgentServerContext,
   request: PermissionBrokerRequest,
+  scope: "userInput" | "permission" = "userInput",
 ): Promise<V4InteractionRegistrationOptions["initialAutoResolution"]> {
   const sessionStore = context.deps?.sessionStore;
   if (!sessionStore?.sessionEntries) return undefined;
   try {
     const entries = await sessionStore.sessionEntries({
       sessionID: request.sessionId,
-      type: SESSION_ENTRY_USER_INPUT_AUTO_RESOLUTION,
+      type:
+        scope === "permission"
+          ? SESSION_ENTRY_PERMISSION_AUTO_RESOLUTION
+          : SESSION_ENTRY_USER_INPUT_AUTO_RESOLUTION,
     });
     const matching = entries
       .filter((entry) => {
@@ -593,7 +704,10 @@ async function readPersistedAutoResolution(
   } catch (error) {
     context.logger?.warn("Failed to restore user input auto-resolution state", {
       error: error instanceof Error ? error.message : String(error),
-      event: "zcode_protocol.user_input_auto_resolution_restore_failed",
+      event:
+        scope === "permission"
+          ? "zcode_protocol.permission_auto_resolution_restore_failed"
+          : "zcode_protocol.user_input_auto_resolution_restore_failed",
       interactionId: request.requestId,
       module: "bootstrap.zcode_protocol",
       sessionId: request.sessionId,

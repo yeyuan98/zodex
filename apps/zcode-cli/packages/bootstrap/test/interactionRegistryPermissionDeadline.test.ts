@@ -1,17 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ZCodePermissionOption } from "@zcode/shared";
-import * as interactionBrokerModule from "../src/zcode-protocol/interaction-broker.js";
+import { v4AnswerToPermissionResponse } from "../src/zcode-protocol/interaction-broker.js";
 import {
   V4InteractionRegistry,
   type V4InteractionAnswer,
   type V4InteractionAutoResolution,
-  type V4InteractionRegistrationOptions,
 } from "../src/zcode-protocol-v4/interaction-registry.js";
 import { buildProtocolPermissionOptions } from "../src/zcode-protocol/permission-options.js";
 
 /**
- * 契约（specs/bot-permissions.md §3b / §7.4-§7.5，Track B W1 红测）：
+ * 契约（specs/bot-permissions.md §3b / §7.4-§7.5，Track B W1 红测 → W3 转绿）：
  *
  * V4InteractionRegistry 注册选项扩展 per-entry 权限 deadline：kind "permission"
  * 语义 = 注册即武装倒计时（不排队头）、无 hiddenGrace（首个状态即
@@ -20,38 +18,8 @@ import { buildProtocolPermissionOptions } from "../src/zcode-protocol/permission
  * （initialAutoResolution）必须立即 resolve deny；任何真实应答先到 ⇒ 注销登记
  * 并清除 timer（恰一次 resolve）。
  *
- * 现状（红）：登记表只对 kind "askUserQuestion" 武装自动结束；kind "permission"
- * 尚不存在 ⇒ 注册后无 timer、无状态回调；overdue 恢复分支回 {action:"accept"}。
- * 场景 D 是 guard（今绿，W3 落地后必须保持绿）。
+ * 场景 D 是 guard（W3 落地后必须保持绿）。
  */
-
-// 临时 cast（W1 红测 → W3 转绿后删除）：spec §3b.1 的注册选项扩展（kind
-// "permission" + per-entry autoResolutionMs）尚未落地，为让本文件在当前代码上
-// 编译，把未来形状经 register 第三参类型收窄传入。W3 落地真实类型后应直接传
-// 字面量并删除本 cast。
-type FuturePermissionRegistrationOptions = V4InteractionRegistrationOptions & {
-  kind: "permission";
-  autoResolutionMs: number;
-};
-
-function asRegistrationOptions(
-  options: FuturePermissionRegistrationOptions,
-): Parameters<V4InteractionRegistry["register"]>[2] {
-  return options as unknown as Parameters<V4InteractionRegistry["register"]>[2];
-}
-
-// v4AnswerToPermissionResponse 今天未从 broker 导出（deny 兜底映射是模块私有）。
-// spec §7.4 要求到期 deny-shaped 应答经该映射落 deny；W1 以命名空间探测取得，
-// W3 应将其导出（导出后把本探测替换为直接命名导入）。
-const permissionAnswerMapper = (
-  interactionBrokerModule as unknown as {
-    v4AnswerToPermissionResponse?: (
-      answer: V4InteractionAnswer,
-      permissionOptions: ZCodePermissionOption[],
-      toolName: string,
-    ) => { decision: "allow" | "deny" };
-  }
-).v4AnswerToPermissionResponse;
 
 const bashPermissionOptions = buildProtocolPermissionOptions({ toolName: "bash" });
 
@@ -78,27 +46,22 @@ test("A（红·到期 deny）：permission kind + per-entry deadline 注册 ⇒ 
     (answer) => {
       answers.push(answer);
     },
-    asRegistrationOptions({
+    {
       sessionId: "sess-perm-a",
       kind: "permission",
       autoResolutionMs: 120,
-    }),
+    },
   );
   try {
     assert.ok(
       await waitFor(() => answers.length > 0, 2000),
-      "permission 注册携带 deadline 后，到期必须自动 resolve（今天非 askUserQuestion kind 永不武装倒计时，spec §3b.1）",
+      "permission 注册携带 deadline 后，到期必须自动 resolve（非 askUserQuestion kind 武装倒计时，spec §3b.1）",
     );
     const answer = answers[0]!;
     assert.equal(answer.optionId, undefined, "到期应答必须 deny-shaped：无 optionId");
     assert.equal(answer.action, undefined, "到期应答必须 deny-shaped：无 action");
     assert.equal(
-      typeof permissionAnswerMapper,
-      "function",
-      "W3 应导出 v4AnswerToPermissionResponse 以钉住 deny 兜底映射（spec §7.4）",
-    );
-    assert.equal(
-      permissionAnswerMapper?.(answer, bashPermissionOptions, "bash")?.decision,
+      v4AnswerToPermissionResponse(answer, bashPermissionOptions, "bash")?.decision,
       "deny",
       "deny-shaped 应答经 v4AnswerToPermissionResponse 必须落既有 deny 兜底（buildPermissionDeniedContent）",
     );
@@ -113,7 +76,7 @@ test("B（红·无隐藏宽限）：permission 注册 ⇒ 首个 autoResolution 
   const unregister = registry.register(
     "perm-grace",
     () => {},
-    asRegistrationOptions({
+    {
       sessionId: "sess-perm-b",
       kind: "permission",
       // deadline 足够长：本场景只观察首个状态，不触发到期。
@@ -121,12 +84,12 @@ test("B（红·无隐藏宽限）：permission 注册 ⇒ 首个 autoResolution 
       onAutoResolutionUpdated: (state) => {
         states.push(state);
       },
-    }),
+    },
   );
   try {
     assert.ok(
       await waitFor(() => states.length > 0, 2000),
-      "permission 注册必须立即发布 autoResolution 状态（今天非 askUserQuestion kind 永不武装，回调不触发）",
+      "permission 注册必须立即发布 autoResolution 状态（注册即武装，回调即刻触发）",
     );
     assert.equal(
       states[0]?.state,
@@ -151,7 +114,7 @@ test("C（红·过期恢复）：initialAutoResolution 已过期 + permission ki
     (answer) => {
       answers.push(answer);
     },
-    asRegistrationOptions({
+    {
       sessionId: "sess-perm-c",
       kind: "permission",
       autoResolutionMs: 120,
@@ -161,7 +124,7 @@ test("C（红·过期恢复）：initialAutoResolution 已过期 + permission ki
         visibleAt: now - 1000,
         deadlineAt: now - 100,
       },
-    }),
+    },
   );
   try {
     assert.ok(
@@ -172,11 +135,11 @@ test("C（红·过期恢复）：initialAutoResolution 已过期 + permission ki
     assert.equal(
       answer.optionId,
       undefined,
-      "过期恢复 resolve 必须是 deny-shaped：无 optionId（今天 overdue 分支回 {action:'accept', content:{answers:{}}}）",
+      "过期恢复 resolve 必须是 deny-shaped：无 optionId（askUserQuestion 的 overdue 分支才回 {action:'accept', content:{answers:{}}}）",
     );
     assert.equal(answer.action, undefined, "过期恢复 resolve 必须是 deny-shaped：无 action");
     assert.equal(
-      permissionAnswerMapper?.(answer, bashPermissionOptions, "bash")?.decision,
+      v4AnswerToPermissionResponse(answer, bashPermissionOptions, "bash")?.decision,
       "deny",
       "经 v4AnswerToPermissionResponse 必须落 deny 兜底",
     );
@@ -193,11 +156,11 @@ test("D（guard·绿）：deadline 前真实 resolve() 先到 ⇒ 注销登记�
     (answer) => {
       answers.push(answer);
     },
-    asRegistrationOptions({
+    {
       sessionId: "sess-perm-d",
       kind: "permission",
       autoResolutionMs: 120,
-    }),
+    },
   );
   try {
     const delivered = registry.resolve("perm-guard", { optionId: "allow_once" });

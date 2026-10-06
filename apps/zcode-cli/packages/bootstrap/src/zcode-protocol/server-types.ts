@@ -111,6 +111,13 @@ export interface ZCodeProtocolSessionRecord {
   restoreWarning?: { message: string; type: string };
   /** 冷恢复候选只供初始投影；新的选模事件立即清除，不能替代 Runtime 执行绑定。 */
   restoredModelSelection?: ModelSelection;
+  /**
+   * bot 权限无应答 deadline（毫秒，specs/bot-permissions.md §3a.3）：由 v4
+   * createSession handler 在建 record 后写入（deadline 只走 v4，不进 v3 strict
+   * schema）。interaction-broker 注册权限交互时按 sessionId 读取并为登记表条目
+   * 启用倒计时；缺省 = 桌面会话，无倒计时。
+   */
+  permissionAutoDenyMs?: number;
 }
 
 export interface ZCodeProtocolClientRequestOptions {
