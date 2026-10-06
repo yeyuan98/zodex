@@ -3280,9 +3280,11 @@ export function createBotsService(
       category: "mode",
       type: "select",
       currentValue: draftOptions.mode?.trim() || "build",
+      // [ulw] NIT-1：label 与 active 路径（active.configOptions 的 mode.name）同口径，
+      // 避免 draft 显示 "build" 而 active 显示 "Ask before changes" 的口径分裂。
       options: getZCodeAgentAvailableModes().map((mode) => ({
         value: mode.id,
-        name: mode.id,
+        name: mode.name,
         description: mode.description,
       })),
     };

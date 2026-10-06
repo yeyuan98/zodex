@@ -389,5 +389,9 @@ select，thoughtLevel 分支已在用）在同一 handler 里闲置；draft 路�
    无其他消费方后删除；若出现其他消费方则留 tombstone 注释。
 3. **draft 路径**：`listDraftConfigOptions` 从 `getZCodeAgentAvailableModes`
    （桌面 composer 同源）合成 mode select；当前值 = 读取时默认 `build`。
+   实现注记（[ulw] NIT）：draft 与 active 两路径的选项 label 统一用
+   mode.name（"Ask before changes" 等，`getZCodeAgentModeSelectOptions` 同源
+   数据）；`/mode` 标题显示原始 mode token（如 `build`，与 §5 `/status` 模式行
+   同口径）——本地化 label 会掩盖可回传的 value。
 4. **接受边界**：无模型 draft 仍不列选项（modeMissing）——与 thoughtLevel
    平权；rig C1 使用已配置模型的 bot。

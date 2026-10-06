@@ -142,11 +142,14 @@ async function createDualChannelHarness(
 test("场景16（红·F1 双通道收口）：同 requestId 经会话事件流(A)+反向RPC(B) ⇒ adapter 恰一次 permission_request 流事件（今两次）", async () => {
   const harness = await createDualChannelHarness("dual");
   try {
-    // 今 alpha.0：A 与 B 各映射一次 ⇒ 2；等待稳定到达 2（今天的事实基线）再断言 1。
+    // [ulw] NIT-3：等首条广播 + 稳态窗（1.5s > rig 实测 A→B 间隔 330-650ms）后断言恰 1，
+    // 替代旧「等满 2 再断 1」——修复后树上不再烧满 10s；若收口回归，第二条会在
+    // 稳态窗内到达并被断言捕获。
     await waitFor(
-      () => harness.streamEvents.filter((event) => event.type === "permission_request").length >= 2,
+      () => harness.streamEvents.filter((event) => event.type === "permission_request").length >= 1,
       10_000,
     );
+    await sleep(1_500);
     const permissionEvents = harness.streamEvents.filter(
       (event) => event.type === "permission_request",
     );
