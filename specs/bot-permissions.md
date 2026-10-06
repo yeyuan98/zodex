@@ -1,7 +1,10 @@
 # Spec: Bot Permission Parity (3.15.0 Track B)
 
-Status: **SPEC-FIRST（2026-10-06）——owner rulings 已取得：D1 = Option A′（扩展
-CLI 既有交互登记表的自动结束机械，经 v4 createSession 增量字段携带 per-bot
+Status: **已实现于 agent/coder/bot-permission-parity 分支（W1–W5），待 3.15.0-alpha.0
+发版与 rig 验证（[ulw] 评审修复已折叠：timer 清除收口、迟到 deny 超时文案、transient
+卡片 clobber 守卫、迟到序号点击清扫、无渲染不武装、schema 边界常量化、/status 过渡
+形态）。此前记录——SPEC-FIRST（2026-10-06）：owner rulings 已取得：D1 = Option A′
+（扩展 CLI 既有交互登记表的自动结束机械，经 v4 createSession 增量字段携带 per-bot
 deadline）；D2 = 在 Manage bot 表单（Mobile remote control → Manage bot，
 BotsDialog）新增「权限超时（分钟）」数字字段（默认 10，最小 1）；D3 = 由证据
 解决（解锁既有通用机械即得桌面平权——桌面模式选择本属下一次提交，运行中任务
@@ -126,6 +129,12 @@ Bot 会话与桌面会话共用**同一权限模型**。解锁后 bot 默认 `bu
    诚实丢弃，**不进入 channel-dead 保留缓冲**（amendment 落于
    bot-message-delivery.md 保留面小节；与 §7.23 命令回复不保留同一 rationale：
    即时性消息，延迟到达令人困惑；agent 的后续正文已承载拒绝后果）。
+   事件驱动的超时文案选择规则（[ulw] 评审 R1-2）：`permission_response` 处理时
+   若 decision=deny 且该 requestId 的 bot 侧武装 deadline 已过（登记表内存查询），
+   注记文案用 `permissionAutoDenied`（超时/自动拒绝）而非通用 `permissionResolved`
+   ——CLI 自动拒绝事件常先于 bot 侧 deny-note timer 触发，规则保证该竞态窗口内
+   「拒绝可见」不降级为通用文案；standalone deny-note timer 保持为无事件到达时的
+   兜底。
 3. Timer 生命周期表（每个事件 → 清除/重设/触发）：
 
    | 事件                                                   | reminder/deny-note timer | 说明                                 |
@@ -161,6 +170,12 @@ Bot 会话与桌面会话共用**同一权限模型**。解锁后 bot 默认 `bu
 2. 桌面（非 bot）会话不受影响：不带 deadline 字段 = 登记表行为逐字节不变。
 3. 旧 CLI 降级 = 无倒计时（3a.2），提示照旧等待——不因解锁而恶化（解锁前
    权限事件本不存在）。
+4. **残留（[ulw] 评审 R1 披露，接受不修）——远端旧 CLI 混版窗口**：远端
+   workspace 的旧 CLI 会剥离 v4 createSession 的 deadline 字段，该窗口内 CLI
+   倒计时缺席而 bot 侧 deny-note timer 照发其文案（文案非权威，仅聊天可见性，
+   实际无自动拒绝发生）；first-wins 仍允许用户照常应答；窗口随远端重连
+   （bundle 自动升级）关闭。bot 侧武装不以「CLI 已确认收到 deadline」为前置
+   （无 delivery acknowledgement 门控）——接受为降级残留。
 
 ## 4. 提示退休与清理（retirement）
 
@@ -169,9 +184,16 @@ Bot 会话与桌面会话共用**同一权限模型**。解锁后 bot 默认 `bu
    requestId 过滤，以实现为准并在测试钉住）+ `broadcastTaskListChange`
    （`permission_resolved`）+ 退休聊天侧提示 UX：Telegram 键盘编辑、Feishu
    卡片更新（含 transient interaction card 的 finalize-on-resolution——补上
-   现缺的第三处 finalize）、WeChat 文本注记。文本 `/approve`//`/deny` 路径的
+   现缺的第三处 finalize，且仅在该卡片仍属于本 requestId 时执行，防止终结
+   展示中较新交互的卡片）、WeChat 文本注记。文本 `/approve`//`/deny` 路径的
    陈旧 pending 记录（`handledAt` 缺失的 orphan）随 `permission_response`
    一并清扫。
+   - **本 alpha 退休实现披露**：Telegram 侧退休以本地化文本注记交付（与
+     WeChat 同形）；Telegram 键盘编辑（inline keyboard 移除按钮）推迟到
+     polish 阶段，不阻塞 3.15.0-alpha.0。
+   - **迟到用户 deny 的接受边界**：deadline 之后到达的用户 deny
+     （`permission_response` decision=deny）同样显示超时文案（§3c.2 选择
+     规则的推论——超时事实先于用户意图，文案以先发生的权威为准）。
 2. 终态事件（`task_complete`/`task_error`）与 `/stop` drain 清空
    `pendingPermissionOptions`（补齐现缺；`writeDraftContext` 的 `/new` 清空
    为既有先例）。
