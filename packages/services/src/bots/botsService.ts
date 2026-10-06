@@ -1419,6 +1419,39 @@ export function createBotsService(
     }
     return true;
   }
+  // F3（specs/bot-permissions.md §8.3，rig-221723 D4）：有界 recently-self-answered
+  // requestId 集合——聊天自答（按钮/文本）以命令 ack 为单确认，permission_response
+  // 处理器查阅本集合抑制 watcher 的 permissionResolved note；跨端/桌面应答、CLI
+  // 自动拒绝（permissionAutoDenied）与 B2.3 stop-deny 不经记录 ⇒ note 照发。
+  // 仅在 respondPermission 提交成功（submitted=true）时记录——迟到点击（false）的
+  // 解析权威在外部，note 不得被吞。requestId 每次 ask 现铸，TTL 只是防御性回收。
+  const BOT_PERMISSION_SELF_ANSWERED_MAX = 200;
+  const BOT_PERMISSION_SELF_ANSWERED_TTL_MS = 60_000;
+  const recentlySelfAnsweredPermissionRequestIds = new Map<string, number>();
+  function rememberSelfAnsweredPermission(requestId: string): void {
+    const now = Date.now();
+    recentlySelfAnsweredPermissionRequestIds.delete(requestId);
+    recentlySelfAnsweredPermissionRequestIds.set(requestId, now);
+    while (recentlySelfAnsweredPermissionRequestIds.size > BOT_PERMISSION_SELF_ANSWERED_MAX) {
+      const oldestKey = recentlySelfAnsweredPermissionRequestIds.keys().next().value;
+      if (oldestKey === undefined) break;
+      recentlySelfAnsweredPermissionRequestIds.delete(oldestKey);
+    }
+    for (const [key, recordedAt] of recentlySelfAnsweredPermissionRequestIds) {
+      if (now - recordedAt > BOT_PERMISSION_SELF_ANSWERED_TTL_MS) {
+        recentlySelfAnsweredPermissionRequestIds.delete(key);
+      }
+    }
+  }
+  /** F3：permission_response 处理器查阅——命中即自答（单确认已由 ack 交付）并消费条目。 */
+  function consumeSelfAnsweredPermission(requestId: string): boolean {
+    const recordedAt = recentlySelfAnsweredPermissionRequestIds.get(requestId);
+    if (recordedAt === undefined) {
+      return false;
+    }
+    recentlySelfAnsweredPermissionRequestIds.delete(requestId);
+    return Date.now() - recordedAt <= BOT_PERMISSION_SELF_ANSWERED_TTL_MS;
+  }
   const streamingCardRequestControllers = new Set<AbortController>();
   const transientInteractionCards = new Map<
     string,
@@ -1778,6 +1811,9 @@ export function createBotsService(
       draftOptions,
       pendingPermissionOptions: undefined,
       pendingElicitation: undefined,
+      // F2（spec §8.2）：冻结 deadline 属于刚离开的 active task——进入草稿即失效，
+      // 防止下一个任务（或 miss 任务）误按旧 deadline 武装（与 pending 同一清理缝）。
+      permissionAutoDenyMs: undefined,
     };
     // specs/bot-permissions.md §3c（W3b）：pending 随 /new 清空（§4.2 既有先例）时，
     // 策略 timer 必须一并清除——否则 deadline 会对已废弃的 pending 补发误导性文案。
@@ -5510,30 +5546,45 @@ export function createBotsService(
   }
 
   /**
-   * 在 permission_request 渲染点武装两个策略 timer。时长与 createTask 传递的 deadline 同源
-   * 同式（同一 bot 配置快照 + 同一 normalizePermissionTimeoutMinutes；§3c 表「deadline 配置
-   * 中途变更：无效（不重设）」——本次 pending 的 deadline 已定）。§3c 表「同 requestId 再
-   * 提示：不重设」——同键已存在时保持原 timer（时钟权威在登记表 3b.4）。
+   * 在 permission_request 渲染点武装两个策略 timer。F2（specs/bot-permissions.md
+   * §8.2，rig-221723 E7）：时长只读 bot context 持久化的冻结 permissionAutoDenyMs
+   * （createTask 时写入，与 CLI createSession 冻结值同源同值）——绝不读活配置：
+   * 任务运行期间调低配置后，活配置武装会提前发出与 CLI 事实不符的「已自动拒绝」
+   * （E7 虚假文案根因——今读 bot.currentOptions.permissionTimeoutMinutes）。miss
+   * （任务早于该字段/映射丢失）⇒ reminder 与 deny-note 均不武装（deadline 未知 ⇒
+   * 两个时点都不可计算；「不补发避免误导」的推论），绝不活配置重武装（场景19c）。
+   * §3c 表「同 requestId 再提示：不重设」——同键已存在时保持原 timer（时钟权威在
+   * 登记表 3b.4）。
    */
   function armBotPermissionPolicyTimers(params: {
     bot: BotConfig;
     actor: BotActor;
     taskId: string;
     requestId: string;
+    permissionAutoDenyMs: number | undefined;
   }): void {
-    const { bot, actor, taskId, requestId } = params;
+    const { bot, actor, taskId, requestId, permissionAutoDenyMs } = params;
     const key = permissionPolicyTimerKey(bot.id, actor, requestId);
     if (permissionPolicyTimers.has(key)) {
       return;
     }
-    const timeoutMinutes = normalizePermissionTimeoutMinutes(
-      bot.currentOptions.permissionTimeoutMinutes,
-    );
+    if (
+      typeof permissionAutoDenyMs !== "number" ||
+      !Number.isFinite(permissionAutoDenyMs) ||
+      permissionAutoDenyMs <= 0
+    ) {
+      // F2 miss：无持久化冻结 deadline ⇒ 不武装（spec §8.2.2），reminder 一并跳过。
+      botsLogger.info(
+        undefined,
+        `bot permission policy timers skipped (no persisted deadline) bot=${bot.id} task=${taskId} requestId=${requestId}`,
+      );
+      return;
+    }
     const scaleDuration = (durationMs: number): number =>
       permissionTimerScale > 1
         ? Math.max(1, Math.round(durationMs / permissionTimerScale))
         : durationMs;
-    const deadlineMs = scaleDuration(timeoutMinutes * 60_000);
+    const deadlineMs = scaleDuration(permissionAutoDenyMs);
     const entry: {
       botId: string;
       requestId: string;
@@ -5542,7 +5593,7 @@ export function createBotsService(
       reminderTimer?: ReturnType<typeof setTimeout>;
       denyNoteTimer?: ReturnType<typeof setTimeout>;
     } = { botId: bot.id, requestId, actor, deadlineAt: Date.now() + deadlineMs };
-    if (timeoutMinutes > BOT_PERMISSION_REMINDER_MIN_DEADLINE_MINUTES) {
+    if (permissionAutoDenyMs > BOT_PERMISSION_REMINDER_MIN_DEADLINE_MINUTES * 60_000) {
       const reminderDelayMs = Math.max(
         1,
         deadlineMs - scaleDuration(BOT_PERMISSION_REMINDER_OFFSET_MS),
@@ -5577,7 +5628,7 @@ export function createBotsService(
     permissionPolicyTimers.set(key, entry);
     botsLogger.info(
       undefined,
-      `bot permission policy timers armed bot=${bot.id} task=${taskId} requestId=${requestId} deadlineMinutes=${timeoutMinutes} reminder=${timeoutMinutes > BOT_PERMISSION_REMINDER_MIN_DEADLINE_MINUTES}`,
+      `bot permission policy timers armed bot=${bot.id} task=${taskId} requestId=${requestId} deadlineMs=${permissionAutoDenyMs} reminder=${permissionAutoDenyMs > BOT_PERMISSION_REMINDER_MIN_DEADLINE_MINUTES * 60_000}`,
     );
   }
 
@@ -6557,7 +6608,8 @@ export function createBotsService(
             return;
           }
           // specs/bot-permissions.md §3c.1（W3b）：提示已在聊天内可见 ⇒ 在渲染点武装
-          // reminder/deny-note 两个策略 timer（时长与 createTask 传出的 deadline 同源同式）。
+          // reminder/deny-note 两个策略 timer。F2（§8.2，alpha.1）：时长只读 context
+          // 持久化的冻结 permissionAutoDenyMs（建任务时写入），不读活配置。
           // 修复原因（[ulw] 评审 R1-6）：permissionReply 未渲染（createSelectionReply 返回
           // 空）时不得武装——pending 已写入但聊天内没有任何可见提示，deadline 时刻补发
           // 提醒/超时文案只会误导；该 pending 由后续 permission_request 覆盖或终态收口。
@@ -6566,6 +6618,7 @@ export function createBotsService(
             actor,
             taskId: event.taskId,
             requestId: event.requestId,
+            permissionAutoDenyMs: context.permissionAutoDenyMs,
           });
         }
         return;
@@ -6588,6 +6641,13 @@ export function createBotsService(
         const resolvedNoteId: BotMessageId = useAutoDeniedNote
           ? "permissionAutoDenied"
           : "permissionResolved";
+        // F3（specs/bot-permissions.md §8.3，rig-221723 D4）：聊天自答（按钮/文本命令）
+        // 已以命令 ack 为单确认——抑制本 watcher 的独立 permissionResolved note。抑制
+        // 只作用于注记本身：pending 清理、broadcastTaskListChange、timer 清除与 transient
+        // 卡片退休 UX 照常执行。文本路径的 watcher 闭包 pending 副本不随命令清理更新，
+        // 不能依赖 pending 清理竞态判自答（W1 实测），集合抑制是唯一可靠判别。CLI 自动
+        // 拒绝不在集合内（从未记录）⇒ permissionAutoDenied 超时文案照发（§3c.2 不变）。
+        const selfAnswered = consumeSelfAnsweredPermission(event.requestId);
         const hadPendingPrompt = await clearPendingPermissionOptions(
           context,
           "permission_response",
@@ -6611,7 +6671,7 @@ export function createBotsService(
           );
           return;
         }
-        if (hadPendingPrompt) {
+        if (hadPendingPrompt && !selfAnswered) {
           await sendOutbound(
             bot,
             createOutbound(actor, msg(await readMessageLocale(), resolvedNoteId)),
@@ -7625,6 +7685,16 @@ export function createBotsService(
         },
       };
       const zcodeTaskService = await resolveZCodeTaskServiceForContext(auth.context);
+      // F2（specs/bot-permissions.md §8.2，rig-221723 E7）：deadline 在建任务时刻冻结
+      // 一次——同一值既传给 CLI（createSession 冻结值），也随任务状态持久化于 bot
+      // context（供 reminder/deny-note 武装只读）。此后配置中途变更对本次任务不可见
+      // （下一个任务生效，与 mode 同语义）；非 ZCode-Agent provider 不携带（显式清掉
+      // context 里可能残留的旧任务值）。
+      const permissionAutoDenyMs =
+        draftOptions.provider === ZCODE_AGENT_PROVIDER
+          ? normalizePermissionTimeoutMinutes(auth.bot.currentOptions.permissionTimeoutMinutes) *
+            60_000
+          : undefined;
       const task = await zcodeTaskService.createTask({
         workspacePath: auth.context.workspacePath,
         workspaceIdentity: auth.context.workspaceIdentity,
@@ -7637,14 +7707,7 @@ export function createBotsService(
         // specs/bot-permissions.md §3a.2（W3b）：bot 权限无应答 deadline（分钟×60000）——
         // 读取时归一（缺省 10）；仅 ZCode-Agent provider 任务携带（与 mode 咽喉同门），
         // 经 v4 createSession additive 字段落入 CLI session record；非 ZCode provider 不带。
-        ...(draftOptions.provider === ZCODE_AGENT_PROVIDER
-          ? {
-              permissionAutoDenyMs:
-                normalizePermissionTimeoutMinutes(
-                  auth.bot.currentOptions.permissionTimeoutMinutes,
-                ) * 60_000,
-            }
-          : {}),
+        ...(permissionAutoDenyMs !== undefined ? { permissionAutoDenyMs } : {}),
       });
       const taskTitle = deriveTaskTitle(preparedMessage.content, preparedMessage.zcodeAttachments);
       const broadcastTask = taskTitle ? { ...task, title: taskTitle } : task;
@@ -7674,6 +7737,9 @@ export function createBotsService(
         mode: "task" as const,
         activeTaskId: task.taskId,
         draftOptions: undefined,
+        // F2（spec §8.2.1）：冻结 deadline 随任务状态一并持久化（武装点只读该值）；
+        // undefined 时显式覆盖残留旧值，防止上一个任务的 deadline 泄漏给新任务。
+        permissionAutoDenyMs,
       };
       await writeContext(context);
       // Bugfix: Bot 首发不经过 UI 本地 deriveTaskTitle/optimistic cache。
@@ -8993,6 +9059,13 @@ export function createBotsService(
               workspaceId: getWorkspaceKey(taskEntry.workspacePath, taskEntry.workspaceIdentity),
               mode: "task",
               activeTaskId: task.taskId,
+              // F2（spec §8.2）：切换目标任务的冻结 deadline 不为本 context 所知
+              // （可能早于字段/由其他端创建）⇒ miss 不武装；残留旧任务值会武装出
+              // 与 CLI 登记表不符的虚假文案（E7 类），显式清掉。重选当前任务不清
+              // （任务未变，冻结事实仍有效）。
+              ...(auth.context.activeTaskId === task.taskId
+                ? {}
+                : { permissionAutoDenyMs: undefined }),
             } satisfies BotContextState;
             await writeContext(nextContext);
             pendingTaskSelectionsByContext.delete(getActorContextKey(message.actor));
@@ -9116,6 +9189,10 @@ export function createBotsService(
               await clearPendingPermissionOptions(auth.context, "text_response", option.requestId);
               return [createOutbound(message.actor, msg(auth.locale, "permissionLateHandled"))];
             }
+            // F3（spec §8.3）：自答已以本命令 ack（permissionSubmitted/permissionDenied）
+            // 为单确认——记录 requestId，供 permission_response 处理器抑制重复的
+            // permissionResolved note（场景21a）。
+            rememberSelfAnsweredPermission(option.requestId);
             await writeContext({
               ...auth.context,
               pendingPermissionOptions: nextPermissionOptions,
@@ -9192,6 +9269,10 @@ export function createBotsService(
               await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);
               return [createOutbound(message.actor, msg(auth.locale, "permissionLateHandled"))];
             }
+            // F3（spec §8.3）：自答已以本命令 ack 为单确认——记录 requestId 供
+            // permission_response 处理器抑制重复 note（场景21a2：文本路径 watcher 闭包
+            // pending 副本不随此处的清理更新，抑制不得依赖 pending 竞态）。
+            rememberSelfAnsweredPermission(command.requestId);
             // specs/bot-permissions.md §4.1：文本路径应答提交成功后同样清扫 pending 记录
             // （/new writeDraftContext 为既有先例），避免陈旧按钮继续命中已失效的 requestId。
             await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);
@@ -9230,6 +9311,9 @@ export function createBotsService(
               await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);
               return [createOutbound(message.actor, msg(auth.locale, "permissionLateHandled"))];
             }
+            // F3（spec §8.3）：文本 /deny 自答同 approve——ack 为单确认，记录 requestId
+            // 供 permission_response 处理器抑制重复 note。
+            rememberSelfAnsweredPermission(command.requestId);
             // specs/bot-permissions.md §4.1：文本路径拒绝提交成功后同样清扫 pending 记录
             // （/new writeDraftContext 为既有先例）。
             await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);

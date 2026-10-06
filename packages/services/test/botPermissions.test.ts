@@ -256,6 +256,11 @@ interface TaskStateEntryOptions {
   activeTaskId: string;
   isWeixin?: boolean;
   pendingPermissionOptions?: Array<Record<string, unknown>>;
+  /**
+   * F2（§8.2）：state entry 携带的持久化冻结 deadline（建任务时写入的
+   * permissionAutoDenyMs）。缺省 = miss 形态（任务早于字段/映射丢失 ⇒ 不武装）。
+   */
+  permissionAutoDenyMs?: number;
 }
 
 /** task 模式 state entry：场景 4/5 在既有任务上驱动 permission 事件。 */
@@ -268,6 +273,9 @@ function taskStateEntry(botId: string, workspace: string, options: TaskStateEntr
     ...(options.isWeixin ? { weixinActivatedAt: 1 } : {}),
     ...(options.pendingPermissionOptions
       ? { pendingPermissionOptions: options.pendingPermissionOptions }
+      : {}),
+    ...(options.permissionAutoDenyMs !== undefined
+      ? { permissionAutoDenyMs: options.permissionAutoDenyMs }
       : {}),
     updatedAt: 1,
   };
@@ -1333,8 +1341,13 @@ test("场景 createTask 传递（§3a.2）：permissionTimeoutMinutes=7 ⇒ perm
 test("场景9a（§7.9）：deadline 10min（缩放后 600ms）⇒ 恰一次 T-2min 提醒先于 deny-note", async () => {
   await withPermissionTimerScale("1000", async () => {
     const harness = await createPermissionsHarness({
+      // F2 后武装只读持久化冻结值：fixture 直接携带建任务时冻结的 600000（10min）。
       stateEntry: (botId, workspace) =>
-        taskStateEntry(botId, workspace, { activeTaskId: "task-perm-9a", isWeixin: true }),
+        taskStateEntry(botId, workspace, {
+          activeTaskId: "task-perm-9a",
+          isWeixin: true,
+          permissionAutoDenyMs: 600_000,
+        }),
     });
     try {
       await warmupTaskWatcher(harness, "task-perm-9a", "wx-msg-perm-9a-0");
@@ -1381,8 +1394,13 @@ test("场景9b（§7.9）：deadline 1min（缩放后 60ms，≤5min）⇒ 无�
   await withPermissionTimerScale("1000", async () => {
     const harness = await createPermissionsHarness({
       currentOptions: { permissionTimeoutMinutes: 1 },
+      // F2 后武装只读持久化冻结值：fixture 携带建任务时冻结的 60000（1min，≤5min ⇒ 无 reminder）。
       stateEntry: (botId, workspace) =>
-        taskStateEntry(botId, workspace, { activeTaskId: "task-perm-9b", isWeixin: true }),
+        taskStateEntry(botId, workspace, {
+          activeTaskId: "task-perm-9b",
+          isWeixin: true,
+          permissionAutoDenyMs: 60_000,
+        }),
     });
     try {
       await warmupTaskWatcher(harness, "task-perm-9b", "wx-msg-perm-9b-0");
@@ -1417,8 +1435,13 @@ test("场景9b（§7.9）：deadline 1min（缩放后 60ms，≤5min）⇒ 无�
 test("场景10（§7.10 非保留）：reminder/deny-note 发送失败（channel-dead）⇒ 保留缓冲零新增条目", async () => {
   await withPermissionTimerScale("1000", async () => {
     const harness = await createPermissionsHarness({
+      // F2 后武装只读持久化冻结值：fixture 携带 600000（10min）——两条 timer 都需武装。
       stateEntry: (botId, workspace) =>
-        taskStateEntry(botId, workspace, { activeTaskId: "task-perm-10", isWeixin: true }),
+        taskStateEntry(botId, workspace, {
+          activeTaskId: "task-perm-10",
+          isWeixin: true,
+          permissionAutoDenyMs: 600_000,
+        }),
     });
     try {
       await warmupTaskWatcher(harness, "task-perm-10", "wx-msg-perm-10-0");
@@ -1499,8 +1522,13 @@ test("场景11（§7.11 边界 guard）：permission deadline 触发不触碰 pe
       answers: {},
     };
     const harness = await createPermissionsHarness({
+      // F2 后武装只读持久化冻结值：fixture 携带 600000（默认 10min）。
       stateEntry: (botId, workspace) => ({
-        ...taskStateEntry(botId, workspace, { activeTaskId: "task-perm-11", isWeixin: true }),
+        ...taskStateEntry(botId, workspace, {
+          activeTaskId: "task-perm-11",
+          isWeixin: true,
+          permissionAutoDenyMs: 600_000,
+        }),
         pendingElicitation,
       }),
     });
@@ -1536,8 +1564,13 @@ test("场景15（§7.15）：deadline 前禁用 bot ⇒ note 抑制不发送（�
     const harness = await createPermissionsHarness({
       // [ulw] 评审 R2 竞态窗口 pin：默认 10 分钟 deadline（缩放后 600ms），禁用覆写
       //（小文件写）确定性落在 deadline 之前；原 1 分钟（60ms）窗口下覆写可能迟到。
+      // F2 后武装只读持久化冻结值：fixture 携带 600000（默认 10min）。
       stateEntry: (botId, workspace) =>
-        taskStateEntry(botId, workspace, { activeTaskId: "task-perm-15", isWeixin: true }),
+        taskStateEntry(botId, workspace, {
+          activeTaskId: "task-perm-15",
+          isWeixin: true,
+          permissionAutoDenyMs: 600_000,
+        }),
     });
     try {
       await warmupTaskWatcher(harness, "task-perm-15", "wx-msg-perm-15-0");
@@ -1588,8 +1621,13 @@ test("场景15（§7.15）：deadline 前禁用 bot ⇒ note 抑制不发送（�
 test("场景R1-1（并发权限）：A 武装 → B 覆盖 pending → B 应答清空 → A 应答命中空 pending ⇒ A 的 reminder/deny-note 永不补发", async () => {
   await withPermissionTimerScale("1000", async () => {
     const harness = await createPermissionsHarness({
+      // F2 后武装只读持久化冻结值：fixture 携带 600000（默认 10min，缩放后 600ms）。
       stateEntry: (botId, workspace) =>
-        taskStateEntry(botId, workspace, { activeTaskId: "task-perm-ghost", isWeixin: true }),
+        taskStateEntry(botId, workspace, {
+          activeTaskId: "task-perm-ghost",
+          isWeixin: true,
+          permissionAutoDenyMs: 600_000,
+        }),
     });
     try {
       await warmupTaskWatcher(harness, "task-perm-ghost", "wx-msg-perm-ghost-0");
@@ -1668,10 +1706,15 @@ test("场景R1-1（并发权限）：A 武装 → B 覆盖 pending → B 应答�
 
 test("场景R1-2（迟到 deny 文案）：deadline 后到达的 permission_response(deny) ⇒ 超时文案；deadline 前用户 deny ⇒ 通用已处理文案", async () => {
   await withPermissionTimerScale("1000", async () => {
-    // 前半：deadline 前的用户 deny——通用文案（既有语义 guard）。
+    // 前半：deadline 前的用户 deny——通用文案（既有语义 guard）。F2 后武装只读持久化
+    // 冻结值：fixture 携带 600000（默认 10min，缩放后 600ms）。
     const beforeDeadline = await createPermissionsHarness({
       stateEntry: (botId, workspace) =>
-        taskStateEntry(botId, workspace, { activeTaskId: "task-perm-r12a", isWeixin: true }),
+        taskStateEntry(botId, workspace, {
+          activeTaskId: "task-perm-r12a",
+          isWeixin: true,
+          permissionAutoDenyMs: 600_000,
+        }),
     });
     try {
       await warmupTaskWatcher(beforeDeadline, "task-perm-r12a", "wx-msg-perm-r12a-0");
@@ -1711,9 +1754,14 @@ test("场景R1-2（迟到 deny 文案）：deadline 后到达的 permission_resp
     }
 
     // 后半：deadline 后到达的 deny（CLI 自动拒绝竞态 / 迟到用户 deny）——超时文案。
+    // F2 后武装只读持久化冻结值：fixture 携带 600000（武装 deadline 在场才能命中「已过」）。
     const afterDeadline = await createPermissionsHarness({
       stateEntry: (botId, workspace) =>
-        taskStateEntry(botId, workspace, { activeTaskId: "task-perm-r12b", isWeixin: true }),
+        taskStateEntry(botId, workspace, {
+          activeTaskId: "task-perm-r12b",
+          isWeixin: true,
+          permissionAutoDenyMs: 600_000,
+        }),
     });
     try {
       await warmupTaskWatcher(afterDeadline, "task-perm-r12b", "wx-msg-perm-r12b-0");

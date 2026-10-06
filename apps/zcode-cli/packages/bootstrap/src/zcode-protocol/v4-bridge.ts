@@ -83,6 +83,7 @@ import type {
 } from "@zcode/contracts";
 import { HYDRATION_TRACE_ID } from "../zcode-protocol-v4/projection-state.js";
 import { resolveWorkspaceRefFromId } from "./mapper.js";
+import { persistSessionPermissionDeadlineEntry } from "./interaction-broker.js";
 import { buildLiveWorkspaceConfigStateV4 } from "./v4-workspace-config.js";
 import {
   hasSessionModelProvider,
@@ -959,6 +960,11 @@ export function createConversationV4Gateway(
         source,
         ack,
       );
+    },
+    // F2（specs/bot-permissions.md §8.2.4）：createSession 建档的会话级 deadline 持久化
+    // ——helper 自行 warn 吞失败（record 字段仍是本进程主源，entry 只服务重启 resume）。
+    persistSessionPermissionDeadline: async (sessionId, permissionAutoDenyMs) => {
+      await persistSessionPermissionDeadlineEntry(context, sessionId, permissionAutoDenyMs);
     },
     // held choice 裁决（heldQueueInputRequiresChoice）：读投影 inputRouting.mode。
     getInputRoutingMode: (sessionId) => context.v4Gateway?.getInputRoutingMode(sessionId) ?? null,

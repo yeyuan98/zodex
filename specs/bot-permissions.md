@@ -331,8 +331,18 @@ permissionAutoDenyMs`）——中途改配置 ⇒ 聊天宣称「已自动拒绝
 1. **持久化冻结值**：createTask 携带的确切 `permissionAutoDenyMs` 随建任务
    **持久化于 bot context**（与 task/pending 状态同处）；渲染/武装点
    （reminder + deny-note timer）**只读该持久值**。
+   （实现注记 2026-10-07 W3：keying = context 级字段 `permissionAutoDenyMs`
+   （`BotState`，语义上归属当前 activeTaskId——经 `botsStateFileSchema` 透传，
+   zod 非严格内层对象否则会剥离该键）；清理缝 = context 离开该任务处
+   （`writeDraftContext` 的 /new//workspace/删除任务替换、`/task set` 切换到
+   不同任务时显式清掉），终态/`permission_response`//stop **不清**（任务仍可
+   续跑，deadline 是任务级冻结事实——场景19a 的 task_complete后续跑重建即
+   靠此存活）；单字段无 map ⇒ 无增长问题。`watchAutomationRun` 的合成 context
+   不携带该值 ⇒ automation 复用会话的提示不武装 bot 侧文案（miss 语义，
+   CLI 登记表权威不受影响）。）
 2. **miss 不武装**：任务早于该字段、或持久映射丢失 ⇒ deny-note 不武装
-   （reminder-only 或全不武装——「不补发避免误导」哲学的推论），**绝不**从
+   （reminder-only 或全不武装——「不补发避免误导」哲学的推论；实现取**全不
+   武装**：deadline 未知 ⇒ reminder/deny-note 两个时点都不可计算），**绝不**从
    活配置重武装（消灭 E7 虚假否认类）。
 3. **中途变更语义**：配置变更对本次任务不可见（§3c 生命周期表「deadline
    配置中途变更：无效」由本节落为可执行），下一个任务生效（与 mode 同语义）。
@@ -340,6 +350,14 @@ permissionAutoDenyMs`）——中途改配置 ⇒ 聊天宣称「已自动拒绝
    时重建且不携带 `permissionAutoDenyMs`（重启后新提示缺权威倒计时）。优先
    小修：按 permission 自动拒绝 session entry 同款机械持久化 deadline（或
    reattach 时重投递）；若小修不成比例，在本文披露为残留。
+   （实现注记 2026-10-07 W3：小修已落地——会话级 entry
+   `{ id: "permission-deadline:<sessionId>", type: "permission-deadline",
+data: { permissionAutoDenyMs } }`，v4 createSession 建档写 record 字段的
+   同时经 host 钩子 `persistSessionPermissionDeadline` 直写 store（稳定 id
+   overwrite，与 `permission-auto-resolution:<requestId>` 同模式；失败仅
+   warn）；broker `resolvePermissionDeadline` 在 record 字段缺席时回落读该
+   entry（按 `time.updated` 取最新）。record 字段保持建档主源；无 entry ⇒
+   无倒计时（场景20b）；建档路径行为不变（场景20c）。）
 
 ### 8.3 F3 单确认（自答 ack / 外来解析 note）
 
