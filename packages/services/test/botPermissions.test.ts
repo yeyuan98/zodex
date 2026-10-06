@@ -12,11 +12,17 @@ import type {
 } from "@zcode/shared";
 import { BOT_PERMISSION_TIMER_SCALE_ENV, ZCODE_AGENT_PROVIDER } from "@zcode/shared";
 import { createBotsService } from "../src/bots/botsService.js";
-import { BOTS_CONFIG_FILE, BOTS_STATE_FILE } from "../src/bots/config.js";
+import {
+  BOTS_CONFIG_FILE,
+  BOTS_STATE_FILE,
+  BOTS_V2_STATE_FILE,
+  BOTS_V3_STATE_FILE,
+} from "../src/bots/config.js";
 import { getAppConfigDir, setDataBaseDir } from "../src/paths.js";
 import type { IBotsService } from "../src/bots/bots.js";
 import type { IZCodeTaskService } from "../src/session/zcodeTaskService.js";
 import type { ICredentialService } from "../src/credential/credential.js";
+import type { ISettingService } from "../src/setting/setting.js";
 import type { IModelSelectionService } from "../src/model-provider/providerFacadeServices.js";
 import type { BotProviderAdapter } from "../src/bots/providers/types.js";
 
@@ -93,6 +99,8 @@ interface TaskServiceControls {
   streamEventHandlers: Map<string, (event: unknown) => Promise<void>>;
   /** 场景13 旋钮：fake respondPermission 返回值（false = 已被 CLI 自动拒绝/他端收口）。 */
   respondPermissionResult: boolean;
+  /** 场景6b：fake listTasks 返回值（active-task /status 形态需要真实 task meta）。 */
+  listTasksResult: unknown[];
 }
 
 function buildFakeTaskService(controls: TaskServiceControls) {
@@ -131,7 +139,7 @@ function buildFakeTaskService(controls: TaskServiceControls) {
         ],
       },
     ],
-    listTasks: async () => [],
+    listTasks: async () => controls.listTasksResult as never,
     getTaskSnapshot: async () => null,
     sendPrompt: async (request: { taskId: string }) => {
       controls.sendPromptCalls.push(request.taskId);
@@ -228,14 +236,15 @@ async function writeBotFiles(
   configDir: string,
   botConfig: BotConfig,
   stateEntry: Record<string, unknown>,
+  stateFile?: { name: string; version: number },
 ): Promise<void> {
   await writeFile(
     join(configDir, BOTS_CONFIG_FILE),
     JSON.stringify({ version: 3, bots: [botConfig] }),
   );
   await writeFile(
-    join(configDir, BOTS_STATE_FILE),
-    JSON.stringify({ version: 3, bots: { [botConfig.id]: stateEntry } }),
+    join(configDir, stateFile?.name ?? BOTS_STATE_FILE),
+    JSON.stringify({ version: stateFile?.version ?? 3, bots: { [botConfig.id]: stateEntry } }),
   );
 }
 
@@ -309,6 +318,13 @@ interface PermissionsHarnessOptions {
   currentOptions?: BotCurrentOptions;
   /** 场景13：fake respondPermission 初始返回值（false = 已收口，迟到点击）。 */
   respondPermissionResult?: boolean;
+  /**
+   * 场景3b 迁移矩阵：自定义状态文件名与顶层 version（缺省写 version 3 内容到
+   * bot-state.v4.json——既有 harness 形态，按内容 version 触发迁移）。
+   */
+  stateFile?: { name: string; version: number };
+  /** 场景6b：注入 settingService locale（en-US 断言用；缺省无 settingService = zh）。 */
+  locale?: "en-US";
 }
 
 interface PermissionsHarness {
@@ -324,6 +340,8 @@ interface PermissionsHarness {
   streamEventHandlers: Map<string, (event: unknown) => Promise<void>>;
   /** 场景13：运行中翻转 fake respondPermission 返回值（false = 已被收口）。 */
   setRespondPermissionResult(value: boolean): void;
+  /** 场景6b：运行中替换 fake listTasks 返回值（active-task /status 形态）。 */
+  setListTasksResult(tasks: unknown[]): void;
   /** 场景15：直接覆写 bot-config.v3.json 顶层字段（enabled:false 等）。 */
   overwriteBotConfig(patch: Record<string, unknown>): Promise<void>;
   dispose(): Promise<void>;
@@ -348,6 +366,7 @@ async function createPermissionsHarness(
     configDir,
     botConfig,
     options.stateEntry?.(botConfig.id, workspace) ?? draftStateEntry(botConfig.id, workspace, true),
+    options.stateFile,
   );
 
   const controls: TaskServiceControls = {
@@ -360,6 +379,7 @@ async function createPermissionsHarness(
     setModeCalls: [],
     streamEventHandlers: new Map(),
     respondPermissionResult: options.respondPermissionResult ?? true,
+    listTasksResult: [],
   };
   const fakeTaskService = buildFakeTaskService(controls);
   const modelSelectionService = buildModelSelectionService();
@@ -420,6 +440,14 @@ async function createPermissionsHarness(
     credentialService,
     zcodeTaskService: fakeTaskService as unknown as IZCodeTaskService,
     modelSelectionService,
+    // 场景6b：注入 settingService locale（缺省 undefined ⇒ readMessageLocale 走 zh 默认）。
+    ...(options.locale
+      ? {
+          settingService: {
+            get: async () => ({ locale: options.locale }),
+          } as unknown as ISettingService,
+        }
+      : {}),
     runStartupBackgroundTasks: false,
     providerOverrides: { weixin: fakeWeixinAdapter },
   });
@@ -437,6 +465,9 @@ async function createPermissionsHarness(
     streamEventHandlers: controls.streamEventHandlers,
     setRespondPermissionResult(value: boolean) {
       controls.respondPermissionResult = value;
+    },
+    setListTasksResult(tasks: unknown[]) {
+      controls.listTasksResult = tasks;
     },
     async overwriteBotConfig(patch: Record<string, unknown>) {
       const path = join(configDir, BOTS_CONFIG_FILE);
@@ -617,6 +648,141 @@ test("场景3（红·迁移）：v3 状态文件 yolo draft 加载 ⇒ mode 翻�
     );
   } finally {
     await harness.dispose();
+  }
+});
+
+/** 迁移矩阵（场景3b）共用：yolo 草稿 entry（v2/v3/v4 手写文件同形）。 */
+function yoloDraftStateEntry(botId: string, workspace: string): Record<string, unknown> {
+  return {
+    botId,
+    workspacePath: workspace,
+    mode: "draft",
+    activeTaskId: null,
+    weixinActivatedAt: 1,
+    draftOptions: {
+      provider: ZCODE_AGENT_PROVIDER,
+      mode: "yolo",
+      modelSelection: {
+        providerId: ZCODE_AGENT_PROVIDER,
+        modelId: "glm-test",
+      },
+    },
+    updatedAt: 1,
+  };
+}
+
+/** 读取指定状态文件（场景3b 迁移矩阵断言；文件必须已存在）。 */
+async function readStateFile(configDir: string, name: string): Promise<Record<string, unknown>> {
+  return JSON.parse(await readFile(join(configDir, name), "utf8")) as Record<string, unknown>;
+}
+
+test("场景3b（迁移矩阵 pin，§2.1/§7.3）：v4 版本守卫不翻转用户重选的 yolo、翻转结果幂等重读、v2 legacy 导入 flip、v3 文件名双文件路径", async () => {
+  // (a)-1 幂等重读：手写 v4 文件 mode=build（v3→v4 翻转后的落盘形状）→ 加载 ⇒
+  // 原样通过（version 守卫 passthrough，不重复动作、不回翻）。
+  {
+    const harness = await createPermissionsHarness({
+      stateFile: { name: BOTS_STATE_FILE, version: 4 },
+      stateEntry: (botId, workspace) => ({
+        ...yoloDraftStateEntry(botId, workspace),
+        draftOptions: {
+          provider: ZCODE_AGENT_PROVIDER,
+          mode: "build",
+          modelSelection: { providerId: ZCODE_AGENT_PROVIDER, modelId: "glm-test" },
+        },
+      }),
+    });
+    try {
+      const result = await harness.service.handleProviderCallbackResponse(
+        "weixin",
+        weixinInboundPayload([{ id: "wx-msg-mig3b-idem", text: "/status" }]),
+      );
+      assert.equal(result.ok, true, "前置：v4 文件加载必须成功");
+      const state = await readStateFile(harness.configDir, BOTS_STATE_FILE);
+      assert.equal(state.version, 4, "v4 文件不得被降版本重写");
+      const entry = (state.bots as Record<string, { draftOptions?: { mode?: string } }>)[
+        WEIXIN_BOT_ID
+      ];
+      assert.equal(entry.draftOptions?.mode, "build", "已翻转的 v4 build 幂等重读必须保持 build");
+    } finally {
+      await harness.dispose();
+    }
+  }
+
+  // (a)-2 版本守卫：手写 v4 文件 mode=yolo（解锁后用户经 /mode 重选）→ 加载 ⇒
+  // 不得被再次翻转（迁移只认 version===3；用户显式选择的 yolo 受保护）。
+  {
+    const harness = await createPermissionsHarness({
+      stateFile: { name: BOTS_STATE_FILE, version: 4 },
+      stateEntry: (botId, workspace) => yoloDraftStateEntry(botId, workspace),
+    });
+    try {
+      const result = await harness.service.handleProviderCallbackResponse(
+        "weixin",
+        weixinInboundPayload([{ id: "wx-msg-mig3b-yolo4", text: "/status" }]),
+      );
+      assert.equal(result.ok, true, "前置：v4 yolo 文件加载必须成功");
+      const state = await readStateFile(harness.configDir, BOTS_STATE_FILE);
+      const entry = (state.bots as Record<string, { draftOptions?: { mode?: string } }>)[
+        WEIXIN_BOT_ID
+      ];
+      assert.equal(
+        entry.draftOptions?.mode,
+        "yolo",
+        "v4 中用户重选的 yolo 不得被版本守卫之外的逻辑翻转（spec §2.1 幂等 + 版本守卫即迁移）",
+      );
+    } finally {
+      await harness.dispose();
+    }
+  }
+
+  // (b) v2 legacy 导入：bot-state.v2.json（yolo 草稿）→ 加载 ⇒ 同一 flip 落 v4 build。
+  {
+    const harness = await createPermissionsHarness({
+      stateFile: { name: BOTS_V2_STATE_FILE, version: 2 },
+      stateEntry: (botId, workspace) => yoloDraftStateEntry(botId, workspace),
+    });
+    try {
+      const result = await harness.service.handleProviderCallbackResponse(
+        "weixin",
+        weixinInboundPayload([{ id: "wx-msg-mig3b-v2", text: "/status" }]),
+      );
+      assert.equal(result.ok, true, "前置：v2 legacy 导入必须成功");
+      const state = await readStateFile(harness.configDir, BOTS_STATE_FILE);
+      assert.equal(state.version, 4, "v2 legacy 导入必须落 v4 文件");
+      const entry = (state.bots as Record<string, { draftOptions?: { mode?: string } }>)[
+        WEIXIN_BOT_ID
+      ];
+      assert.equal(
+        entry.draftOptions?.mode,
+        "build",
+        "迟到的 v2 legacy 导入同样应用 yolo→build flip（spec §2.1 不得重新引入 yolo）",
+      );
+    } finally {
+      await harness.dispose();
+    }
+  }
+
+  // (c) 真实双文件路径：bot-state.v3.json 在场 + v4 缺席 → 加载并翻转，v4 文件生成。
+  {
+    const harness = await createPermissionsHarness({
+      stateFile: { name: BOTS_V3_STATE_FILE, version: 3 },
+      stateEntry: (botId, workspace) => yoloDraftStateEntry(botId, workspace),
+    });
+    try {
+      const result = await harness.service.handleProviderCallbackResponse(
+        "weixin",
+        weixinInboundPayload([{ id: "wx-msg-mig3b-v3file", text: "/status" }]),
+      );
+      assert.equal(result.ok, true, "前置：v3 文件名路径加载必须成功");
+      const state = await readStateFile(harness.configDir, BOTS_STATE_FILE);
+      assert.equal(state.version, 4, "v3 文件加载必须生成 v4 文件（v4 缺席时迁移写回）");
+      const entry = (state.bots as Record<string, { draftOptions?: { mode?: string } }>)[
+        WEIXIN_BOT_ID
+      ];
+      assert.equal(entry.draftOptions?.mode, "build", "v3 文件名路径同样应用 yolo→build flip");
+    } finally {
+      await harness.dispose();
+    }
   }
 });
 
@@ -827,6 +993,145 @@ test("场景6（红·/status 模式行）：/status 回复必须包含带非空�
     );
   } finally {
     await harness.dispose();
+  }
+});
+
+// ---- 场景 6b（/status 形态 pin，§5）：active-task 模式行 + 未设置 fallback + en ----
+
+test("场景6b（/status 形态 pin）：active task 模式行、过渡形态优先 draftOptions.mode、草稿未设置 fallback、en 文案", async () => {
+  // 1) active task：listTasks 返回运行中任务 ⇒ 模式行显示其实际模式（build）。
+  {
+    const harness = await createPermissionsHarness({
+      stateEntry: (botId, workspace) =>
+        taskStateEntry(botId, workspace, { activeTaskId: "task-status-active", isWeixin: true }),
+    });
+    try {
+      harness.setListTasksResult([
+        {
+          taskId: "task-status-active",
+          traceId: "trace-status-active",
+          title: "Active task",
+          workspacePath: "/tmp/zcode-status-ws",
+          createdAt: Date.now() - 60_000,
+          updatedAt: Date.now(),
+          mode: "build",
+          status: "running",
+        },
+      ]);
+      const result = await harness.service.handleProviderCallbackResponse(
+        "weixin",
+        weixinInboundPayload([{ id: "wx-msg-status-active", text: "/status" }]),
+      );
+      assert.equal(result.ok, true, "前置：active-task /status 必须成功");
+      const modeLine = (result.replies[0]?.text ?? "")
+        .split("\n")
+        .find((line) => line.includes("模式"));
+      assert.match(
+        modeLine ?? "",
+        /模式[:：]\s*build/u,
+        "active task 的 /status 必须显示模式行且带其实际模式（spec §5）",
+      );
+    } finally {
+      await harness.dispose();
+    }
+  }
+
+  // 2) 过渡形态（activeTaskId 在场 + 草稿 mode、任务索引暂不可见）：优先 draftOptions.mode
+  //    （下一次提交真正使用的值），而非 config select 的 currentValue（[ulw] 评审 R1-8）。
+  {
+    const harness = await createPermissionsHarness({
+      stateEntry: (botId, workspace) => ({
+        botId,
+        workspacePath: workspace,
+        mode: "draft",
+        activeTaskId: "task-status-transitional",
+        weixinActivatedAt: 1,
+        draftOptions: { provider: ZCODE_AGENT_PROVIDER, mode: "plan" },
+        updatedAt: 1,
+      }),
+    });
+    try {
+      const result = await harness.service.handleProviderCallbackResponse(
+        "weixin",
+        weixinInboundPayload([{ id: "wx-msg-status-trans", text: "/status" }]),
+      );
+      assert.equal(result.ok, true, "前置：过渡形态 /status 必须成功");
+      const modeLine = (result.replies[0]?.text ?? "")
+        .split("\n")
+        .find((line) => line.includes("模式"));
+      assert.match(
+        modeLine ?? "",
+        /模式[:：]\s*plan/u,
+        "activeTaskId+草稿过渡形态必须优先显示 draftOptions.mode（plan），不得回落任务侧 config current-value（build）",
+      );
+    } finally {
+      await harness.dispose();
+    }
+  }
+
+  // 3) 未设置 fallback：草稿无 mode（legacy 导入形状）⇒「未设置」。
+  {
+    const harness = await createPermissionsHarness({
+      stateEntry: (botId, workspace) => ({
+        botId,
+        workspacePath: workspace,
+        mode: "draft",
+        activeTaskId: null,
+        weixinActivatedAt: 1,
+        draftOptions: { provider: ZCODE_AGENT_PROVIDER },
+        updatedAt: 1,
+      }),
+    });
+    try {
+      const result = await harness.service.handleProviderCallbackResponse(
+        "weixin",
+        weixinInboundPayload([{ id: "wx-msg-status-unset", text: "/status" }]),
+      );
+      assert.equal(result.ok, true, "前置：无 mode 草稿 /status 必须成功");
+      const modeLine = (result.replies[0]?.text ?? "")
+        .split("\n")
+        .find((line) => line.includes("模式"));
+      assert.match(
+        modeLine ?? "",
+        /模式[:：]\s*未设置/u,
+        "草稿缺 mode 必须显示「未设置」fallback（spec §5，formatStatusModelLabel 同款形态）",
+      );
+    } finally {
+      await harness.dispose();
+    }
+  }
+
+  // 4) en locale：模式行 label 与未设置 fallback 的英文形态（cheap pin）。
+  {
+    const harness = await createPermissionsHarness({
+      locale: "en-US",
+      stateEntry: (botId, workspace) => ({
+        botId,
+        workspacePath: workspace,
+        mode: "draft",
+        activeTaskId: null,
+        weixinActivatedAt: 1,
+        draftOptions: { provider: ZCODE_AGENT_PROVIDER },
+        updatedAt: 1,
+      }),
+    });
+    try {
+      const result = await harness.service.handleProviderCallbackResponse(
+        "weixin",
+        weixinInboundPayload([{ id: "wx-msg-status-en", text: "/status" }]),
+      );
+      assert.equal(result.ok, true, "前置：en /status 必须成功");
+      const modeLine = (result.replies[0]?.text ?? "")
+        .split("\n")
+        .find((line) => line.startsWith("Mode:"));
+      assert.match(
+        modeLine ?? "",
+        /Mode:\s*not set/u,
+        "en locale 模式行必须显示「Mode: not set」fallback（spec §5 zh/en keys）",
+      );
+    } finally {
+      await harness.dispose();
+    }
   }
 });
 
@@ -1153,42 +1458,233 @@ test("场景11（§7.11 边界 guard）：permission deadline 触发不触碰 pe
   });
 });
 
-test("场景15（§7.15）：deadline 前禁用 bot ⇒ note 抑制不发送", async () => {
+test("场景15（§7.15）：deadline 前禁用 bot ⇒ note 抑制不发送（禁用覆写先于 scaled deadline 确定性完成）", async () => {
   await withPermissionTimerScale("1000", async () => {
     const harness = await createPermissionsHarness({
-      currentOptions: { permissionTimeoutMinutes: 1 },
+      // [ulw] 评审 R2 竞态窗口 pin：默认 10 分钟 deadline（缩放后 600ms），禁用覆写
+      //（小文件写）确定性落在 deadline 之前；原 1 分钟（60ms）窗口下覆写可能迟到。
       stateEntry: (botId, workspace) =>
         taskStateEntry(botId, workspace, { activeTaskId: "task-perm-15", isWeixin: true }),
     });
     try {
       await warmupTaskWatcher(harness, "task-perm-15", "wx-msg-perm-15-0");
+      // await 整个事件处理器 ⇒ 提示已送达且策略 timer 已武装（arm 在处理器同步尾部）。
+      const armedAt = Date.now();
       await harness.streamEventHandlers
         .get("task-perm-15")?.(permissionRequestEvent("task-perm-15", "req-perm-15"))
         .catch(() => undefined);
       assert.ok(
-        await waitForCondition(
-          () => harness.sendAttempts.some((text) => text.includes("允许") || text.includes("拒绝")),
-          5000,
-        ),
+        harness.sendAttempts.some((text) => text.includes("允许") || text.includes("拒绝")),
         "前置：权限提示必须已送达（timer 已武装）",
       );
-      // deadline（缩放后 60ms）前覆写 bot 配置禁用——触发时重读配置 ⇒ 抑制。
+      // deadline（缩放后 600ms）前覆写 bot 配置禁用——触发时重读配置 ⇒ 抑制。
       await harness.overwriteBotConfig({ enabled: false });
-      await sleep(500);
+      assert.ok(
+        Date.now() < armedAt + 500,
+        "前置：禁用覆写必须确定性完成于 scaled deadline（600ms）之前",
+      );
+      // 跨过 reminder（480ms）与 deny-note（600ms）两个触发点再断言。
+      await sleep(900);
+      assert.equal(
+        harness.sendAttempts.some((text) => text.includes(PERMISSION_REMINDER_ZH)),
+        false,
+        "bot 禁用后 reminder 必须同样抑制（spec §3c 生命周期表/§7.15）",
+      );
       assert.equal(
         harness.sendAttempts.some((text) => text.includes(PERMISSION_AUTO_DENIED_ZH)),
         false,
         "bot 禁用后到期必须抑制 note（不向已禁用 bot 的频道发送；spec §3c 生命周期表/§7.15）",
       );
       assert.equal(
-        harness.sentMessages.some((message) =>
-          (message.text ?? "").includes(PERMISSION_AUTO_DENIED_ZH),
+        harness.sentMessages.some(
+          (message) =>
+            (message.text ?? "").includes(PERMISSION_AUTO_DENIED_ZH) ||
+            (message.text ?? "").includes(PERMISSION_REMINDER_ZH),
         ),
         false,
         "禁用抑制 = 零投递（含 revival 等任何迟到路径）",
       );
     } finally {
       await harness.dispose();
+    }
+  });
+});
+
+// ---- [ulw] 评审 R1-1（MAJOR）：并发权限幽灵文案——timer 清除不得被空 pending 拦截 ----
+
+test("场景R1-1（并发权限）：A 武装 → B 覆盖 pending → B 应答清空 → A 应答命中空 pending ⇒ A 的 reminder/deny-note 永不补发", async () => {
+  await withPermissionTimerScale("1000", async () => {
+    const harness = await createPermissionsHarness({
+      stateEntry: (botId, workspace) =>
+        taskStateEntry(botId, workspace, { activeTaskId: "task-perm-ghost", isWeixin: true }),
+    });
+    try {
+      await warmupTaskWatcher(harness, "task-perm-ghost", "wx-msg-perm-ghost-0");
+      // 并发权限复现（[ulw] 评审 R1-1）：A 先到（武装 timer，deadline 缩放后 600ms），
+      // B 随后覆盖 pendingPermissionOptions。
+      await harness.streamEventHandlers
+        .get("task-perm-ghost")?.(permissionRequestEvent("task-perm-ghost", "req-ghost-a"))
+        .catch(() => undefined);
+      await harness.streamEventHandlers
+        .get("task-perm-ghost")?.(permissionRequestEvent("task-perm-ghost", "req-ghost-b"))
+        .catch(() => undefined);
+      // B 被应答 ⇒ pending（此时只剩 B 的记录）被过滤清空。
+      await harness.streamEventHandlers
+        .get("task-perm-ghost")?.({
+          type: "permission_response",
+          taskId: "task-perm-ghost",
+          traceId: "trace-perm-w3b",
+          requestId: "req-ghost-b",
+          optionId: "option-deny",
+          response: { decision: "deny" },
+        })
+        .catch(() => undefined);
+      // A 随后被另一端应答 ⇒ permission_response 到达时 pending 已空——今天 helper
+      // early-return 不清 timer，A 的 reminder/deny-note 会补发幽灵文案（红测点）。
+      await harness.streamEventHandlers
+        .get("task-perm-ghost")?.({
+          type: "permission_response",
+          taskId: "task-perm-ghost",
+          traceId: "trace-perm-w3b",
+          requestId: "req-ghost-a",
+          optionId: "option-allow",
+          response: { decision: "allow" },
+        })
+        .catch(() => undefined);
+      // 跨过 A 的原始 scaled deadline（默认 10 分钟 ⇒ 600ms；reminder 480ms）再观察。
+      await sleep(900);
+      assert.equal(
+        harness.sentMessages.filter((message) =>
+          (message.text ?? "").includes(PERMISSION_REMINDER_ZH),
+        ).length,
+        0,
+        "A 已被应答后 reminder 不得补发（幽灵文案；spec §3c「先答后不发」）",
+      );
+      assert.equal(
+        harness.sentMessages.filter((message) =>
+          (message.text ?? "").includes(PERMISSION_AUTO_DENIED_ZH),
+        ).length,
+        0,
+        "A 已被应答后 deny-note 不得补发（timer 清除不得被空 pending early-return 拦截）",
+      );
+      // 终态事件之后同样不得有任何补发（生命周期表「终态：清除 + pending 清空」）。
+      await harness.streamEventHandlers
+        .get("task-perm-ghost")?.({
+          type: "task_complete",
+          taskId: "task-perm-ghost",
+          traceId: "trace-perm-w3b",
+        })
+        .catch(() => undefined);
+      await sleep(200);
+      assert.equal(
+        harness.sentMessages.filter(
+          (message) =>
+            (message.text ?? "").includes(PERMISSION_REMINDER_ZH) ||
+            (message.text ?? "").includes(PERMISSION_AUTO_DENIED_ZH),
+        ).length,
+        0,
+        "终态事件后 reminder/deny-note 均不得补发",
+      );
+    } finally {
+      await harness.dispose();
+    }
+  });
+});
+
+// ---- [ulw] 评审 R1-2：迟到 deny 的超时文案选择（事件驱动，非仅依赖 deny-note timer） ----
+
+test("场景R1-2（迟到 deny 文案）：deadline 后到达的 permission_response(deny) ⇒ 超时文案；deadline 前用户 deny ⇒ 通用已处理文案", async () => {
+  await withPermissionTimerScale("1000", async () => {
+    // 前半：deadline 前的用户 deny——通用文案（既有语义 guard）。
+    const beforeDeadline = await createPermissionsHarness({
+      stateEntry: (botId, workspace) =>
+        taskStateEntry(botId, workspace, { activeTaskId: "task-perm-r12a", isWeixin: true }),
+    });
+    try {
+      await warmupTaskWatcher(beforeDeadline, "task-perm-r12a", "wx-msg-perm-r12a-0");
+      await beforeDeadline.streamEventHandlers
+        .get("task-perm-r12a")?.(permissionRequestEvent("task-perm-r12a", "req-r12a"))
+        .catch(() => undefined);
+      // deadline（缩放后 600ms）远未到：立即驱动用户 deny。
+      await beforeDeadline.streamEventHandlers
+        .get("task-perm-r12a")?.({
+          type: "permission_response",
+          taskId: "task-perm-r12a",
+          traceId: "trace-perm-w3b",
+          requestId: "req-r12a",
+          optionId: "option-deny",
+          response: { decision: "deny" },
+        })
+        .catch(() => undefined);
+      assert.ok(
+        await waitForCondition(
+          () =>
+            beforeDeadline.sentMessages.some((message) =>
+              (message.text ?? "").includes("该权限请求已处理"),
+            ),
+          5000,
+        ),
+        "deadline 前的用户 deny 必须回通用「该权限请求已处理」注记（spec §4.1）",
+      );
+      assert.equal(
+        beforeDeadline.sentMessages.some((message) =>
+          (message.text ?? "").includes(PERMISSION_AUTO_DENIED_ZH),
+        ),
+        false,
+        "deadline 前的 deny 不得误用超时文案",
+      );
+    } finally {
+      await beforeDeadline.dispose();
+    }
+
+    // 后半：deadline 后到达的 deny（CLI 自动拒绝竞态 / 迟到用户 deny）——超时文案。
+    const afterDeadline = await createPermissionsHarness({
+      stateEntry: (botId, workspace) =>
+        taskStateEntry(botId, workspace, { activeTaskId: "task-perm-r12b", isWeixin: true }),
+    });
+    try {
+      await warmupTaskWatcher(afterDeadline, "task-perm-r12b", "wx-msg-perm-r12b-0");
+      await afterDeadline.streamEventHandlers
+        .get("task-perm-r12b")?.(permissionRequestEvent("task-perm-r12b", "req-r12b"))
+        .catch(() => undefined);
+      // await 已保证武装完成（arm 在事件处理器内）⇒ 实际 deadlineAt ≤ handlerDoneAt + 600。
+      const handlerDoneAt = Date.now();
+      // 同步自旋跨过 scaled deadline（默认 10 分钟 ⇒ 600ms）：阻塞事件循环 ⇒ bot 侧
+      // deny-note timer 无法触发、登记仍在，随后直驱 permission_response——处理器在
+      // 清除登记前同步读取武装 deadline ⇒ 必须命中「已过」并选择超时文案（红测点：
+      // 修复前发通用 permissionResolved）。
+      while (Date.now() < handlerDoneAt + 700) {
+        // 纯同步自旋，不得 await（否则事件循环得到轮转、deny-note timer 抢先触发）。
+      }
+      await afterDeadline.streamEventHandlers
+        .get("task-perm-r12b")?.({
+          type: "permission_response",
+          taskId: "task-perm-r12b",
+          traceId: "trace-perm-w3b",
+          requestId: "req-r12b",
+          optionId: "option-deny",
+          response: { decision: "deny" },
+        })
+        .catch(() => undefined);
+      assert.ok(
+        await waitForCondition(
+          () =>
+            afterDeadline.sentMessages.some((message) =>
+              (message.text ?? "").includes(PERMISSION_AUTO_DENIED_ZH),
+            ),
+          5000,
+        ),
+        "deadline 后到达的 deny 必须发「权限超时未应答，已自动拒绝」超时文案（spec §0 拒绝可见/§3c.2 选择规则）",
+      );
+      assert.equal(
+        afterDeadline.sentMessages.some((message) =>
+          (message.text ?? "").includes("该权限请求已处理"),
+        ),
+        false,
+        "deadline 后的 deny 不得再发通用「已处理」文案（超时事实先于用户意图）",
+      );
+    } finally {
+      await afterDeadline.dispose();
     }
   });
 });

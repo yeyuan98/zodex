@@ -540,8 +540,16 @@ export const botCurrentOptionsSchema = z
     sandboxMode: z.string().min(1).optional(),
     approvalPolicy: z.string().min(1).optional(),
     // specs/bot-permissions.md §3a.1：bot 权限无应答 deadline（分钟）；strict schema
-    // 校验 1..1440 整数，写入侧不注入默认（读取时默认见 normalizePermissionTimeoutMinutes）。
-    permissionTimeoutMinutes: z.number().int().min(1).max(1440).optional(),
+    // 校验 [BOT_PERMISSION_TIMEOUT_MIN_MINUTES, BOT_PERMISSION_TIMEOUT_MAX_MINUTES]
+    // 整数（[ulw] 评审 R1-7：复用导出常量，与 normalizePermissionTimeoutMinutes 的
+    // clamp 边界保持单一事实源），写入侧不注入默认（读取时默认见
+    // normalizePermissionTimeoutMinutes）。
+    permissionTimeoutMinutes: z
+      .number()
+      .int()
+      .min(BOT_PERMISSION_TIMEOUT_MIN_MINUTES)
+      .max(BOT_PERMISSION_TIMEOUT_MAX_MINUTES)
+      .optional(),
     // 兼容旧 bot-config.json；CLI provider 现在统一由 ZCode Protocol 侧配置决定。
     cli: z.literal(ZCODE_AGENT_PROVIDER).optional(),
   })

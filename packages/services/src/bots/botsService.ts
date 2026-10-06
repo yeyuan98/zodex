@@ -1370,6 +1370,8 @@ export function createBotsService(
       botId: string;
       requestId: string;
       actor: BotActor;
+      /** 武装时刻的绝对 deadline（Date.now() 域，E2E 缩放已折算）——R1-2 迟到 deny 文案选择用。 */
+      deadlineAt: number;
       reminderTimer?: ReturnType<typeof setTimeout>;
       denyNoteTimer?: ReturnType<typeof setTimeout>;
     }
@@ -1383,6 +1385,8 @@ export function createBotsService(
     {
       bot: BotConfig;
       taskId: string;
+      /** 最后一次 upsert 该卡片的交互 requestId（[ulw] 评审 R1-4 clobber 守卫用）。 */
+      requestId?: string;
       handle: BotTransientInteractionCardHandle;
     }
   >();
@@ -3364,6 +3368,7 @@ export function createBotsService(
     actor: BotActor,
     taskId: string,
     message: BotOutboundMessage,
+    requestId?: string,
   ): Promise<void> {
     const adapter = providers[bot.provider];
     const key = getActorContextKey(actor);
@@ -3372,13 +3377,16 @@ export function createBotsService(
       // 修复原因：交互推进时 POST 新卡再 DELETE 旧卡会显示撤回痕迹。
       // callback token 更新失败后的降级路径也只能 PATCH 原 message_id，保持单卡身份稳定。
       await adapter?.updateTransientInteractionCard?.(existing.bot, existing.handle, message);
+      // [ulw] 评审 R1-4：卡片内容被更新的交互复用时同步刷新归属 requestId，供
+      // permission_response 的 finalize 守卫比对（不得终结展示中较新交互的卡片）。
+      transientInteractionCards.set(key, { ...existing, requestId });
       return;
     }
     const handle = await adapter?.createTransientInteractionCard?.(bot, message);
     if (!handle) {
       return;
     }
-    transientInteractionCards.set(key, { bot, taskId, handle });
+    transientInteractionCards.set(key, { bot, taskId, requestId, handle });
   }
 
   async function finalizeTransientInteractionCard(
@@ -5397,6 +5405,23 @@ export function createBotsService(
     }
   }
 
+  /**
+   * 修复原因（[ulw] 评审 R1-2）：CLI 自动拒绝先于 bot 侧 deny-note timer 触发时
+   * （bot 比 CLI 晚 δ 武装，事件回程更短会赢得竞态），permission_response 清掉 timer
+   * 后用户只看到通用「该权限请求已处理」，丢掉 spec §0「拒绝可见」文案。这里按
+   * botId+requestId 查武装中的绝对 deadline，供 permission_response 处理器在清除
+   * 登记前同步判「deadline 是否已过」并选择超时文案。条目不存在（从未武装或
+   * deny-note 已触发并自清理）⇒ undefined，调用方回落通用文案。
+   */
+  function getArmedPermissionDeadline(botId: string, requestId: string): number | undefined {
+    for (const entry of permissionPolicyTimers.values()) {
+      if (entry.botId === botId && entry.requestId === requestId) {
+        return entry.deadlineAt;
+      }
+    }
+    return undefined;
+  }
+
   /** 策略 timer 触发时的单条出站（§3c 生命周期表「bot 禁用/删除：清除（note 抑制）」：
    * 触发时重读 bot 配置，禁用/删除 ⇒ 抑制消息但仍清理 timer 状态）。 */
   async function fireBotPermissionPolicyNote(params: {
@@ -5467,9 +5492,10 @@ export function createBotsService(
       botId: string;
       requestId: string;
       actor: BotActor;
+      deadlineAt: number;
       reminderTimer?: ReturnType<typeof setTimeout>;
       denyNoteTimer?: ReturnType<typeof setTimeout>;
-    } = { botId: bot.id, requestId, actor };
+    } = { botId: bot.id, requestId, actor, deadlineAt: Date.now() + deadlineMs };
     if (timeoutMinutes > BOT_PERMISSION_REMINDER_MIN_DEADLINE_MINUTES) {
       const reminderDelayMs = Math.max(
         1,
@@ -5521,12 +5547,17 @@ export function createBotsService(
     reason: "permission_response" | "terminal" | "stop" | "text_response",
     requestId?: string,
   ): Promise<boolean> {
+    // 修复原因（[ulw] 评审 R1-1，MAJOR）：timer 清除此前被「pending 非空」early-return 拦截。
+    // 并发权限复现：A 武装 timer → B 的 permission_request 覆盖 pending → B 被应答清空
+    // pending → 之后 A 的 permission_response/终态事件到达时 pending 已空 ⇒ early-return
+    // ⇒ A 的 reminder/deny-note timer 永不清理，deadline 时刻补发与事实不符的幽灵文案。
+    // timer 登记表按 botId+requestId 独立寻址（与 pending 记录生命周期不同步），必须
+    // 无条件先清；writeContext/日志仍保持仅有 pending 时执行。
+    clearBotPermissionPolicyTimers(context.botId, requestId);
     const pending = context.pendingPermissionOptions;
     if (!pending || pending.length === 0) {
       return false;
     }
-    // §3c 生命周期表：权威收口/终态 ⇒ 两个策略 timer 一并清除（先答后不发）。
-    clearBotPermissionPolicyTimers(context.botId, requestId);
     // 修复原因（specs/bot-permissions.md §4.1/§4.2）：pendingPermissionOptions 此前只在下一次
     // permission_request 覆盖或 /new 草稿时清空——外部应答（桌面 UI/手机远控/CLI 自动拒绝）
     // 与终态之后聊天侧记录滞留成 orphan，Telegram 序号按钮/文本命令会继续命中已失效的
@@ -6407,7 +6438,15 @@ export function createBotsService(
         if (permissionReply) {
           try {
             if (shouldUseTransientInteractionCard(bot, user)) {
-              await upsertTransientInteractionCard(bot, actor, event.taskId, permissionReply);
+              // requestId 随卡片记录（[ulw] 评审 R1-4）：permission_response 的 finalize
+              // 守卫按最后 upsert 的 requestId 比对，防止终结展示中较新交互的卡片。
+              await upsertTransientInteractionCard(
+                bot,
+                actor,
+                event.taskId,
+                permissionReply,
+                event.requestId,
+              );
             } else {
               await sendOutbound(bot, permissionReply);
             }
@@ -6464,21 +6503,38 @@ export function createBotsService(
             // 不发——否则 deadline 时刻会补发与事实不符的「超时未应答」文案）。
             return;
           }
+          // specs/bot-permissions.md §3c.1（W3b）：提示已在聊天内可见 ⇒ 在渲染点武装
+          // reminder/deny-note 两个策略 timer（时长与 createTask 传出的 deadline 同源同式）。
+          // 修复原因（[ulw] 评审 R1-6）：permissionReply 未渲染（createSelectionReply 返回
+          // 空）时不得武装——pending 已写入但聊天内没有任何可见提示，deadline 时刻补发
+          // 提醒/超时文案只会误导；该 pending 由后续 permission_request 覆盖或终态收口。
+          armBotPermissionPolicyTimers({
+            bot,
+            actor,
+            taskId: event.taskId,
+            requestId: event.requestId,
+          });
         }
-        // specs/bot-permissions.md §3c.1（W3b）：提示已在聊天内可见 ⇒ 在渲染点武装
-        // reminder/deny-note 两个策略 timer（时长与 createTask 传出的 deadline 同源同式）。
-        armBotPermissionPolicyTimers({
-          bot,
-          actor,
-          taskId: event.taskId,
-          requestId: event.requestId,
-        });
         return;
       }
       if (event.type === "permission_response") {
         // specs/bot-permissions.md §4.1：CLI 登记表自动拒绝（W3a deadline）或任意客户端
         // （桌面 UI/手机远控）应答以 permission_response 事件上行（镜像 elicitation_response）
         // ——权威已收口，聊天侧 pending 记录与提示 UX 必须一并退休。
+        // 修复原因（[ulw] 评审 R1-2）：CLI 自动拒绝的 permission_response 常先于 bot 侧
+        // deny-note timer 触发（bot 比 CLI 晚 δ 武装），清除 timer 后用户只看到通用
+        // 「该权限请求已处理」而非 spec §0「拒绝可见」文案。规则（§3c.2/§4.1 事件驱动的
+        // 超时文案选择）：decision=deny 且登记表内该 requestId 的武装 deadline 已过 ⇒
+        // 发 permissionAutoDenied 超时文案；deadline 前的用户 deny 仍发通用文案。必须在
+        // clearPendingPermissionOptions（会清 timer 登记表）之前同步读取，否则查不到。
+        const armedDeadline = getArmedPermissionDeadline(context.botId, event.requestId);
+        const useAutoDeniedNote =
+          event.response.decision === "deny" &&
+          armedDeadline !== undefined &&
+          Date.now() >= armedDeadline;
+        const resolvedNoteId: BotMessageId = useAutoDeniedNote
+          ? "permissionAutoDenied"
+          : "permissionResolved";
         const hadPendingPrompt = await clearPendingPermissionOptions(
           context,
           "permission_response",
@@ -6490,18 +6546,22 @@ export function createBotsService(
         // 退休聊天侧提示 UX：transient interaction card 存在于该 actor+task 时补上此前缺失的
         // 第三处 finalize（既有 helper 自行 warn 不上抛）；非瞬态提示（如微信文本）时发一条
         // 本地化注记——best-effort、非保留（spec §3c.2），失败仅 warn 不上抛。
+        // 修复原因（[ulw] 评审 R1-4）：finalize 守卫此前只比对 taskId——并发权限下 B 的
+        // 提示已复用同一张 per-actor 卡片时，A 的 permission_response 会把展示 B 选项的
+        // 卡片终结成「已处理」，覆盖更新的交互。这里加比对最后 upsert 的 requestId，
+        // 仅当卡片仍属于本 requestId 时才 finalize；不匹配则回落文本注记路径。
         const transientCard = transientInteractionCards.get(getActorContextKey(actor));
-        if (transientCard?.taskId === event.taskId) {
+        if (transientCard?.taskId === event.taskId && transientCard.requestId === event.requestId) {
           await finalizeTransientInteractionCard(
             actor,
-            createOutbound(actor, msg(await readMessageLocale(), "permissionResolved")),
+            createOutbound(actor, msg(await readMessageLocale(), resolvedNoteId)),
           );
           return;
         }
         if (hadPendingPrompt) {
           await sendOutbound(
             bot,
-            createOutbound(actor, msg(await readMessageLocale(), "permissionResolved")),
+            createOutbound(actor, msg(await readMessageLocale(), resolvedNoteId)),
           ).catch((error: unknown) => {
             botsLogger.warn(
               undefined,
@@ -7303,10 +7363,13 @@ export function createBotsService(
     // specs/bot-permissions.md §5（3.15.0 Track B）：/status 新增模式行——active task
     // 显示其实际模式（readCurrentActiveTaskMode）；草稿显示 draftOptions.mode；缺失
     // 显示「未设置/not set」（formatStatusModelLabel 的 statusModelUnset 同款 fallback）。
+    // [ulw] 评审 R1-8：activeTaskId+草稿的过渡形态（任务索引尚未可见时）优先
+    // draftOptions.mode——该形态下 config select 的 currentValue 取自任务侧 RPC 的
+    // 兜底快照，草稿自己的 mode 才是下一次提交会真正使用的值。
     const statusMode = (
       statusTask
         ? readCurrentActiveTaskMode(statusTask, activeTaskConfigOptions)
-        : (readConfigSelectCurrentValue(activeTaskConfigOptions, "mode") ?? draftOptions?.mode)
+        : (draftOptions?.mode ?? readConfigSelectCurrentValue(activeTaskConfigOptions, "mode"))
     )?.trim();
     const statusModeValue = statusMode || msg(locale, "statusModeUnset");
     return (
@@ -8992,8 +9055,12 @@ export function createBotsService(
             );
             if (!submitted) {
               // specs/bot-permissions.md §4.3：序号按钮迟到点击（CLI 自动拒绝/他端已应答）——
-              // respondPermission 返回 false 即已收口；反馈「已被处理/已自动拒绝」。本路径的
-              // first-wins 吞并语义（handledAt 标记、不清空 pending）不变，重复点击幂等。
+              // respondPermission 返回 false 即已收口；反馈「已被处理/已自动拒绝」。成功
+              // 提交路径的 first-wins 吞并语义（handledAt 标记、不清空 pending）不变。
+              // 修复原因（[ulw] 评审 R1-5）：文本 /approve //deny 迟到路径随反馈清扫该
+              // requestId 的 pending orphan，序号按钮路径此前漏扫——迟到的序号点击同样
+              // 已无应答权威，滞留的 pending 会让后续点击继续命中失效 requestId。
+              await clearPendingPermissionOptions(auth.context, "text_response", option.requestId);
               return [createOutbound(message.actor, msg(auth.locale, "permissionLateHandled"))];
             }
             await writeContext({

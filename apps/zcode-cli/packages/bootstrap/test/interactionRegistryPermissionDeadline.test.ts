@@ -174,3 +174,75 @@ test("D（guard·绿）：deadline 前真实 resolve() 先到 ⇒ 注销登记�
     unregister();
   }
 });
+
+// ---- [ulw] 评审 R2 pin：snooze 拒绝 + 未到期恢复不重置时钟（spec §7.4/§7.5 前半） ----
+
+test("E（guard·snooze 拒绝）：permission 条目 snoozeAutoResolution 返回 false（不可休眠，spec §3b.1/§7.4）", async () => {
+  const registry = new V4InteractionRegistry();
+  const unregister = registry.register("perm-snooze", () => {}, {
+    sessionId: "sess-perm-e",
+    kind: "permission",
+    // deadline 足够长：本场景只验证 snooze 拒绝，不触发到期。
+    autoResolutionMs: 5_000,
+  });
+  try {
+    assert.equal(
+      await registry.snoozeAutoResolution("perm-snooze"),
+      false,
+      "permission kind 的 snoozeAutoResolution 必须返回 false（snooze 只属于 askUserQuestion；自动拒绝语义不受用户暂停影响）",
+    );
+    assert.equal(registry.has("perm-snooze"), true, "snooze 拒绝不得注销登记");
+  } finally {
+    unregister();
+  }
+});
+
+test("F（恢复·未到期）：initialAutoResolution 未到期 ⇒ 同一 deadlineAt 恢复、不提前 resolve、原时刻 deny-shaped 到期", async () => {
+  const registry = new V4InteractionRegistry();
+  const answers: V4InteractionAnswer[] = [];
+  const states: V4InteractionAutoResolution[] = [];
+  const now = Date.now();
+  const originalDeadlineAt = now + 1000;
+  const unregister = registry.register(
+    "perm-restore",
+    (answer) => {
+      answers.push(answer);
+    },
+    {
+      sessionId: "sess-perm-f",
+      kind: "permission",
+      // 重注册携带新的 autoResolutionMs：恢复路径必须忽略该值（不重置时钟）。
+      autoResolutionMs: 5_000,
+      initialAutoResolution: {
+        state: "visibleCountdown",
+        startedAt: now - 500,
+        visibleAt: now - 500,
+        deadlineAt: originalDeadlineAt,
+      },
+      onAutoResolutionUpdated: (state) => {
+        states.push(state);
+      },
+    },
+  );
+  try {
+    assert.ok(states.length > 0, "恢复注册必须立即发布 autoResolution 状态");
+    const firstState = states[0];
+    assert.ok(
+      firstState !== undefined &&
+        firstState.state === "visibleCountdown" &&
+        firstState.deadlineAt === originalDeadlineAt,
+      "未到期恢复必须保持原 deadlineAt（spec §3b.4/§7.5：不重置时钟）",
+    );
+    // 剩余 ~1s：等 300ms 不得提前 resolve。
+    await sleep(300);
+    assert.equal(answers.length, 0, "未到期恢复不得提前 resolve（重启不得吃掉剩余等待时间）");
+    assert.ok(
+      await waitFor(() => answers.length > 0, 2_000),
+      "必须在 ORIGINAL deadline（~1s，而非重注册 +5s）到期 resolve——若被 autoResolutionMs 重置，2s 窗口内不会触发",
+    );
+    assert.equal(answers[0]?.optionId, undefined, "到期应答必须 deny-shaped：无 optionId");
+    assert.equal(answers[0]?.action, undefined, "到期应答必须 deny-shaped：无 action");
+  } finally {
+    unregister();
+  }
+});
