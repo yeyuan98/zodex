@@ -75,10 +75,10 @@ const messages = {
     draftModelInvalid:
       "当前草稿保存的模型选择已不可用（模型或供应商可能已变化）。请发送 **/模型** 重新选择后重发；原选择已保留。",
     statusModelUnset: "未设置",
+    statusModeUnset: "未设置",
     modeSelectTitle: "当前模式 {mode}\n选择模式",
     modeMissing: "未找到模式。",
     modeChanged: "当前任务模式已切换为 {mode}。",
-    modeLocked: "机器人已锁定 **yolo** 运行模式，无法切换。",
     thoughtLevelSelectTitle: "当前思考级别 {level}\n选择思考级别",
     thoughtLevelMissing: "当前模型不支持思考级别。",
     thoughtLevelChanged: "当前任务思考级别已切换为 {level}。",
@@ -91,6 +91,15 @@ const messages = {
     permissionHandled: "权限请求已处理。",
     permissionDenied: "已拒绝权限请求。",
     permissionSubmitted: "已提交权限响应。",
+    // 3.15.0 Track B（specs/bot-permissions.md §4.1/§4.3）：permission_response 退休注记与
+    // 迟到点击（CLI 自动拒绝/他端已应答）反馈——均为 best-effort、非保留。
+    permissionResolved: "该权限请求已处理。",
+    permissionLateHandled: "该权限请求已被处理（或已自动拒绝）。",
+    // 3.15.0 Track B（specs/bot-permissions.md §3c.1）：bot 侧权限策略 timer 文案——
+    // reminder（deadline − 2 分钟）与 deny-note（deadline 时刻）。均为 best-effort、
+    // 非保留；deny 权威唯一在 CLI 登记表，deny-note 只负责聊天可见性。
+    permissionDeadlineReminder: "权限请求将在 {minutes} 分钟后自动拒绝",
+    permissionAutoDenied: "权限超时未应答，已自动拒绝",
     elicitationExpired: "问答请求已过期，请在 zcode UI 中处理。",
     elicitationHandled: "问答请求已处理。",
     elicitationSubmitted: "已提交问答响应。",
@@ -109,6 +118,7 @@ const messages = {
     elicitationTextHint: "也可以直接回复文本作为自定义答案。",
     statusWorkspace: "工作区",
     statusModel: "模型",
+    statusMode: "模式",
     statusTask: "任务",
     statusState: "状态",
     statusWorked: "已工作",
@@ -229,10 +239,10 @@ const messages = {
     draftModelInvalid:
       "The model selection saved in this draft is no longer available (the model or provider may have changed). Pick one again with **/model** and resend; your saved selection is preserved.",
     statusModelUnset: "not set",
+    statusModeUnset: "not set",
     modeSelectTitle: "Current mode {mode}\nSelect mode",
     modeMissing: "Mode option not found.",
     modeChanged: "Current task mode changed to {mode}.",
-    modeLocked: "This bot is locked to **yolo** run mode and cannot be switched.",
     thoughtLevelSelectTitle: "Current thought level {level}\nSelect thought level",
     thoughtLevelMissing: "The current model does not support thought level.",
     thoughtLevelChanged: "Current task thought level changed to {level}.",
@@ -245,6 +255,15 @@ const messages = {
     permissionHandled: "Permission request has already been handled.",
     permissionDenied: "Permission request denied.",
     permissionSubmitted: "Permission response submitted.",
+    // 3.15.0 Track B (specs/bot-permissions.md §4.1/§4.3): permission_response retirement note
+    // and late-click feedback (CLI auto-deny / answered elsewhere) — both best-effort, non-retained.
+    permissionResolved: "This permission request has been resolved.",
+    permissionLateHandled: "This permission request was already handled (or auto-denied).",
+    // 3.15.0 Track B (specs/bot-permissions.md §3c.1): bot-side permission policy timer
+    // texts — reminder (deadline − 2 min) and deny-note (at deadline). Both best-effort,
+    // non-retained; deny authority lives solely in the CLI registry.
+    permissionDeadlineReminder: "This permission request will be auto-denied in {minutes} minutes.",
+    permissionAutoDenied: "Permission timed out without a response and was auto-denied.",
     elicitationExpired: "This question request has expired. Please handle it in the zcode UI.",
     elicitationHandled: "Question request has already been handled.",
     elicitationSubmitted: "Question response submitted.",
@@ -264,6 +283,7 @@ const messages = {
     elicitationTextHint: "You can also reply with text as a custom answer.",
     statusWorkspace: "Workspace",
     statusModel: "Model",
+    statusMode: "Mode",
     statusTask: "Task",
     statusState: "State",
     statusWorked: "Worked",

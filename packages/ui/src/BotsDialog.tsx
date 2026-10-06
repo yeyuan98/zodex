@@ -42,6 +42,7 @@ import {
 import { cn } from "@/components/lib/utils.js";
 import {
   BotDangerCard,
+  BotPermissionTimeoutCard,
   BotReplyGranularityCard,
   BotSummaryCard,
 } from "@/BotsDialog/BotSummaryCard.js";
@@ -1238,6 +1239,9 @@ export function BotsDialog({
 
                 <SettingsGroupCard>
                   <BotReplyGranularityCard bot={selectedBot} onPatchBot={patchSelectedBot} />
+
+                  {/* specs/bot-permissions.md §3a.1/D2（3.15.0 Track B）：权限超时（分钟）数字字段。 */}
+                  <BotPermissionTimeoutCard bot={selectedBot} onPatchBot={patchSelectedBot} />
 
                   {/*
                     暂不暴露命令权限编辑入口，避免用户在 bot 可用前把关键命令关掉。

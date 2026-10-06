@@ -1,7 +1,9 @@
-import { useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Clock3, Trash2 } from "lucide-react";
 import type { BotConfig, BotReplyGranularity, BotServiceStatus } from "@zcode/shared";
+import { normalizePermissionTimeoutMinutes } from "@zcode/shared";
 import { Button } from "@/components/ui/button.js";
+import { Input } from "@/components/ui/input.js";
 import {
   Select,
   SelectContent,
@@ -205,6 +207,76 @@ export function BotReplyGranularityCard({
             ))}
           </SelectContent>
         </Select>
+      }
+    />
+  );
+}
+
+export function BotPermissionTimeoutCard({
+  bot,
+  onPatchBot,
+}: {
+  bot: BotConfig;
+  onPatchBot: (patch: Partial<BotConfig>) => void;
+}) {
+  const { intl } = useZCodeIntl();
+  const storedValue = bot.currentOptions.permissionTimeoutMinutes;
+  const [draft, setDraft] = useState<string>(() =>
+    storedValue !== undefined ? String(storedValue) : "",
+  );
+
+  // specs/bot-permissions.md §3a.1/D2（3.15.0 Track B）：保存成功回填或切换 Bot 时，
+  // 草稿输入框跟随持久化值重置（空 = 读取时默认 10，不落盘写默认——W2 先例）。
+  useEffect(() => {
+    setDraft(storedValue !== undefined ? String(storedValue) : "");
+  }, [bot.id, storedValue]);
+
+  // 提交时经 shared 读取时归一（"7" ⇒ 7、越界 clamp [1,1440]、非法 ⇒ 10）；空值 = 恢复默认。
+  const commitDraft = () => {
+    const trimmed = draft.trim();
+    if (trimmed === "") {
+      if (storedValue === undefined) return;
+      onPatchBot({
+        currentOptions: { ...bot.currentOptions, permissionTimeoutMinutes: undefined },
+      });
+      return;
+    }
+    const next = normalizePermissionTimeoutMinutes(trimmed);
+    setDraft(String(next));
+    if (storedValue === next) return;
+    onPatchBot({ currentOptions: { ...bot.currentOptions, permissionTimeoutMinutes: next } });
+  };
+
+  return (
+    <SettingsRow
+      label={intl.formatMessage({ id: "bots.permissionTimeout" })}
+      description={intl.formatMessage({ id: "bots.permissionTimeout.description" })}
+      control={
+        <Input
+          type="number"
+          min={1}
+          max={1440}
+          step={1}
+          inputMode="numeric"
+          htmlSize={4}
+          value={draft}
+          placeholder="10"
+          aria-label={intl.formatMessage({ id: "bots.permissionTimeout" })}
+          className="w-24 text-right"
+          onBlur={commitDraft}
+          onChange={(event) => {
+            // number 输入允许空值和科学计数法；保留空值便于编辑，只接收非负整数文本。
+            const value = event.target.value;
+            if (value === "" || /^\d+$/.test(value)) {
+              setDraft(value);
+            }
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.currentTarget.blur();
+            }
+          }}
+        />
       }
     />
   );

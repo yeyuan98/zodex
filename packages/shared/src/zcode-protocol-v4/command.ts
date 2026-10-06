@@ -63,6 +63,10 @@ export const commandPayloadSchemas = {
     offPeakToolEnabled: z.boolean().optional(),
     // 动态工作流灰度 flag，与 offPeakToolEnabled 同一模式。
     dynamicWorkflowEnabled: z.boolean().optional(),
+    // bot 权限无应答自动拒绝 deadline（毫秒，分钟×60000），与 offPeakToolEnabled 同一
+    // additive 模式（specs/bot-permissions.md §3a.2）——非 strict z.object 下旧 CLI 静默
+    // 丢弃该键 = 优雅降级为「无 deadline，提示照旧等待」；非 bot 任务不携带。
+    permissionAutoDenyMs: z.number().int().positive().optional(),
   }),
   // 父会话由 envelope.sessionId 指定；服务端从父 record 派生完整运行配置。
   // firstInput 存在时，child 创建完成后立即启动首条普通输入；缺省则保持空副屏。

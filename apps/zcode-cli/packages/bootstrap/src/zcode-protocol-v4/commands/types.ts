@@ -75,6 +75,11 @@ export interface V4SessionRecordView {
   /** 恢复失败告警：存在时拒绝新 turn（历史损坏不能静默续写）。 */
   restoreWarning?: { message: string; type: string };
   taskType?: SessionTaskType;
+  /**
+   * bot 权限无应答 deadline（specs/bot-permissions.md §3a.3）：v4 createSession
+   * handler 建档后写入；旧 record 结构兼容，窄视图透传给命令层。
+   */
+  permissionAutoDenyMs?: number;
 }
 
 export interface V4CommandCoreHost {

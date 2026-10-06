@@ -18,8 +18,10 @@ import type { IDisposable } from "@zcode/rpc";
 import { completeNewModelSelection } from "@zcode/provider";
 import {
   ALL_BOT_WORKSPACES,
+  BOT_PERMISSION_TIMER_SCALE_ENV,
   generateTraceId,
   normalizeAgentProviderToZCodeAgent,
+  normalizePermissionTimeoutMinutes,
   ZCODE_AGENT_PROVIDER,
   BOT_TASK_BROADCAST_CHANNEL,
   BOT_TASK_STREAM_BROADCAST_CHANNEL,
@@ -778,8 +780,6 @@ function delay(ms: number): Promise<void> {
 }
 
 const DEFAULT_BOT_ZCODE_PROVIDER: ZCodeProvider = ZCODE_AGENT_PROVIDER;
-// Bot 模式硬锁 yolo：所有 bot task 一律免交互权限，且禁止通过 /mode 切换运行模式。
-const BOT_FORCED_MODE = "yolo";
 const BOT_TYPING_INTERVAL_MS = 4_000;
 const BOT_TASK_META_RETRY_DELAYS_MS = [80, 160, 320] as const;
 const BOT_WORKSPACE_REFS_CACHE_TTL_MS = 5_000;
@@ -808,6 +808,32 @@ const BOT_REPLY_FLUSH_RETRY_BACKOFF_MS = 1_000;
 // M1（specs/bot-message-delivery.md 3.14.5-alpha.4 Retention buffer）：per-peer 保留缓冲的
 // 字节 cap（utf8 字节口径——回复缓冲是 UTF-16 字符，必须换算），尾部保留 + 头部截断标记。
 const BOT_RETAINED_BUFFER_MAX_BYTES = 64 * 1024;
+// specs/bot-permissions.md §3c.1（3.15.0 Track B）：bot 侧权限策略 timer 常量——reminder 在
+// deadline − 2 分钟发一次；deadline ≤ 5 分钟时整体不发 reminder（阈值分钟数含）。
+const BOT_PERMISSION_REMINDER_OFFSET_MINUTES = 2;
+const BOT_PERMISSION_REMINDER_MIN_DEADLINE_MINUTES = 5;
+const BOT_PERMISSION_REMINDER_OFFSET_MS = BOT_PERMISSION_REMINDER_OFFSET_MINUTES * 60_000;
+
+/**
+ * specs/bot-permissions.md §3c（3.15.0 Track B）：bot 侧权限策略 timer 的 E2E 时钟缩放
+ * （先例 = CLI 登记表 resolveV4InteractionRegistryOptionsFromEnv）：仅 ZCODE_ENV=test
+ * 且显式设置 BOT_PERMISSION_TIMER_SCALE_ENV 时生效，值域 1..1000（越界 throw），时长一律
+ * 除以该系数。生产/未设置 ⇒ 系数 1（行为零变化）；本仓不引入其他测试 env。
+ */
+function resolveBotPermissionTimerScale(env: NodeJS.ProcessEnv): number {
+  if (env.ZCODE_ENV !== "test") {
+    return 1;
+  }
+  const rawScale = env[BOT_PERMISSION_TIMER_SCALE_ENV]?.trim();
+  if (!rawScale) {
+    return 1;
+  }
+  const scale = Number(rawScale);
+  if (!Number.isFinite(scale) || scale < 1 || scale > 1_000) {
+    throw new Error(`${BOT_PERMISSION_TIMER_SCALE_ENV} must be between 1 and 1000`);
+  }
+  return scale;
+}
 
 /** M1 发送失败两分类（specs/bot-message-delivery.md F2.3 修订）。 */
 type BotSendFailureClass = "channel-dead" | "content-poison";
@@ -1333,12 +1359,34 @@ export function createBotsService(
     string,
     { dispose(reason: BotTaskWatcherDisposeReason): Promise<void> }
   >();
+  // specs/bot-permissions.md §3c.1（3.15.0 Track B）：bot 侧权限策略 timer 登记表——键
+  // `${botId}::${peerKey}::${requestId}`（spec 寻址 botId+peerKey+requestId）。本 spec 显式
+  // 声明的「无新 timer」交付管线不变量的受控例外：仅 reminder/deny-note 两个策略 timer，
+  // 非 flush/retention 机械。deny 权威唯一在 CLI 登记表（W3a）；本表只负责聊天可见性。
+  // 服务实例内存态（重启不复活——§3d：未到期条目不重设，reminder 丢失接受）。
+  const permissionPolicyTimers = new Map<
+    string,
+    {
+      botId: string;
+      requestId: string;
+      actor: BotActor;
+      /** 武装时刻的绝对 deadline（Date.now() 域，E2E 缩放已折算）——R1-2 迟到 deny 文案选择用。 */
+      deadlineAt: number;
+      reminderTimer?: ReturnType<typeof setTimeout>;
+      denyNoteTimer?: ReturnType<typeof setTimeout>;
+    }
+  >();
+  // E2E 时钟缩放在服务创建时一次解析（CLI 登记表先例：构造期固定，测试在创建 harness
+  // 前设置 env）；生产恒为 1。
+  const permissionTimerScale = resolveBotPermissionTimerScale(process.env);
   const streamingCardRequestControllers = new Set<AbortController>();
   const transientInteractionCards = new Map<
     string,
     {
       bot: BotConfig;
       taskId: string;
+      /** 最后一次 upsert 该卡片的交互 requestId（[ulw] 评审 R1-4 clobber 守卫用）。 */
+      requestId?: string;
       handle: BotTransientInteractionCardHandle;
     }
   >();
@@ -1637,7 +1685,12 @@ export function createBotsService(
       workspaceId: workspace.id,
       mode: "draft",
       activeTaskId: null,
-      draftOptions: await buildInitializedDraftOptions(workspace),
+      // specs/bot-permissions.md §1.2：首建 context 的草稿模式读取 bot 配置（默认 build）。
+      draftOptions: await buildInitializedDraftOptions({
+        botId: bot.id,
+        workspacePath: workspace.workspacePath,
+        workspaceIdentity: workspace.workspaceIdentity,
+      }),
       // F4：从仅游标 entry 升级时带回外部队列确认点，避免首次 context 落盘又丢一批游标。
       ...pickPersistedBotCursors(existing),
       updatedAt: Date.now(),
@@ -1686,6 +1739,9 @@ export function createBotsService(
       pendingPermissionOptions: undefined,
       pendingElicitation: undefined,
     };
+    // specs/bot-permissions.md §3c（W3b）：pending 随 /new 清空（§4.2 既有先例）时，
+    // 策略 timer 必须一并清除——否则 deadline 会对已废弃的 pending 补发误导性文案。
+    clearBotPermissionPolicyTimers(context.botId);
     clearPendingSelectionsForBot(context.botId);
     await writeContext(draftContext);
     return draftContext;
@@ -2003,9 +2059,9 @@ export function createBotsService(
       sizeBytes,
       localPath,
     };
-    // §5.9（specs Alpha 0 §9 amendment，3.14.5 Alpha 7）：Bot 会话今天仍强制 yolo
-    //（BOT_FORCED_MODE 三处生效，权限提示结构性缺席），出站防泄露边界 = workspace-only
-    // 路径策略 + 本审计日志 + 5MB 上限；3.15.0 Track B 解除 force-yolo 后本句须再修订。
+    // §5.9（specs Alpha 0 §9 amendment，3.14.5 Alpha 7；3.15.0 Track B 解锁后修订）：
+    // bot 会话已不再强制 yolo（specs/bot-permissions.md §1），出站防泄露边界与权限
+    // 提示是否出现无关——保持 workspace-only 路径策略 + 本审计日志 + 5MB 上限不变。
     // §5.8：file= 仅当与 path= 取值不同（子目录 basename ≠ 相对路径）才输出。
     botsLogger.info(
       undefined,
@@ -3036,7 +3092,7 @@ export function createBotsService(
   }
 
   async function buildInitializedDraftOptions(
-    context: Pick<BotContextState, "workspacePath" | "workspaceIdentity">,
+    context: Pick<BotContextState, "botId" | "workspacePath" | "workspaceIdentity">,
     provider?: ZCodeProvider,
   ): Promise<BotDraftOptions> {
     const requestedProvider = normalizeAgentProviderToZCodeAgent(
@@ -3048,9 +3104,15 @@ export function createBotsService(
       return { provider: requestedProvider };
     }
     const resolvedProvider = requestedProvider;
+    // specs/bot-permissions.md §1.2/§2.2（3.15.0 Track B 解锁）：草稿模式改读 bot 配置
+    // currentOptions.mode，缺省读取时视为 build，不落盘回写。bot 配置经既有
+    // repo.readConfig() 单一配置读取路径按 botId 解析（writeWeixinGetUpdatesBuf 的
+    // findBot 同款先例），仅在草稿首次初始化时读取一次，不新增第二条配置存储。
+    const configuredBot = findBot(await repo.readConfig(), context.botId);
+    const configuredMode = configuredBot?.currentOptions.mode?.trim() || "build";
     return {
       provider: resolvedProvider,
-      mode: BOT_FORCED_MODE,
+      mode: configuredMode,
     };
   }
 
@@ -3063,8 +3125,14 @@ export function createBotsService(
       () => [],
     );
     const resolvedProvider = normalizeAgentProviderToZCodeAgent(activeTask.provider);
-    // Bot 硬锁 yolo：继承当前 task 时也强制 yolo，不沿用原 task 的 mode。
-    const forcedMode = resolveSupportedDraftMode(configOptions, BOT_FORCED_MODE, resolvedProvider);
+    // specs/bot-permissions.md §1.2（解锁）：/new 继承草稿改为沿用 active task 的实际
+    // 模式（readCurrentActiveTaskMode），不再强制 yolo；provider 不支持时经
+    // resolveSupportedDraftMode 省略 mode（保持该 provider 自身默认）。
+    const inheritedMode = resolveSupportedDraftMode(
+      configOptions,
+      readCurrentActiveTaskMode(activeTask, configOptions),
+      resolvedProvider,
+    );
     const currentModel = readCurrentActiveTaskModel(activeTask, configOptions);
     const parsedSelection = currentModel ? parseBotModelOptionValue(currentModel) : undefined;
     const reasoningLevel = readConfigSelectCurrentValue(configOptions, "thoughtLevel");
@@ -3077,7 +3145,7 @@ export function createBotsService(
     return {
       provider: resolvedProvider,
       ...(modelSelection ? { modelSelection } : {}),
-      ...(forcedMode ? { mode: forcedMode } : {}),
+      ...(inheritedMode ? { mode: inheritedMode } : {}),
     };
   }
 
@@ -3166,24 +3234,26 @@ export function createBotsService(
     const modeOption = configOptions.find(
       (option) => option.category === "mode" && option.type === "select",
     );
-    // Bot 硬锁 yolo：无论草稿/继承的 mode 是什么，建 task 时一律下发 yolo。
-    // 这是 mode 真正进入 agent session 的唯一咽喉，保证任何 bot task 都免交互权限。
-    const forcedDraftMode = resolveSupportedDraftMode(
+    // specs/bot-permissions.md §1.2（3.15.0 Track B 解锁）：建 task 时下发草稿自身的
+    // mode（bot 配置模式 / /mode 选择 / 任务继承；未初始化草稿读取时默认 build），
+    // 不再强制 yolo。setMode 仍是 mode 进入 agent session 的唯一建任务咽喉。
+    const draftMode = draftOptions.mode ?? "build";
+    const resolvedDraftMode = resolveSupportedDraftMode(
       configOptions,
-      BOT_FORCED_MODE,
+      draftMode,
       draftOptions.provider,
     );
-    if (modeOption?.id && forcedDraftMode) {
+    if (modeOption?.id && resolvedDraftMode) {
       const zcodeTaskService = await resolveZCodeTaskServiceForContext(context);
       await zcodeTaskService.setMode({
         taskId,
-        mode: forcedDraftMode as ZCodeTaskMode,
+        mode: resolvedDraftMode as ZCodeTaskMode,
       });
     } else if (modeOption?.id) {
-      // provider 不支持 yolo（非 ZCode Agent）：保持其自身默认模式，避免首条消息回调失败。
+      // provider 不支持该模式（非 ZCode Agent）：保持其自身默认模式，避免首条消息回调失败。
       botsLogger.debug(
         traceId,
-        `skip forced yolo mode unsupported provider=${draftOptions.provider}`,
+        `skip draft mode unsupported provider=${draftOptions.provider} mode=${draftMode}`,
       );
     }
   }
@@ -3298,6 +3368,7 @@ export function createBotsService(
     actor: BotActor,
     taskId: string,
     message: BotOutboundMessage,
+    requestId?: string,
   ): Promise<void> {
     const adapter = providers[bot.provider];
     const key = getActorContextKey(actor);
@@ -3306,13 +3377,16 @@ export function createBotsService(
       // 修复原因：交互推进时 POST 新卡再 DELETE 旧卡会显示撤回痕迹。
       // callback token 更新失败后的降级路径也只能 PATCH 原 message_id，保持单卡身份稳定。
       await adapter?.updateTransientInteractionCard?.(existing.bot, existing.handle, message);
+      // [ulw] 评审 R1-4：卡片内容被更新的交互复用时同步刷新归属 requestId，供
+      // permission_response 的 finalize 守卫比对（不得终结展示中较新交互的卡片）。
+      transientInteractionCards.set(key, { ...existing, requestId });
       return;
     }
     const handle = await adapter?.createTransientInteractionCard?.(bot, message);
     if (!handle) {
       return;
     }
-    transientInteractionCards.set(key, { bot, taskId, handle });
+    transientInteractionCards.set(key, { bot, taskId, requestId, handle });
   }
 
   async function finalizeTransientInteractionCard(
@@ -5297,6 +5371,209 @@ export function createBotsService(
     await writeContext({ ...context, pendingElicitation: undefined });
   }
 
+  // specs/bot-permissions.md §3c.1（3.15.0 Track B W3b）：bot 侧权限策略 timer——
+  // reminder（deadline − 2 分钟，一次）与 deny-note（deadline 时刻）。与 CLI 登记表倒计时
+  // 不构成双权威：deny 权威唯一在登记表（W3a）；本 timer 只负责聊天可见性，绝不在此调用
+  // respondPermission。两条消息均 best-effort、非保留（§3c.2）：sendOutbound 不带
+  // retainOnChannelDead，失败仅 warn 不上抛、不进 channel-dead 保留缓冲。
+  function permissionPolicyTimerKey(botId: string, actor: BotActor, requestId: string): string {
+    // peerKey 派生与 retainedBufferKey 一致：chatId 优先。
+    const peerKey = actor.chatId?.trim() || actor.providerUserId.trim();
+    return [botId, peerKey, requestId].join("::");
+  }
+
+  function clearBotPermissionPolicyTimer(key: string): void {
+    const entry = permissionPolicyTimers.get(key);
+    if (!entry) {
+      return;
+    }
+    if (entry.reminderTimer) {
+      clearTimeout(entry.reminderTimer);
+    }
+    if (entry.denyNoteTimer) {
+      clearTimeout(entry.denyNoteTimer);
+    }
+    permissionPolicyTimers.delete(key);
+  }
+
+  /** 按 bot（可选收窄到 requestId）清除策略 timer——permission_response/终态/stop/stale 清除收口。 */
+  function clearBotPermissionPolicyTimers(botId: string, requestId?: string): void {
+    for (const [key, entry] of permissionPolicyTimers) {
+      if (entry.botId === botId && (requestId === undefined || entry.requestId === requestId)) {
+        clearBotPermissionPolicyTimer(key);
+      }
+    }
+  }
+
+  /**
+   * 修复原因（[ulw] 评审 R1-2）：CLI 自动拒绝先于 bot 侧 deny-note timer 触发时
+   * （bot 比 CLI 晚 δ 武装，事件回程更短会赢得竞态），permission_response 清掉 timer
+   * 后用户只看到通用「该权限请求已处理」，丢掉 spec §0「拒绝可见」文案。这里按
+   * botId+requestId 查武装中的绝对 deadline，供 permission_response 处理器在清除
+   * 登记前同步判「deadline 是否已过」并选择超时文案。条目不存在（从未武装或
+   * deny-note 已触发并自清理）⇒ undefined，调用方回落通用文案。
+   */
+  function getArmedPermissionDeadline(botId: string, requestId: string): number | undefined {
+    for (const entry of permissionPolicyTimers.values()) {
+      if (entry.botId === botId && entry.requestId === requestId) {
+        return entry.deadlineAt;
+      }
+    }
+    return undefined;
+  }
+
+  /** 策略 timer 触发时的单条出站（§3c 生命周期表「bot 禁用/删除：清除（note 抑制）」：
+   * 触发时重读 bot 配置，禁用/删除 ⇒ 抑制消息但仍清理 timer 状态）。 */
+  async function fireBotPermissionPolicyNote(params: {
+    botId: string;
+    actor: BotActor;
+    taskId: string;
+    requestId: string;
+    kind: "reminder" | "deny-note";
+  }): Promise<void> {
+    const { botId, actor, taskId, requestId, kind } = params;
+    try {
+      const bot = findBot(await repo.readConfig(), botId);
+      if (!bot || !bot.enabled) {
+        botsLogger.info(
+          undefined,
+          `bot permission policy note suppressed bot=${botId} task=${taskId} requestId=${requestId} kind=${kind} reason=${bot ? "disabled" : "missing"}`,
+        );
+        return;
+      }
+      const locale = await readMessageLocale();
+      await sendOutbound(
+        bot,
+        createOutbound(
+          actor,
+          kind === "reminder"
+            ? // 分钟数 = 提醒偏移（deadline − 触发时刻的固定策略间隔 2 分钟）。
+              msg(locale, "permissionDeadlineReminder", {
+                minutes: BOT_PERMISSION_REMINDER_OFFSET_MINUTES,
+              })
+            : msg(locale, "permissionAutoDenied"),
+        ),
+      );
+    } catch (error) {
+      // best-effort、非保留（§3c.2）：失败诚实丢弃，仅 warn（sendOutbound 自带失败线）。
+      botsLogger.warn(
+        undefined,
+        `bot permission policy note failed bot=${botId} task=${taskId} requestId=${requestId} kind=${kind}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * 在 permission_request 渲染点武装两个策略 timer。时长与 createTask 传递的 deadline 同源
+   * 同式（同一 bot 配置快照 + 同一 normalizePermissionTimeoutMinutes；§3c 表「deadline 配置
+   * 中途变更：无效（不重设）」——本次 pending 的 deadline 已定）。§3c 表「同 requestId 再
+   * 提示：不重设」——同键已存在时保持原 timer（时钟权威在登记表 3b.4）。
+   */
+  function armBotPermissionPolicyTimers(params: {
+    bot: BotConfig;
+    actor: BotActor;
+    taskId: string;
+    requestId: string;
+  }): void {
+    const { bot, actor, taskId, requestId } = params;
+    const key = permissionPolicyTimerKey(bot.id, actor, requestId);
+    if (permissionPolicyTimers.has(key)) {
+      return;
+    }
+    const timeoutMinutes = normalizePermissionTimeoutMinutes(
+      bot.currentOptions.permissionTimeoutMinutes,
+    );
+    const scaleDuration = (durationMs: number): number =>
+      permissionTimerScale > 1
+        ? Math.max(1, Math.round(durationMs / permissionTimerScale))
+        : durationMs;
+    const deadlineMs = scaleDuration(timeoutMinutes * 60_000);
+    const entry: {
+      botId: string;
+      requestId: string;
+      actor: BotActor;
+      deadlineAt: number;
+      reminderTimer?: ReturnType<typeof setTimeout>;
+      denyNoteTimer?: ReturnType<typeof setTimeout>;
+    } = { botId: bot.id, requestId, actor, deadlineAt: Date.now() + deadlineMs };
+    if (timeoutMinutes > BOT_PERMISSION_REMINDER_MIN_DEADLINE_MINUTES) {
+      const reminderDelayMs = Math.max(
+        1,
+        deadlineMs - scaleDuration(BOT_PERMISSION_REMINDER_OFFSET_MS),
+      );
+      const reminderTimer = setTimeout(() => {
+        entry.reminderTimer = undefined;
+        void fireBotPermissionPolicyNote({
+          botId: bot.id,
+          actor,
+          taskId,
+          requestId,
+          kind: "reminder",
+        });
+      }, reminderDelayMs);
+      // 策略 timer 不阻塞进程退出（服务 dispose 显式清除；先例 = channelRuntime heartbeat）。
+      reminderTimer.unref?.();
+      entry.reminderTimer = reminderTimer;
+    }
+    const denyNoteTimer = setTimeout(() => {
+      // deny-note 触发即终局：清理登记（permission_response 事件随后走常规清理路径）。
+      permissionPolicyTimers.delete(key);
+      void fireBotPermissionPolicyNote({
+        botId: bot.id,
+        actor,
+        taskId,
+        requestId,
+        kind: "deny-note",
+      });
+    }, deadlineMs);
+    denyNoteTimer.unref?.();
+    entry.denyNoteTimer = denyNoteTimer;
+    permissionPolicyTimers.set(key, entry);
+    botsLogger.info(
+      undefined,
+      `bot permission policy timers armed bot=${bot.id} task=${taskId} requestId=${requestId} deadlineMinutes=${timeoutMinutes} reminder=${timeoutMinutes > BOT_PERMISSION_REMINDER_MIN_DEADLINE_MINUTES}`,
+    );
+  }
+
+  // specs/bot-permissions.md §4（提示退休与清理）：pendingPermissionOptions 的清除统一收口到
+  // clearPendingPermissionOptions。W3b（§3c reminder/deny-note timer）在下列同一调用点挂接
+  // timer 清除即可，无需改动任何调用方（§3c 生命周期表对应行）：
+  //   - permission_response（watcher，按 requestId 过滤）——「permission_response：清除」；
+  //   - task_complete / task_error（watcher 终态，整体清空）——「终态：清除 + pending 清空」；
+  //   - /stop drain（stop 命令分支，整体清空）——「/stop drain：清除 + pending 清空」；
+  //   - 文本 /approve //deny 孤儿清扫（按 requestId 过滤；§4.1 文本路径 orphan，无 timer 语义）。
+  async function clearPendingPermissionOptions(
+    context: BotContextState,
+    reason: "permission_response" | "terminal" | "stop" | "text_response",
+    requestId?: string,
+  ): Promise<boolean> {
+    // 修复原因（[ulw] 评审 R1-1，MAJOR）：timer 清除此前被「pending 非空」early-return 拦截。
+    // 并发权限复现：A 武装 timer → B 的 permission_request 覆盖 pending → B 被应答清空
+    // pending → 之后 A 的 permission_response/终态事件到达时 pending 已空 ⇒ early-return
+    // ⇒ A 的 reminder/deny-note timer 永不清理，deadline 时刻补发与事实不符的幽灵文案。
+    // timer 登记表按 botId+requestId 独立寻址（与 pending 记录生命周期不同步），必须
+    // 无条件先清；writeContext/日志仍保持仅有 pending 时执行。
+    clearBotPermissionPolicyTimers(context.botId, requestId);
+    const pending = context.pendingPermissionOptions;
+    if (!pending || pending.length === 0) {
+      return false;
+    }
+    // 修复原因（specs/bot-permissions.md §4.1/§4.2）：pendingPermissionOptions 此前只在下一次
+    // permission_request 覆盖或 /new 草稿时清空——外部应答（桌面 UI/手机远控/CLI 自动拒绝）
+    // 与终态之后聊天侧记录滞留成 orphan，Telegram 序号按钮/文本命令会继续命中已失效的
+    // requestId。这里按 requestId 过滤（无 requestId = 整体清空，终态语义）；持久化走
+    // writeContext 既有单写者规则（weixin cursor/token 等字段原样保留，M5 先例）。
+    const remaining = requestId ? pending.filter((option) => option.requestId !== requestId) : [];
+    const next = remaining.length > 0 ? remaining : undefined;
+    Object.assign(context, { pendingPermissionOptions: next });
+    await writeContext({ ...context, pendingPermissionOptions: next });
+    botsLogger.info(
+      undefined,
+      `bot permission pending cleared bot=${context.botId} task=${context.activeTaskId ?? "-"} reason=${reason} requestId=${requestId ?? "-"} remaining=${remaining.length}`,
+    );
+    return true;
+  }
+
   // specs/bot-inbound-resilience.md §B2.1：submitPendingElicitation 一次 respondElicitation
   // 调用 resolve 整个 pending 组（多题一组，无逐题机械）。旧返回 BotOutboundMessage[]
   // 无法区分"respondElicitation 真正 resolve（确认送达）"与 expired/handled 兜底回复——
@@ -6161,7 +6438,15 @@ export function createBotsService(
         if (permissionReply) {
           try {
             if (shouldUseTransientInteractionCard(bot, user)) {
-              await upsertTransientInteractionCard(bot, actor, event.taskId, permissionReply);
+              // requestId 随卡片记录（[ulw] 评审 R1-4）：permission_response 的 finalize
+              // 守卫按最后 upsert 的 requestId 比对，防止终结展示中较新交互的卡片。
+              await upsertTransientInteractionCard(
+                bot,
+                actor,
+                event.taskId,
+                permissionReply,
+                event.requestId,
+              );
             } else {
               await sendOutbound(bot, permissionReply);
             }
@@ -6214,7 +6499,75 @@ export function createBotsService(
               undefined,
               `bot permission prompt send failed provider=${bot.provider} bot=${bot.id} task=${event.taskId} requestId=${event.requestId} stopped=${stopped} denied=${denied}: ${sendFailureReason}`,
             );
+            // §B2.3 stop-deny 即权威立即收口：本次 pending 不再武装策略 timer（先答后
+            // 不发——否则 deadline 时刻会补发与事实不符的「超时未应答」文案）。
+            return;
           }
+          // specs/bot-permissions.md §3c.1（W3b）：提示已在聊天内可见 ⇒ 在渲染点武装
+          // reminder/deny-note 两个策略 timer（时长与 createTask 传出的 deadline 同源同式）。
+          // 修复原因（[ulw] 评审 R1-6）：permissionReply 未渲染（createSelectionReply 返回
+          // 空）时不得武装——pending 已写入但聊天内没有任何可见提示，deadline 时刻补发
+          // 提醒/超时文案只会误导；该 pending 由后续 permission_request 覆盖或终态收口。
+          armBotPermissionPolicyTimers({
+            bot,
+            actor,
+            taskId: event.taskId,
+            requestId: event.requestId,
+          });
+        }
+        return;
+      }
+      if (event.type === "permission_response") {
+        // specs/bot-permissions.md §4.1：CLI 登记表自动拒绝（W3a deadline）或任意客户端
+        // （桌面 UI/手机远控）应答以 permission_response 事件上行（镜像 elicitation_response）
+        // ——权威已收口，聊天侧 pending 记录与提示 UX 必须一并退休。
+        // 修复原因（[ulw] 评审 R1-2）：CLI 自动拒绝的 permission_response 常先于 bot 侧
+        // deny-note timer 触发（bot 比 CLI 晚 δ 武装），清除 timer 后用户只看到通用
+        // 「该权限请求已处理」而非 spec §0「拒绝可见」文案。规则（§3c.2/§4.1 事件驱动的
+        // 超时文案选择）：decision=deny 且登记表内该 requestId 的武装 deadline 已过 ⇒
+        // 发 permissionAutoDenied 超时文案；deadline 前的用户 deny 仍发通用文案。必须在
+        // clearPendingPermissionOptions（会清 timer 登记表）之前同步读取，否则查不到。
+        const armedDeadline = getArmedPermissionDeadline(context.botId, event.requestId);
+        const useAutoDeniedNote =
+          event.response.decision === "deny" &&
+          armedDeadline !== undefined &&
+          Date.now() >= armedDeadline;
+        const resolvedNoteId: BotMessageId = useAutoDeniedNote
+          ? "permissionAutoDenied"
+          : "permissionResolved";
+        const hadPendingPrompt = await clearPendingPermissionOptions(
+          context,
+          "permission_response",
+          event.requestId,
+        );
+        await broadcastTaskListChange(context, event.taskId, "permission_resolved", {
+          requestId: event.requestId,
+        });
+        // 退休聊天侧提示 UX：transient interaction card 存在于该 actor+task 时补上此前缺失的
+        // 第三处 finalize（既有 helper 自行 warn 不上抛）；非瞬态提示（如微信文本）时发一条
+        // 本地化注记——best-effort、非保留（spec §3c.2），失败仅 warn 不上抛。
+        // 修复原因（[ulw] 评审 R1-4）：finalize 守卫此前只比对 taskId——并发权限下 B 的
+        // 提示已复用同一张 per-actor 卡片时，A 的 permission_response 会把展示 B 选项的
+        // 卡片终结成「已处理」，覆盖更新的交互。这里加比对最后 upsert 的 requestId，
+        // 仅当卡片仍属于本 requestId 时才 finalize；不匹配则回落文本注记路径。
+        const transientCard = transientInteractionCards.get(getActorContextKey(actor));
+        if (transientCard?.taskId === event.taskId && transientCard.requestId === event.requestId) {
+          await finalizeTransientInteractionCard(
+            actor,
+            createOutbound(actor, msg(await readMessageLocale(), resolvedNoteId)),
+          );
+          return;
+        }
+        if (hadPendingPrompt) {
+          await sendOutbound(
+            bot,
+            createOutbound(actor, msg(await readMessageLocale(), resolvedNoteId)),
+          ).catch((error: unknown) => {
+            botsLogger.warn(
+              undefined,
+              `bot permission resolved note failed provider=${bot.provider} bot=${bot.id} task=${event.taskId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
         }
         return;
       }
@@ -6243,6 +6596,10 @@ export function createBotsService(
           clearPendingElicitationSelection(context.pendingElicitation);
           await writeContext({ ...context, pendingElicitation: undefined });
         }
+        // specs/bot-permissions.md §4.2：终态清空 pendingPermissionOptions（此前终态只清
+        // pendingElicitation；/new writeDraftContext 为既有先例）——任务终态后聊天侧
+        // 权限按钮不得再命中已失效的 requestId。
+        await clearPendingPermissionOptions(context, "terminal");
         const transientCard = transientInteractionCards.get(getActorContextKey(actor));
         if (transientCard?.taskId === event.taskId) {
           const pendingElicitation = context.pendingElicitation;
@@ -6935,6 +7292,13 @@ export function createBotsService(
             locale,
           ),
         ),
+        // specs/bot-permissions.md §5：断连降级视图同样带模式行（草稿模式或未设置
+        // fallback；远端断连下无法读取 active task 实际模式，不猜测）。
+        formatStatusLine(
+          locale,
+          "statusMode",
+          draftOptions?.mode?.trim() || msg(locale, "statusModeUnset"),
+        ),
         "------",
         formatStatusLine(locale, "statusTask", context.activeTaskId ?? msg(locale, "statusDraft")),
         formatStatusLine(
@@ -6996,12 +7360,25 @@ export function createBotsService(
       statusTask?.model ??
       formatBotModelSelectionValue(draftEffectiveSelection ?? undefined);
     const statusModelLabel = await formatStatusModelLabel(statusModel, context, locale);
+    // specs/bot-permissions.md §5（3.15.0 Track B）：/status 新增模式行——active task
+    // 显示其实际模式（readCurrentActiveTaskMode）；草稿显示 draftOptions.mode；缺失
+    // 显示「未设置/not set」（formatStatusModelLabel 的 statusModelUnset 同款 fallback）。
+    // [ulw] 评审 R1-8：activeTaskId+草稿的过渡形态（任务索引尚未可见时）优先
+    // draftOptions.mode——该形态下 config select 的 currentValue 取自任务侧 RPC 的
+    // 兜底快照，草稿自己的 mode 才是下一次提交会真正使用的值。
+    const statusMode = (
+      statusTask
+        ? readCurrentActiveTaskMode(statusTask, activeTaskConfigOptions)
+        : (draftOptions?.mode ?? readConfigSelectCurrentValue(activeTaskConfigOptions, "mode"))
+    )?.trim();
+    const statusModeValue = statusMode || msg(locale, "statusModeUnset");
     return (
       [
         formatStatusLine(locale, "statusWorkspace", workspace?.label ?? context.workspacePath),
         // Bugfix: active task 显示真实 task 状态；草稿态显示 draftOptions。
         // /new 后草稿继承自当前 task，继续显示 "-" 会让用户误以为继承失败。
         formatStatusLine(locale, "statusModel", statusModelLabel),
+        formatStatusLine(locale, "statusMode", statusModeValue),
         "------",
         statusTask
           ? formatStatusTaskLine(statusTask, msg(locale, "statusTask"))
@@ -7204,6 +7581,17 @@ export function createBotsService(
         // 内存标志与 v4 draft 持久化边界不一致，session_input 会触发 FK。改为先创建
         // v4 draft，再沿既有能力校验应用配置，最后通过 v4 sendText 首发。
         v4Create: true,
+        // specs/bot-permissions.md §3a.2（W3b）：bot 权限无应答 deadline（分钟×60000）——
+        // 读取时归一（缺省 10）；仅 ZCode-Agent provider 任务携带（与 mode 咽喉同门），
+        // 经 v4 createSession additive 字段落入 CLI session record；非 ZCode provider 不带。
+        ...(draftOptions.provider === ZCODE_AGENT_PROVIDER
+          ? {
+              permissionAutoDenyMs:
+                normalizePermissionTimeoutMinutes(
+                  auth.bot.currentOptions.permissionTimeoutMinutes,
+                ) * 60_000,
+            }
+          : {}),
       });
       const taskTitle = deriveTaskTitle(preparedMessage.content, preparedMessage.zcodeAttachments);
       const broadcastTask = taskTitle ? { ...task, title: taskTitle } : task;
@@ -7475,6 +7863,11 @@ export function createBotsService(
       // 说明流终态事件已丢失——taskDeliveryRegistry 里的投递目标同样必须失效，终态任务
       // 不能继续应答 share_file（晚到 RPC 按 no-target 拒绝）。
       taskDeliveryRegistry.forget(context.activeTaskId);
+      // specs/bot-permissions.md §3c 生命周期表（W3b）「stale-watcher 清理：清除（无 note）」：
+      // 终态事件丢失 ⇒ 策略 timer 一并清除且**不触发**任何文案（不发迟到幽灵注释；
+      // CLI 倒计时自行收口）。该路径不经过 clearPendingPermissionOptions（无事件可过滤），
+      // 在此单独清除。
+      clearBotPermissionPolicyTimers(context.botId);
       return false;
     }
     return true;
@@ -8287,12 +8680,10 @@ export function createBotsService(
             const commandName = command.type === "mode.list" ? "mode" : "thoughtLevel";
             const auth = await withAuthorizedContext(message, commandName);
             if (!auth.ok) return auth.reply;
-            if (command.type === "mode.list") {
-              // Bot 硬锁 yolo：不提供模式选择。
-              return [createOutbound(message.actor, msg(auth.locale, "modeLocked"))];
-            }
             if (await isContextActiveTaskRunning(auth.context)) {
               // Bugfix: task 运行中不展示模式/思考级别选择，避免和正在执行的上下文配置混淆。
+              // specs/bot-permissions.md §0/§1（解锁）：模式选择与桌面平权，运行中任务
+              // 保持其模式——taskRunning 拒绝保留（与 thoughtLevel 同语义）。
               return [createOutbound(message.actor, msg(auth.locale, "taskRunning"))];
             }
             if (auth.context.mode === "draft" || !auth.context.activeTaskId) {
@@ -8402,11 +8793,9 @@ export function createBotsService(
             const commandName = command.type === "mode.set" ? "mode" : "thoughtLevel";
             const auth = await withAuthorizedContext(message, commandName);
             if (!auth.ok) return auth.reply;
-            if (command.type === "mode.set") {
-              // Bot 硬锁 yolo：拒绝任何模式切换请求。
-              return [createOutbound(message.actor, msg(auth.locale, "modeLocked"))];
-            }
             if (await isContextActiveTaskRunning(auth.context)) {
+              // specs/bot-permissions.md §0/§1（解锁）：/mode 切换与桌面平权；模式属于
+              // 下一次提交，运行中任务保持其模式——taskRunning 拒绝保留。
               return [createOutbound(message.actor, msg(auth.locale, "taskRunning"))];
             }
             if (auth.context.mode === "draft" || !auth.context.activeTaskId) {
@@ -8616,6 +9005,10 @@ export function createBotsService(
               ];
             }
             runningTasks.delete(auth.context.activeTaskId);
+            // specs/bot-permissions.md §4.2：/stop drain 清空 pendingPermissionOptions——
+            // watcher 随即拆除、终态通知不会再发，这里是停止路径的法定清空点
+            // （/new writeDraftContext 为既有先例）。
+            await clearPendingPermissionOptions(auth.context, "stop");
             // Bugfix（F1 specs/bot-message-delivery.md）：/stop 是 watcher 的法定 drain 点。
             // 顺序为 stopGeneration → drain → 状态回复：drain 把未送出的部分回复作为独立
             // 消息立即送达（owner 决定语义：文本已在桌面 UI 可见，丢弃即信息损失，扣押它
@@ -8661,7 +9054,14 @@ export function createBotsService(
               `permission callback respond task=${auth.context.activeTaskId} requestId=${option.requestId} optionId=${option.optionId} submitted=${submitted}`,
             );
             if (!submitted) {
-              return [createOutbound(message.actor, msg(auth.locale, "permissionHandled"))];
+              // specs/bot-permissions.md §4.3：序号按钮迟到点击（CLI 自动拒绝/他端已应答）——
+              // respondPermission 返回 false 即已收口；反馈「已被处理/已自动拒绝」。成功
+              // 提交路径的 first-wins 吞并语义（handledAt 标记、不清空 pending）不变。
+              // 修复原因（[ulw] 评审 R1-5）：文本 /approve //deny 迟到路径随反馈清扫该
+              // requestId 的 pending orphan，序号按钮路径此前漏扫——迟到的序号点击同样
+              // 已无应答权威，滞留的 pending 会让后续点击继续命中失效 requestId。
+              await clearPendingPermissionOptions(auth.context, "text_response", option.requestId);
+              return [createOutbound(message.actor, msg(auth.locale, "permissionLateHandled"))];
             }
             await writeContext({
               ...auth.context,
@@ -8732,8 +9132,16 @@ export function createBotsService(
               optionId: command.optionId,
               response: pendingOption.response,
             });
-            if (!submitted)
-              return [createOutbound(message.actor, msg(auth.locale, "permissionHandled"))];
+            if (!submitted) {
+              // specs/bot-permissions.md §4.3：文本 /approve 迟到点击（CLI 自动拒绝/他端已
+              // 应答）——反馈「已被处理/已自动拒绝」，并随反馈清扫该 requestId 的 pending
+              // 记录（今天滞留到下一次 permission_request 覆盖，成为 orphan）。
+              await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);
+              return [createOutbound(message.actor, msg(auth.locale, "permissionLateHandled"))];
+            }
+            // specs/bot-permissions.md §4.1：文本路径应答提交成功后同样清扫 pending 记录
+            // （/new writeDraftContext 为既有先例），避免陈旧按钮继续命中已失效的 requestId。
+            await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);
             await broadcastTaskListChange(
               auth.context,
               auth.context.activeTaskId,
@@ -8763,8 +9171,15 @@ export function createBotsService(
                 reason: "Denied by bot command",
               },
             });
-            if (!submitted)
-              return [createOutbound(message.actor, msg(auth.locale, "permissionHandled"))];
+            if (!submitted) {
+              // specs/bot-permissions.md §4.3：文本 /deny 迟到点击（CLI 自动拒绝/他端已应答）
+              // ——反馈「已被处理/已自动拒绝」，并随反馈清扫该 requestId 的 pending 记录。
+              await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);
+              return [createOutbound(message.actor, msg(auth.locale, "permissionLateHandled"))];
+            }
+            // specs/bot-permissions.md §4.1：文本路径拒绝提交成功后同样清扫 pending 记录
+            // （/new writeDraftContext 为既有先例）。
+            await clearPendingPermissionOptions(auth.context, "text_response", command.requestId);
             await broadcastTaskListChange(
               auth.context,
               auth.context.activeTaskId,
@@ -8855,6 +9270,12 @@ export function createBotsService(
       // 丢失（与桌面会话一致的已接受残余，spec 记录在案）。
       retainedReplyBuffers.clear();
       retainedReplyBufferQueues.clear();
+      // specs/bot-permissions.md §3c 生命周期表「服务 dispose：best-effort 清除」——策略
+      // timer 静默清除（静默丢失接受，与保留缓冲同规；timer 已 unref 不阻塞退出）。
+      // Map 迭代中删除「当前」键是安全的（clearBotPermissionPolicyTimer 只删本键）。
+      for (const key of permissionPolicyTimers.keys()) {
+        clearBotPermissionPolicyTimer(key);
+      }
       // Bugfix：host 的异步资源回收会优先调用 disposeAllAndWait。保留统一 Promise，确保并发关闭
       // 只执行一次，并在返回前等三类 Provider runtime 的请求、WebSocket 和跨进程锁全部收口。
       shutdownPromise = Promise.allSettled([

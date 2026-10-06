@@ -66,10 +66,18 @@ export type V4InteractionAutoResolution =
 
 export interface V4InteractionRegistrationOptions {
   sessionId: string;
-  kind: "askUserQuestion" | "other";
+  kind: "askUserQuestion" | "permission" | "other";
   fullAccess?: () => Promise<void>;
   initialAutoResolution?: V4InteractionAutoResolution;
   onAutoResolutionUpdated?: (state: V4InteractionAutoResolution) => void | Promise<void>;
+  /**
+   * spec §3b.1（bot-permissions）：per-entry 权限无应答 deadline（毫秒，来自
+   * createSession 的 permissionAutoDenyMs）。仅 kind "permission" 消费——注册即武装
+   * 倒计时，不排队头（权限各自阻塞各自的工具调用，不是 UX 队列）、无 hiddenGrace。
+   * 其他 kind 忽略该值；askUserQuestion 保持全局 autoResolutionMs + head-only
+   * 语义不变（字节不变）。
+   */
+  autoResolutionMs?: number;
 }
 
 interface RegisteredInteraction {
@@ -136,12 +144,17 @@ export class V4InteractionRegistry {
     }
     if (options) {
       if (entry.autoResolution) {
+        // 已有倒计时（reannounce 重注册 / 持久化恢复）：恢复同一 deadlineAt，不重置
+        // 时钟（spec §3b.4）。askUserQuestion 的全局 gate 关闭语义（转 snoozed）保持
+        // 只作用于问题类；permission 条目不受 gate 影响（spec §3b.5）。
         if (options.kind === "askUserQuestion" && !entry.autoResolutionEligible) {
           void this.convertToSnoozed(entry);
         } else {
           this.resumeAutoResolution(interactionId, entry);
         }
-      } else {
+      } else if (!this.tryArmPermissionAutoResolution(interactionId, entry)) {
+        // spec §3b.1：permission 携带 deadline ⇒ 注册即武装（见下方方法）；未武装
+        // （无 deadline 的桌面权限 / 其他 kind）回落既有 activateHead 路径，行为不变。
         this.activateHead(options.sessionId);
       }
     }
@@ -281,7 +294,12 @@ export class V4InteractionRegistry {
 
   private resumeAutoResolution(interactionId: string, entry: RegisteredInteraction): void {
     const sessionId = entry.options?.sessionId;
-    if (!sessionId || this.queuesBySession.get(sessionId)?.[0] !== interactionId) {
+    // spec §3b.1：permission 倒计时各自阻塞各自工具调用，不受队头限制；askUserQuestion
+    // 保持 head-only（一次只倒计时队首问题）语义不变。
+    if (
+      entry.options?.kind !== "permission" &&
+      (!sessionId || this.queuesBySession.get(sessionId)?.[0] !== interactionId)
+    ) {
       return;
     }
     const autoResolution = entry.autoResolution;
@@ -293,10 +311,7 @@ export class V4InteractionRegistry {
     const now = this.now();
     if (now >= autoResolution.deadlineAt) {
       queueMicrotask(() => {
-        this.resolve(interactionId, {
-          action: "accept",
-          content: { answers: {} },
-        });
+        this.resolve(interactionId, this.autoResolutionAnswerOf(entry));
       });
       return;
     }
@@ -334,13 +349,55 @@ export class V4InteractionRegistry {
     }
     entry.deadlineTimer = setTimeout(
       () => {
-        this.resolve(interactionId, {
-          action: "accept",
-          content: { answers: {} },
-        });
+        this.resolve(interactionId, this.autoResolutionAnswerOf(entry));
       },
       Math.max(0, autoResolution.deadlineAt - now),
     );
+  }
+
+  /**
+   * spec §3b.1（bot-permissions）：permission kind 携带 per-entry deadline 时的武装点
+   * ——注册即武装（ARM AT REGISTER），不排队头（权限各自阻塞各自的工具调用）；
+   * 无 hiddenGrace：首个状态即 visibleCountdown（visibleAt = startedAt），与
+   * askUserQuestion 的 60s 隐藏宽限明确不同。reannounce 重注册（previous 已有
+   * autoResolution）不进本方法，经 resumeAutoResolution 恢复同一 deadlineAt。
+   * 返回是否武装；未武装时调用方回落既有 activateHead 路径（无 deadline 的桌面
+   * 权限条目行为与今天的 "other" kind 逐字节一致）。
+   */
+  private tryArmPermissionAutoResolution(
+    interactionId: string,
+    entry: RegisteredInteraction,
+  ): boolean {
+    if (entry.options?.kind !== "permission") return false;
+    const autoResolutionMs = entry.options.autoResolutionMs;
+    if (
+      typeof autoResolutionMs !== "number" ||
+      !Number.isFinite(autoResolutionMs) ||
+      autoResolutionMs <= 0
+    ) {
+      return false;
+    }
+    const startedAt = this.now();
+    entry.autoResolution = {
+      state: "visibleCountdown",
+      startedAt,
+      visibleAt: startedAt,
+      deadlineAt: startedAt + autoResolutionMs,
+    };
+    this.notifyAutoResolution(entry);
+    this.scheduleActiveAutoResolution(interactionId, entry);
+    return true;
+  }
+
+  /**
+   * spec §3b.2：到期代答按 kind 取形——permission 为 deny-shaped 应答（无 optionId
+   * 也无 action，落入 v4AnswerToPermissionResponse 的既有 deny 兜底，与用户 deny
+   * 同构）；askUserQuestion 保持既有 accept 空答案（字节不变）。
+   */
+  private autoResolutionAnswerOf(entry: RegisteredInteraction): V4InteractionAnswer {
+    return entry.options?.kind === "permission"
+      ? {}
+      : { action: "accept", content: { answers: {} } };
   }
 
   private notifyAutoResolution(entry: RegisteredInteraction): void {

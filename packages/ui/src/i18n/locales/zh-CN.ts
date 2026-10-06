@@ -378,6 +378,9 @@ const zhCN: Record<string, string> = {
   "bots.feishuRegistration.error": "注册失败。",
   "bots.enabledToggle": "启用 {name}",
   "bots.replyGranularity": "机器人回复颗粒度",
+  "bots.permissionTimeout": "权限超时（分钟）",
+  "bots.permissionTimeout.description":
+    "权限请求无人应答时自动拒绝的等待时长，留空使用默认 10 分钟。",
   "bots.replyGranularity.description": "消息详细程度。",
   "bots.replyGranularity.assistantChanges": "标准回复",
   "bots.replyGranularity.assistantChanges.description":

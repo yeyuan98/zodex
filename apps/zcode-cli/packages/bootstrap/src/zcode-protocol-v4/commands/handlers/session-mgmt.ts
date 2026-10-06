@@ -53,6 +53,14 @@ async function createSession(
     offPeakToolEnabled: payload.offPeakToolEnabled,
     dynamicWorkflowEnabled: payload.dynamicWorkflowEnabled,
   });
+  // spec §3a.3（bot-permissions）：deadline 只走 v4——不进 createSessionRecord 钩子/
+  // v3 strict schema，由原生 handler 直接写入 session record；interaction-broker 注册
+  // 权限交互时按 sessionId 读取并武装倒计时。缺省不写 = 桌面会话无 deadline。
+  // 必须在 firstInput 之前：首条 turn 的权限提示注册时就要能读到该值。
+  if (typeof payload.permissionAutoDenyMs === "number") {
+    const record = requireRecord(host, sessionId);
+    record.permissionAutoDenyMs = payload.permissionAutoDenyMs;
+  }
   // createSession.config 消费——草稿态 UI 的先行选择（模型/思考深度/
   // 模式）在首发之前应用并补发事件，首条 turn 即用所选配置。必须在 firstInput 之前。
   // 应用失败不连坐会话创建（record 已建成，failed ACK 只会泄漏会话）：降级 warn，

@@ -806,6 +806,14 @@ export const SESSION_ENTRY_MODEL_SELECTION = "runtime/model_selection" as const;
 export const SESSION_ENTRY_EXECUTION_STATE = "runtime/execution_state" as const;
 export const SESSION_ENTRY_USER_INPUT_AUTO_RESOLUTION =
   "runtime/user_input_auto_resolution" as const;
+/**
+ * bot 权限无应答倒计时的持久化 entry（specs/bot-permissions.md §3b.4）——与
+ * user_input_auto_resolution 同一 store 模式，但 deadline 属 bootstrap 会话概念
+ * （v4 createSession 字段），由 broker 直写 store、不经 core 事件面。恢复时按
+ * 绝对时间还原同一 deadlineAt，不重置时钟。
+ */
+export const SESSION_ENTRY_PERMISSION_AUTO_RESOLUTION =
+  "runtime/permission_auto_resolution" as const;
 export const SESSION_ENTRY_WORKSPACE_CHECKPOINT = "runtime/workspace_checkpoint" as const;
 export const SESSION_ENTRY_WORKSPACE_FILE_REWIND = "runtime/workspace_file_rewind" as const;
 
@@ -815,6 +823,7 @@ export const SESSION_ENTRY_TYPES = [
   SESSION_ENTRY_MODEL_SELECTION,
   SESSION_ENTRY_EXECUTION_STATE,
   SESSION_ENTRY_USER_INPUT_AUTO_RESOLUTION,
+  SESSION_ENTRY_PERMISSION_AUTO_RESOLUTION,
   SESSION_ENTRY_WORKSPACE_CHECKPOINT,
   SESSION_ENTRY_WORKSPACE_FILE_REWIND,
 ] as const;

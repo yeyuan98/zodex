@@ -1866,6 +1866,12 @@ export function createZCodeTaskServiceAdapter(
                     ...(params.mode ? { mode: toZCodeMode(params.mode) } : {}),
                   },
                   ...(mcpServers ? { mcpServers } : {}),
+                  // bot 权限无应答 deadline（specs/bot-permissions.md §3a.2）：additive
+                  // 字段，缺省不携带 = 桌面/旧 CLI 语义不变；旧 CLI 的非 strict schema
+                  // 静默丢弃该键即优雅降级为无倒计时。
+                  ...(params.permissionAutoDenyMs !== undefined
+                    ? { permissionAutoDenyMs: params.permissionAutoDenyMs }
+                    : {}),
                 },
               }),
             }),

@@ -74,6 +74,12 @@ content:{failureReason:"<原因>"}` resolve 该 pending（复用 respondElicitat
 3. **权限请求，双向**（在 bot force-yolo 下 CLI 不发权限事件，分支休眠；为
    3.15.0 Track B 预铺）：提示发送失败 ⇒ `stopGeneration`（task）+
    `respondPermission` deny-shaped 记录，清除 `pendingPermissionOptions`，warn。
+   **Track B 激活注记（3.15.0，`specs/bot-permissions.md`）**：force-yolo 解锁后
+   本分支进入生产可达；同一 `respondPermission` seam 新增**到期触发器**（
+   无应答 deadline ⇒ CLI 登记表自动 deny——deny-only，agent 继续；与本分支的
+   stop+deny 语义并存：发送失败 = 用户不可能看到提示 ⇒ 停止；到期 = 提示已
+   送达但无人应答 ⇒ 仅 deny）。本 spec 的「无新 timer」不变量按 bot-permissions
+   §3c/§6 的受控例外条款修订（策略 timer，非交付管线机械）。
 4. **草稿级失败**（无 session）：仅聊天指引（A），无会话信号。
 
 ## C. 失败路径去重键保留
