@@ -1,5 +1,30 @@
 # Changelog
 
+## [3.14.5-alpha.9](https://github.com/yeyuan98/zodex/compare/v3.14.5-alpha.8...v3.14.5-alpha.9) (2026-10-06)
+
+### Bug Fixes
+
+* **bots:** alpha.9 [ulw] 评审收口——webhook 站点钉测 + 大小写门钉测 + spec 枚举补齐 ([0272ad8](https://github.com/yeyuan98/zodex/commit/0272ad84d9aae2f96252e5e55bb6bf389b38bd05))
+  * MINOR-3 收口：spec fix 3 的 parse 站点枚举补入 webhook（filename 提供名 →
+  * NIT-1 收口：伪扩展名词汇表匹配大小写不敏感（toLowerCase）为有意语义，
+  * NIT-5 披露：8323c92 中 String(error ?? "") 相对 String(error) 的微差
+  * 接受残余（记录不修）：en 语种 rider 包装无独立测试（formatUserFacingBotError
+
+* **bots:** alpha.9——伪扩展名 sniff 扩面 + 飞书 kind-aware 资源键 + 附件观测行 + 业务错误码本地化 ([8323c92](https://github.com/yeyuan98/zodex/commit/8323c9201d098ec6fa30389d492509524a159938))
+  * 修复 1 伪扩展名 sniff 扩面（§7.34①）：cacheResolvedAttachment 的 sniff 门从
+  * 修复 2 飞书 kind-aware 资源键（§2j F1a）：readFeishuAttachment 按 kind 选键取代
+  * 修复 3 附件观测行：cacheResolvedAttachment 每附件一条生产可用 info——
+  * 附带修复两处潜伏铸名 bug（红测钉住）：weixin/feishu parse 站 readString||链
+  * rider 业务错误码本地化（§7.35，specs/bot-message-delivery.md）：前置 [数字]
+  * 测试字面修正（main agent 裁定①）：botFileDeliveryFeishu.test.ts:719 的
+  * fix 4b（CLI prompt 内联视频字节守卫）归 W2b：apps/zcode-cli 本提交零改动，
+
+* **cli:** alpha.9——prompt 内联视频字节校验（非视频容器降级路径注记） ([c846f5e](https://github.com/yeyuan98/zodex/commit/c846f5e3d916087b68c99d860b5a45fa94cafe25))
+  * 新增共享 helper isVideoContainerBytes（packages/shared/attachmentContainerSniff）：
+  * attachment-media-resolver 两条 video 分支加字节守卫（PDF isPdfBytes 先例）：
+  * 降级 warn 可 grep：命名附件 + expected vs sniffed mime（rig 取证）；
+  * 披露成本（按 ruling 不修）：表外真容器（AVI 等）同样降级路径注记，agent
+
 ## [3.14.5-alpha.8](https://github.com/yeyuan98/zodex/compare/v3.14.5-alpha.7...v3.14.5-alpha.8) (2026-10-05)
 
 ### Bug Fixes
