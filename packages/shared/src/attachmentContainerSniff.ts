@@ -65,6 +65,17 @@ function readEbmlDocType(data: Uint8Array): string | null {
 }
 
 /**
+ * 判定字节是否【正判】命中已知视频容器（specs/bot-file-delivery.md「Prompt inline
+ * video validation (3.14.5 Alpha 9)」fix 4b）：以 sniff 表识别出的 mimeType 是否
+ * video/* 为准——mp4/mov/webm/mkv true；音频容器（m4a/mp3/wav/ogg）与表外字节
+ * （AVI 等 RIFF 形状、乱码、空）一律 false。调用方据此把非视频字节挡在
+ * prompt 内联 video 块之外（降级为路径注记），杜绝封面/乱码字节毒害会话历史。
+ */
+export function isVideoContainerBytes(data: Uint8Array): boolean {
+  return sniffAttachmentContainer(data).mimeType?.startsWith("video/") ?? false;
+}
+
+/**
  * 按文件头 magic 指纹识别常见媒体容器。仅做指纹判定，不解析结构——
  * 结果用于「无扩展名兜底命名的入站附件」补扩展名 + 修正兜底 mimeType。
  */

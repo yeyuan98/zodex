@@ -26,7 +26,7 @@ export function inferVideoMimeFromPath(path: string): VideoInputMimeType | undef
 
 export function parseInlineVideoDataUrl(
   dataUrl: string,
-): { mediaType: string; sizeBytes: number } | undefined {
+): { bytes: Buffer; mediaType: string; sizeBytes: number } | undefined {
   const match = /^data:([^;,]+);base64,(.*)$/i.exec(dataUrl);
   const mediaType = match?.[1]?.toLowerCase();
   const payload = match?.[2];
@@ -39,5 +39,12 @@ export function parseInlineVideoDataUrl(
   ) {
     return undefined;
   }
-  return { mediaType, sizeBytes: base64PayloadByteLength(payload) };
+  // 一并返回解码字节（PDF parseInlinePdfDataUrl 先例）：调用方需要原始字节做
+  // 容器正判（isVideoContainerBytes），不在解析层判定——非容器字节的降级
+  // 产物是路径注记，与解析失败的占位符语义不同。
+  return {
+    bytes: Buffer.from(payload, "base64"),
+    mediaType,
+    sizeBytes: base64PayloadByteLength(payload),
+  };
 }

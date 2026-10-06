@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sniffAttachmentContainer } from "../src/attachmentContainerSniff.ts";
+import {
+  isVideoContainerBytes,
+  sniffAttachmentContainer,
+} from "../src/attachmentContainerSniff.ts";
 
 /**
  * 契约（specs/bot-file-delivery.md「Inbound attachment gates (3.14.5 Alpha 6)」§5.15，
@@ -108,4 +111,41 @@ test("帧同步命中但 version/layer 为保留取值 → 未知（[ulw] 评审
   // 随机二进制约 1/2048 会撞上裸帧同步——保留位校验把它们挡在门外。
   assert.deepEqual(sniffAttachmentContainer(Uint8Array.of(0xff, 0xe8, 0x00, 0x00)), {});
   assert.deepEqual(sniffAttachmentContainer(Uint8Array.of(0xff, 0xe1, 0x00, 0x00)), {});
+});
+
+test("isVideoContainerBytes（Alpha 9 fix 4b）：sniff 表视频容器 → true", () => {
+  // 契约：prompt 内联 video 守卫只认正判的视频容器（mimeType video/*）。
+  assert.equal(isVideoContainerBytes(ftypBytes("isom")), true);
+  assert.equal(isVideoContainerBytes(ftypBytes("qt  ")), true);
+  assert.equal(isVideoContainerBytes(ebmlBytes("webm")), true);
+  assert.equal(isVideoContainerBytes(ebmlBytes("matroska")), true);
+});
+
+test("isVideoContainerBytes：音频容器（mp3/wav/ogg/m4a）→ false", () => {
+  // 表内能识别但不是视频：音频容器绝不放过——video 块只承载视频字节。
+  assert.equal(isVideoContainerBytes(ascii("ID3\u0003\u0000tagged-mp3")), false);
+  assert.equal(
+    isVideoContainerBytes(
+      Uint8Array.from([
+        ..."RIFF".split("").map((char) => char.charCodeAt(0)),
+        0x30,
+        0x00,
+        0x00,
+        0x00,
+        ..."WAVE".split("").map((char) => char.charCodeAt(0)),
+        ..."fmt ".split("").map((char) => char.charCodeAt(0)),
+      ]),
+    ),
+    false,
+  );
+  assert.equal(isVideoContainerBytes(ascii("OggS payload")), false);
+  assert.equal(isVideoContainerBytes(ftypBytes("M4A ")), false);
+});
+
+test("isVideoContainerBytes：AVI/RIFF（表外真容器）与乱码/空 → false", () => {
+  // 披露成本 (a)：表外真视频容器（AVI）同样判 false，prompt 侧降级路径注记；
+  // 乱码/空字节自然也是 false——守卫语义是「仅正判放行」。
+  assert.equal(isVideoContainerBytes(ascii("RIFF\x24\x00\x00\x00AVI LISTmovi-payload")), false);
+  assert.equal(isVideoContainerBytes(ascii("definitely-not-a-media-container")), false);
+  assert.equal(isVideoContainerBytes(new Uint8Array(0)), false);
 });

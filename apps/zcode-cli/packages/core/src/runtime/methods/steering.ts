@@ -1203,6 +1203,7 @@ async function drainPendingInputUnlocked(
       artifactStore: this.artifactStore,
       fileSystemPort: this.fileSystemPort,
       imageProcessorPort: this.imageProcessorPort,
+      logger: this.logger,
       sessionId: this.sessionId,
       traceContext: drainTraceContext,
       turnId: options.activeTurn.turnId,
