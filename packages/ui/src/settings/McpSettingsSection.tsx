@@ -61,6 +61,7 @@ import {
 } from "@/settings/SettingsResourceGroup.js";
 import { McpServersImportDialog } from "@/settings/ExternalAgentImportDialog.js";
 import { RemoteSyncDialogs, shouldShowRemoteSyncActions } from "@/settings/RemoteSyncActions.js";
+import { invalidateDeferredDraftSessionForRuntimeChange } from "@/lib/zcodeDraftSkillInvalidation.js";
 import { useMcpStore } from "@/store/mcpStore.js";
 import { usePluginManagementStore } from "@/store/pluginManagementStore.js";
 import { usePlatform } from "@/hooks/usePlatform.js";
@@ -1563,6 +1564,14 @@ export function McpSettingsSection({
         settingsSyncService={services.settingsSyncService}
         onOpenChange={setImportDialogOpen}
         onImported={async () => {
+          // 导入直写磁盘不经 store 四写 action，须在回调补失效（skills 先例 settings-skill-import 平权；spec §3 表）。
+          await invalidateDeferredDraftSessionForRuntimeChange({
+            logScope: "mcpStore",
+            reason: "settings-mcp-import",
+            zcodeSessionService: services.zcodeSessionService,
+            workspacePath: activeWorkspacePath,
+            workspaceIdentity: activeWorkspaceIdentity,
+          });
           await loadMcpFromUserDirectory(services.mcpSyncService, activeWorkspaceIdentity);
         }}
       />
@@ -1581,6 +1590,14 @@ export function McpSettingsSection({
         mcpLocalWorkspacePath={localWorkspacePath}
         onSkillsSynced={() => {}}
         onMcpSynced={async () => {
+          // 远端同步直写磁盘不经 store 四写 action，须在回调补失效（skills 先例 settings-remote-skill-sync 平权；spec §3 表）。
+          await invalidateDeferredDraftSessionForRuntimeChange({
+            logScope: "mcpStore",
+            reason: "settings-remote-mcp-sync",
+            zcodeSessionService: services.zcodeSessionService,
+            workspacePath: activeWorkspacePath,
+            workspaceIdentity: activeWorkspaceIdentity,
+          });
           const loaded = await loadMcpFromUserDirectory(
             services.mcpSyncService,
             activeWorkspaceIdentity,

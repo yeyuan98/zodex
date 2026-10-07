@@ -28,3 +28,7 @@ test("settingsSyncDraftInvalidationReason：类别 → 名词映射（kebab 对�
   assert.equal(settingsSyncDraftInvalidationReason("mcpServers"), "settings-sync-mcp-import");
   assert.equal(settingsSyncDraftInvalidationReason("plugins"), "settings-sync-plugin-import");
 });
+
+test("settingsSyncDraftInvalidationReason：未知类别按原名入 reason，不误标为 plugin", () => {
+  assert.equal(settingsSyncDraftInvalidationReason("subagents"), "settings-sync-subagents-import");
+});

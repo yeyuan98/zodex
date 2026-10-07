@@ -11,7 +11,10 @@ export function settingsSyncImportInvalidatesDraft(categories: Iterable<string>)
 }
 
 export function settingsSyncDraftInvalidationReason(category: string): string {
-  // skills→skill / mcpServers→mcp / plugins→plugin，kebab 惯例对齐 settings-*- 家族。
-  const noun = category === "skills" ? "skill" : category === "mcpServers" ? "mcp" : "plugin";
-  return `settings-sync-${noun}-import`;
+  // skills→skill / mcpServers→mcp / plugins→plugin，kebab 惯例对齐 settings-*- 家族；
+  // 未知未来类别按原名入 reason，绝不误标为 plugin（[ulw] NIT-4）。
+  if (category === "skills") return "settings-sync-skill-import";
+  if (category === "mcpServers") return "settings-sync-mcp-import";
+  if (category === "plugins") return "settings-sync-plugin-import";
+  return `settings-sync-${category}-import`;
 }

@@ -13,7 +13,7 @@ import {
   settingsSyncDraftInvalidationReason,
   settingsSyncImportInvalidatesDraft,
 } from "@/lib/settingsSyncDraftInvalidation.js";
-import { invalidateDeferredDraftSessionForSkillChange } from "@/lib/zcodeDraftSkillInvalidation.js";
+import { invalidateDeferredDraftSessionForRuntimeChange } from "@/lib/zcodeDraftSkillInvalidation.js";
 import type { SettingsSyncUiState, SettingsSyncUiTask } from "@/settings-sync/types.js";
 
 const IMPORTING_TASK_DELAY_MS = 320;
@@ -470,7 +470,9 @@ export function useSettingsSync(params: { workspacePath?: string; workspaceIdent
           settingsSyncImportInvalidatesDraft([selection.category]),
         );
         if (draftInvalidationSelection) {
-          await invalidateDeferredDraftSessionForSkillChange({
+          // logScope 用 settings-sync 如实反映这条腿的来源，避免日志误标 [skills]（[ulw] NIT-3）。
+          await invalidateDeferredDraftSessionForRuntimeChange({
+            logScope: "settings-sync",
             zcodeSessionService,
             workspacePath: params.workspacePath,
             workspaceIdentity: params.workspaceIdentity,
