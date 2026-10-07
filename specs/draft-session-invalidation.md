@@ -38,7 +38,7 @@ legacy v3 草稿经 `closeSession` 关闭（仅 web/replayable 受益；桌面 v
 | 远端插件同步刷新                  | `lib/remotePluginSyncRefresh.ts:111`                                                              | 调用方传入                                                          | 既有                                                                        |
 | hooks 增删改/启停/导入            | `settings/HooksSection.tsx:354`                                                                   | hook-added / -updated / -deleted / -enabled / -disabled / -imported | logScope=hooks，既有                                                        |
 | browser 插件启停                  | `settings/BrowserSettingsSection.tsx:122`                                                         | settings-browser-use-plugin-enabled                                 | 既有                                                                        |
-| settings-sync 导入                | `hooks/useSettingsSync.ts:463` 门                                                                 | settings-sync-skill-import（skills 腿）                             | 门本批扩为 skills\|mcpServers\|plugins（类别同 union，形状统一）            |
+| settings-sync 导入                | `hooks/useSettingsSync.ts:463` 门                                                                 | settings-sync-skill\|mcp\|plugin-import（按首个命中类别）           | 门本批扩为 skills\|mcpServers\|plugins（类别同 union，形状统一）            |
 | **MCP 增/存/删/开关（本批新增）** | `store/mcpStore.ts` 四写 action（add :378 / update :392 / delete :405 / toggle :434，store 层缝） | settings-mcp-add / -save / -delete / -enabled                       | 红测先行；四 action 全仓唯一调用方 = McpSettingsSection，无启动期误失效路径 |
 
 ## 4. 排除项（守卫行）

@@ -9,6 +9,10 @@ import type {
 import { logger } from "@/logger.js";
 import { useServices } from "@/hooks/useServices.js";
 import { useZCodeSessionService } from "@/hooks/useZCodeSessionService.js";
+import {
+  settingsSyncDraftInvalidationReason,
+  settingsSyncImportInvalidatesDraft,
+} from "@/lib/settingsSyncDraftInvalidation.js";
 import { invalidateDeferredDraftSessionForSkillChange } from "@/lib/zcodeDraftSkillInvalidation.js";
 import type { SettingsSyncUiState, SettingsSyncUiTask } from "@/settings-sync/types.js";
 
@@ -460,12 +464,17 @@ export function useSettingsSync(params: { workspacePath?: string; workspaceIdent
           return;
         }
 
-        if (selections.some((selection) => selection.category === "skills")) {
+        // 门本批扩为 skills|mcpServers|plugins（spec §3）：任一能力类别导入即失效，
+        // 失效只做一次，reason 取第一个命中类别的名词（形状与既有 skills 腿一致）。
+        const draftInvalidationSelection = selections.find((selection) =>
+          settingsSyncImportInvalidatesDraft([selection.category]),
+        );
+        if (draftInvalidationSelection) {
           await invalidateDeferredDraftSessionForSkillChange({
             zcodeSessionService,
             workspacePath: params.workspacePath,
             workspaceIdentity: params.workspaceIdentity,
-            reason: "settings-sync-skill-import",
+            reason: settingsSyncDraftInvalidationReason(draftInvalidationSelection.category),
           });
         }
 

@@ -17,7 +17,9 @@ import type {
   ZCodeMcpServer,
 } from "@zcode/shared";
 import { convertToZCodeAgentMcpServer } from "@zcode/shared";
+import type { IZCodeSessionService } from "@zcode/services";
 import { logger } from "@/logger.js";
+import { invalidateDeferredDraftSessionForRuntimeChange } from "@/lib/zcodeDraftSkillInvalidation.js";
 import {
   fetchNativeMcpServers,
   migrateLegacyCommonMcpFromDesktop,
@@ -45,6 +47,7 @@ import { mergeMcpServerStatusSnapshots } from "@/store/mcpStoreStatusList.js";
 
 let mcpPlatformService: McpPlatformService | null = null;
 let mcpDirectoryService: McpDirectoryService | null = null;
+let mcpSessionService: McpDraftSessionService | null = null;
 
 export function setMcpStorePlatform(platform: McpPlatformService | null): void {
   mcpPlatformService = platform;
@@ -52,6 +55,15 @@ export function setMcpStorePlatform(platform: McpPlatformService | null): void {
 
 export function setMcpStoreDirectoryService(service: McpDirectoryService | null): void {
   mcpDirectoryService = service;
+}
+
+// specs/draft-session-invalidation.md §3：MCP 设置写操作与 skills/plugins 平权，
+// 必须失效 pending draft session。store 层不依赖 React hooks，沿用 platform/
+// directory 的模块级 DI 注入 closeSession（仅 legacy v3 草稿腿需要）。
+type McpDraftSessionService = Pick<IZCodeSessionService, "closeSession">;
+
+export function setMcpStoreSessionService(service: McpDraftSessionService | null): void {
+  mcpSessionService = service;
 }
 
 interface UpdateServerStatusOptions {
@@ -132,6 +144,10 @@ interface McpStoreState {
   setCurrentSessionId: (sessionId: string | null) => void;
   migrateLegacyCommonMcp: () => Promise<MigrateLegacyResult>;
 }
+
+const NOOP_DRAFT_SESSION_SERVICE: McpDraftSessionService = {
+  closeSession: async () => undefined,
+};
 
 export const useMcpStore = create<McpStoreState>((set, get) => {
   let loadMcpPromise: Promise<boolean> | null = null;
@@ -234,6 +250,28 @@ export const useMcpStore = create<McpStoreState>((set, get) => {
       resolveMcpDirectoryService(),
     ).catch((error) => {
       logger.warn(`[mcpStore] persist ${source} MCP failed`, String(error));
+    });
+  }
+
+  // 版本 bump 是唯一失效货币，不需要会话服务；closeSession 仅 legacy v3 草稿
+  // （web/replayable）需要，Root 注入覆盖；未注入时用 no-op 桩保证 bump 仍发生
+  // （bump 在 helper 首个 await 之前同步完成，同步 action fire-and-forget 也即时生效）。
+  async function invalidateDraftRuntimeForMcpChange(reason: string): Promise<void> {
+    const { currentProjectPath, currentWorkspaceIdentity } = get();
+    if (!currentProjectPath) return;
+    // rig D1 判据（spec §6）：v4 桌面 draftSessionId 恒 null、helper 自身 info 行
+    // 是 legacy-only，MCP 缝必须自带这条 info 才有观测判据。
+    logger.info("[mcpStore] draft runtime invalidated after MCP settings change", {
+      reason,
+      workspacePath: currentProjectPath,
+      workspaceIdentity: currentWorkspaceIdentity ?? null,
+    });
+    await invalidateDeferredDraftSessionForRuntimeChange({
+      logScope: "mcpStore",
+      reason,
+      workspacePath: currentProjectPath,
+      workspaceIdentity: currentWorkspaceIdentity,
+      zcodeSessionService: mcpSessionService ?? NOOP_DRAFT_SESSION_SERVICE,
     });
   }
 
@@ -388,6 +426,8 @@ export const useMcpStore = create<McpStoreState>((set, get) => {
         projectPath,
       });
       updateNativeServer(targetSource, name, config, projectPath);
+      // 新增 MCP server 改变 agent 可用能力集，须在落盘后失效 pending draft session。
+      await invalidateDraftRuntimeForMcpChange("settings-mcp-add");
     },
     updateScopedMcpServer: async (source, name, config, projectPath) => {
       invalidateStatusListRequests();
@@ -401,6 +441,8 @@ export const useMcpStore = create<McpStoreState>((set, get) => {
         projectPath,
       });
       updateNativeServer(targetSource, name, config, projectPath);
+      // 保存既有 MCP server 配置改变 agent 可用能力集，须在落盘后失效 pending draft session。
+      await invalidateDraftRuntimeForMcpChange("settings-mcp-save");
     },
     deleteScopedMcpServer: (source, name, projectPath) => {
       invalidateStatusListRequests();
@@ -423,6 +465,9 @@ export const useMcpStore = create<McpStoreState>((set, get) => {
           ),
         }),
       );
+      // 删除 MCP server 改变 agent 可用能力集；action 保持同步，bump 在 helper
+      // 首个 await 前同步完成，fire-and-forget 不影响调用方拿到的版本号。
+      void invalidateDraftRuntimeForMcpChange("settings-mcp-delete");
     },
     addZCodeAgentMcpServer: (name, config, projectPath) =>
       get().addScopedMcpServer("zcodeagentmcp", name, config, projectPath),
@@ -460,6 +505,9 @@ export const useMcpStore = create<McpStoreState>((set, get) => {
           servers: state.servers.map((s) => (s.id === id ? { ...s, enabled } : s)),
         };
       });
+      // 开关改变 agent 可用 MCP 能力集（source "mcp" 的 server 跳过磁盘持久化，
+      // 但 enabled 仍进入本地能力投影），因此失效无条件触发。
+      await invalidateDraftRuntimeForMcpChange("settings-mcp-enabled");
     },
 
     updateServerStatus: (id, status, error, options) => {
