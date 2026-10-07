@@ -408,5 +408,8 @@ select，thoughtLevel 分支已在用）在同一 handler 里闲置；draft 路�
    mode.name（"Ask before changes" 等，`getZCodeAgentModeSelectOptions` 同源
    数据）；`/mode` 标题显示原始 mode token（如 `build`，与 §5 `/status` 模式行
    同口径）——本地化 label 会掩盖可回传的 value。
-4. **接受边界**：无模型 draft 仍不列选项（modeMissing）——与 thoughtLevel
-   平权；rig C1 使用已配置模型的 bot。
+4. **接受边界**：无模型 draft 仍不列选项——与 thoughtLevel 平权；rig C1 使用已配置
+   模型的 bot。**3.16.0 PR1 rider（owner 裁定 §7.38③）修订**：无模型 case 的空选项
+   回复从 `modeMissing` 换为新键 `modeMissingNoModel` 可行动文案（先 `/model` 选模型
+   再设模式）；空选项行为不变，其余空选项路径（`/mode set` 无效值、active 任务、
+   thoughtLevel）继续用 `modeMissing`/`thoughtLevelMissing`。

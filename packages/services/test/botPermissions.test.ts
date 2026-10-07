@@ -2291,7 +2291,9 @@ test("场景22a（红·F4 draft 合成）：已配模型 draft 的 /mode ⇒ 列
   }
 });
 
-test("场景22a2（guard·F4 model-less 边界）：模型不可解析的 draft /mode ⇒ 仍不列选项（modeMissing，与 thoughtLevel 平权）", async () => {
+test("场景22a2（guard·F4 model-less 边界）：模型不可解析的 draft /mode ⇒ 仍不列选项（modeMissingNoModel，与 thoughtLevel 平权）", async () => {
+  // 3.16.0 PR1 rider §7.38③（行为有意变更）：无模型草稿 /mode 从 modeMissing 短文案
+  // 换为 modeMissingNoModel 可行动指引；空选项行为不变（仍不列选项，不得凭空合成）。
   const harness = await createPermissionsHarness({
     // 缺省 modelInView=false：view providers 为空 = 模型不可解析。
     stateEntry: (botId, workspace) => draftStateEntry(botId, workspace, true),
@@ -2303,8 +2305,14 @@ test("场景22a2（guard·F4 model-less 边界）：模型不可解析的 draft 
     );
     assert.equal(result.ok, true, "前置：/mode 必须成功");
     assert.ok(
-      (result.replies[0]?.text ?? "").includes("未找到模式"),
-      "无模型 draft 的 /mode 必须保持 modeMissing（spec §8.4 接受边界——与 thoughtLevel 平权；guard 今天即绿，合成不得对 model-less draft 凭空列选项）",
+      (result.replies[0]?.text ?? "").includes(
+        "尚未选择模型：请先通过 /model 选择模型，再设置协作模式。",
+      ),
+      "无模型 draft 的 /mode 必须回复 modeMissingNoModel 可行动文案（spec §8.4 rider §7.38③——仍不列选项；合成不得对 model-less draft 凭空列选项）",
+    );
+    assert.ok(
+      !(result.replies[0]?.text ?? "").includes("未找到模式"),
+      "无模型 draft 的 /mode 不得再回落旧 modeMissing 短文案",
     );
   } finally {
     await harness.dispose();
@@ -2351,7 +2359,7 @@ test("场景22a3-en（红·rider B 无模型文案 en）：无模型 draft /mode
       (result.replies[0]?.text ?? "").includes(
         "No model selected yet. Pick a model with /model first, then set the collaboration mode.",
       ),
-      "无模型 draft 的 /mode 必须回复 modeMissingNoModel 新文案（en-US 钉串；今天回 \"Mode option not found.\"）",
+      '无模型 draft 的 /mode 必须回复 modeMissingNoModel 新文案（en-US 钉串；今天回 "Mode option not found."）',
     );
   } finally {
     await harness.dispose();
