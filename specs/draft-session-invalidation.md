@@ -1,7 +1,10 @@
 # Spec: Draft Session Runtime Invalidation (3.15.0-alpha.2)
 
-Status: **SHIPPED in `3.15.0-alpha.2`（PR #34，release `08089d7`，2026-10-07）——awaiting
-rig D0-D3（PR 正文 checklist；门 = D1/D2）。本 spec 收编既有失效行为为
+Status: **SHIPPED in `3.15.0-alpha.2`（PR #34，release `08089d7`，2026-10-07）——rig
+D0-D3 收口（2026-10-07，分级记录见 §7：D0/D2/D3 log-evidenced PASS；D1 行为 PASS
++ host 侧佐证，日志判据生产不可达 → §6 披露 + post-3.15.0 候选）；随
+official `3.15.0` 切版（owner 裁定 2026-10-07：不出观测性 alpha.3，spec 同步
+修订保持一致）。本 spec 收编既有失效行为为
 不变量——该家族此前是纯代码事实，无 spec 承载；同时新增 MCP 变更源（R1：MCP 设置保存
 不失效 pending draft，skills/plugins 均失效，MCP 漏网）。MCP 行红测先行
 （`packages/ui/test/mcpStoreDraftInvalidation.test.ts`），实现随本批 W2 落地。[ulw] 评审
@@ -59,15 +62,20 @@ legacy v3 草稿经 `closeSession` 关闭（仅 web/replayable 受益；桌面 v
 - 失效在持久化之后触发；磁盘持久化失败被 `persistScopedChange`（`store/mcpStore.ts:233`）
   warn 吞掉时失效仍然发生——多余失效 = 一次廉价重建，无害。
 
-## 6. 观测（rig D1 判据）
+## 6. 观测（rig D1 判据；2026-10-07 rig 后修订）
 
-新 MCP 缝每次触发打一条 `logger.info`（scope `[mcpStore]`，字段
-`reason=settings-mcp-save|add|delete|enabled` + `workspacePath`）。因 v4 桌面
-draftSessionId 恒 null、helper 自身的 info 行是 legacy-only，无此行 rig 无判据
-（**D1 判据 = 此行**；helper 的 "invalidated deferred draft session" 行在 v4 桌面恒不
-出现，不得作判据）。
+新 MCP 缝每次触发打一条 `[mcpStore]` info 行（字段
+`reason=settings-mcp-save|add|delete|enabled` + `workspacePath`）。helper 自身的
+info 行是 legacy-only（v4 桌面 draftSessionId 恒 null，恒不出现），不得作判据。
 
-## 7. 验收（红→绿）
+**生产可达性披露（alpha.2 rig 实证后修订）**：`packages/ui/src/logger.ts` 在
+生产构建（桌面与 web）对普通 `logger.*` 全级 no-op，仅 `logger.lifecycle.*` 经
+桌面桥落盘——本缝现行 info 行**仅 dev 可见**。因此 rig D1 的日志判据在生产
+不可达；D1 以行为验证 + host 侧佐证分级关闭（见 §7 rig 记录）。**已知观测
+缺口 → post-3.15.0 候选池**：一行修复（`logger.info` → `logger.lifecycle.info`，
+含两条回调缝同改），使 `settings-mcp*` 家族在生产可 grep。
+
+## 7. 验收（红→绿 + rig 分级记录）
 
 - `packages/ui/test/mcpStoreDraftInvalidation.test.ts`：四写 action 各自使
   `draftRuntimeInvalidationVersion` +1（今红）；无变更 action（`updateServerStatus`）
@@ -75,3 +83,13 @@ draftSessionId 恒 null、helper 自身的 info 行是 legacy-only，无此行 r
 - settings-sync 导入门为谓词级覆盖（`settingsSyncImportInvalidation.test.ts`，含未知
   类别 reason 不误标断言）；hook 缝无组件级测试（与既有 skills 门一致，评审核验）。
 - MCP 导入/远端同步回调失效为评审核验（无组件测试基建，与 skills 同型先例一致）。
+
+**rig D0-D3（2026-10-07，bundle zcode-logs-20261007-141821，alpha.2 @ `08089d7`）**：
+D0/D2/D3 log-evidenced PASS（/help 576B 含三注记、/mode 选项表 341/340B 渲染并可
+选择、两轮权限单提示单确认 pending 清零、附件缓存+sftp+attachmentReadV4 全通、
+错误清扫零）。**D1 = 行为 PASS（owner 陈述，§8.1 分级）+ host 侧佐证**
+（`mcp-sync.saveMcpToUserDirectory OK` 14:08:28 → 写 action 确证运行 → 失效
+bump 按单测锁定的确定性路径随之发生）；指定日志判据行生产不可达（§6 披露）。
+owner 裁定（2026-10-07）：不为此出 alpha.3，直接切 official 3.15.0，本 spec
+同步修订保持一致。附带登记：无模型草稿上 `/mode` 回复 "Mode option not found."
+（选模型后恢复，owner 裁定非阻塞）→ post-3.15.0 候选池。
