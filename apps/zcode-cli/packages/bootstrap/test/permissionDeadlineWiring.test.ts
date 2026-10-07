@@ -7,7 +7,10 @@ import { buildPermissionInteractionRegistrationOptions } from "../src/zcode-prot
 // session-mgmt 为入口会触发 session-mgmt → executor → handlers/index →
 // session-mgmt 的模块环 TDZ，barrel 入口即生产求值顺序。
 import { NATIVE_HANDLERS } from "../src/zcode-protocol-v4/commands/handlers/index.js";
-import type { V4CommandCoreHost, V4SessionRecordView } from "../src/zcode-protocol-v4/commands/types.js";
+import type {
+  V4CommandCoreHost,
+  V4SessionRecordView,
+} from "../src/zcode-protocol-v4/commands/types.js";
 import {
   V4InteractionRegistry,
   type V4InteractionAnswer,
@@ -43,15 +46,10 @@ test("createSession handler：payload 携带 permissionAutoDenyMs ⇒ 写入 ses
   const record: { permissionAutoDenyMs?: number } = {};
   const host: V4CommandCoreHost = {
     getRecord: (sessionId: string) =>
-      sessionId === "sess-deadline"
-        ? (record as unknown as V4SessionRecordView)
-        : undefined,
+      sessionId === "sess-deadline" ? (record as unknown as V4SessionRecordView) : undefined,
     createSessionRecord: async () => ({ sessionId: "sess-deadline" }),
   };
-  const withDeadline = await NATIVE_HANDLERS.createSession(
-    host,
-    createEnvelope(600_000),
-  );
+  const withDeadline = await NATIVE_HANDLERS.createSession(host, createEnvelope(600_000));
   assert.equal(withDeadline?.type, "createSession");
   assert.equal(
     record.permissionAutoDenyMs,

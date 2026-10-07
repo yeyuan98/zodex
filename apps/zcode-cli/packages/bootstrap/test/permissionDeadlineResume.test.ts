@@ -77,7 +77,12 @@ function createBrokerContext(options: BrokerContextOptions): {
     ]),
     notify: () => {},
     // 反向 RPC 悬挂（宿主未应答）：只有登记表倒计时代答（abort 触发 reject）才能收口。
-    requestClient: (_method: unknown, _params: unknown, _schema: unknown, options?: { signal?: AbortSignal }) =>
+    requestClient: (
+      _method: unknown,
+      _params: unknown,
+      _schema: unknown,
+      options?: { signal?: AbortSignal },
+    ) =>
       new Promise((_resolve, reject) => {
         options?.signal?.addEventListener("abort", () => {
           reject(new Error("request aborted (test fake)"));

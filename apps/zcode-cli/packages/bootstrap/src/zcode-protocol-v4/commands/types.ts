@@ -251,10 +251,7 @@ export interface V4CommandCoreHost {
    * （重启后 resume 重建 record 不带字段，broker 回落读该 entry 武装倒计时）。
    * 实现方 best-effort（失败仅 warn 不上抛）；钩子缺席 = 仅 record 字段（旧宿主形态）。
    */
-  persistSessionPermissionDeadline?(
-    sessionId: string,
-    permissionAutoDenyMs: number,
-  ): Promise<void>;
+  persistSessionPermissionDeadline?(sessionId: string, permissionAutoDenyMs: number): Promise<void>;
   /** 从父会话稳定落盘边界创建隐藏 selection_side_chat child。 */
   createSelectionSideSession?(
     sessionId: string,
