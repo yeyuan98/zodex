@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.15.0](https://github.com/yeyuan98/zodex/compare/v3.15.0-alpha.2...v3.15.0) (2026-10-07)
+
+### Documentation
+
+* **specs:** alpha.2 rig D0-D3 收口入账 + 观测判据生产可达性披露 → official 3.15.0 切版 ([4105dd1](https://github.com/yeyuan98/zodex/commit/4105dd123222aa9b16e7b7545363d04fd69a13aa))
+  * draft-session-invalidation：Status 翻 rig 收口；§6 修订 = ui logger 生产全级 no-op 仅 lifecycle 落盘，D1 日志判据生产不可达（已知观测缺口入 post-3.15.0 候选池，一行修复）；§7 增分级 rig 记录（D1 = 行为 PASS owner 陈述 + saveMcpToUserDirectory host 侧佐证）
+  * bot-permissions：Status 增 alpha.2 rig 收口 + 无模型草稿 /mode 短回复登记（owner 裁定非阻塞）
+  * owner 裁定 2026-10-07：不出观测性 alpha.3，直接切 official
+
+* **specs:** draft-session-invalidation Status——alpha.2 已发版 + awaiting rig D0-D3 ([b1c1c3e](https://github.com/yeyuan98/zodex/commit/b1c1c3e2eca7ed23b13a3f2f9764b2ff2f86ae29)), closes [#34]()
+
 ## [3.15.0-alpha.2](https://github.com/yeyuan98/zodex/compare/v3.15.0-alpha.1...v3.15.0-alpha.2) (2026-10-07)
 
 ### Features
