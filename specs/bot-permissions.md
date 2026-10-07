@@ -5,8 +5,13 @@ Status: **alpha.1 SHIPPED（PR #30，release `7d11594`，tag `v3.15.0-alpha.1`�
 READY-WITH-NITS 收口——4 NIT，3 折叠于 `21a269e`，transient 卡片自答 finalize
 文案按评审携带为设计；验证全绿：services 351/351、shared 68/68、CLI bootstrap
 32/32、server 10/10、root E2E 10/10、typecheck/lint/fmt/pre-push/architecture
-0 违规；11 条红测 assertion 失败实证后全部转绿）——**awaiting rig C0-C6**（PR
-#30 正文，门=C1/C2/C3/C4/C5；C5 remote 门控写腿为 alpha.0 从未测项）。修订
+0 违规；11 条红测 assertion 失败实证后全部转绿）——**rig C0-C6 全 PASS
+（owner 陈述 2026-10-07，handoff §8.1 分级；含 C5 remote 门控写腿——
+alpha.0 从未测项）→ alpha.1 里程碑关闭。下一步 = alpha.2 收尾批次（计划
+`../ZCode-trackb-alpha2-plan.md` v2 [ulw] 收口：R1 MCP 设置保存失效
+pending draft 平权 + 新 spec `draft-session-invalidation.md` / R2
+bot-file-delivery §5.9 安全节修订 / R3 帮助注记 ×3）→ rig D0-D3 →
+official 3.15.0 切版评估。**修订
 = 本文 §8（F1 host 收口去重 / F2 deadline 冻结+持久化 / F3 自答 ack 单确认 /
 F4 mode 选项源），验收场景 §7.16-§7.22。alpha.0 已发版
 （PR #28，release `5c20edf`，2026-10-06）；rig 2026-10-06 晚（bundle
