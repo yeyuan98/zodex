@@ -1,6 +1,7 @@
 # Spec: Draft Session Runtime Invalidation (3.15.0-alpha.2)
 
-Status: **DRAFT for `3.15.0-alpha.2`（unshipped，spec-first）。本 spec 收编既有失效行为为
+Status: **SHIPPED in `3.15.0-alpha.2`（PR #34，release `08089d7`，2026-10-07）——awaiting
+rig D0-D3（PR 正文 checklist；门 = D1/D2）。本 spec 收编既有失效行为为
 不变量——该家族此前是纯代码事实，无 spec 承载；同时新增 MCP 变更源（R1：MCP 设置保存
 不失效 pending draft，skills/plugins 均失效，MCP 漏网）。MCP 行红测先行
 （`packages/ui/test/mcpStoreDraftInvalidation.test.ts`），实现随本批 W2 落地。[ulw] 评审
