@@ -23,11 +23,19 @@ export const BUNDLED_SKILL_PACK_SKILLS_DIRECTORY = "skills";
 /** 门与技能包共用一个名字：常量住在 contracts（core 的技能门也读它），这里只转出。 */
 export { DYNAMIC_WORKFLOW_SKILL_NAME };
 
+// specs/agent-runtimes.md §4/§5（S1/S2）：与技能目录同名的拼接常量；无第二处消费者，故为模块局部。
+const ZCODE_WORKSPACE_RUNTIMES_SKILL_NAME = "zcode-workspace-runtimes";
+const ZCODE_CONFIG_REFERENCE_SKILL_NAME = "zcode-config-reference";
+
 /** 技能包里每个文件都是必需资产：丢任何一个都拒绝整包，而不是装出一个引用文件缺失的技能。 */
 export const BUNDLED_SKILL_PACK_REQUIRED_PATHS = [
   `skills/${DYNAMIC_WORKFLOW_SKILL_NAME}/SKILL.md`,
   `skills/${DYNAMIC_WORKFLOW_SKILL_NAME}/patterns.md`,
   `skills/${DYNAMIC_WORKFLOW_SKILL_NAME}/examples.md`,
+  `skills/${ZCODE_WORKSPACE_RUNTIMES_SKILL_NAME}/SKILL.md`,
+  `skills/${ZCODE_WORKSPACE_RUNTIMES_SKILL_NAME}/patterns.md`,
+  `skills/${ZCODE_WORKSPACE_RUNTIMES_SKILL_NAME}/examples.md`,
+  `skills/${ZCODE_CONFIG_REFERENCE_SKILL_NAME}/SKILL.md`,
 ] as const;
 
 /** 与 official-plugin-definitions 的 rootCandidates 同形，覆盖 monorepo src/dist、cli/dist 与桌面 resources/zcode 布局。 */

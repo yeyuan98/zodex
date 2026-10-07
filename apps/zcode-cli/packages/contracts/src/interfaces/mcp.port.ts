@@ -51,6 +51,8 @@ export interface McpStdioServerConfig extends McpServerConfigBase {
   args?: string[];
   cwd?: string;
   env?: Record<string, string>;
+  /** specs/agent-runtimes.md §2.1（C1）：spawn 时按序前插到最终 PATH 最左侧的目录列表；元素支持 ~ 展开，展开后须为绝对路径。 */
+  pathPrepend?: string[];
 }
 
 export interface McpHttpServerConfig extends McpServerConfigBase {

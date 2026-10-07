@@ -2221,7 +2221,8 @@ const zhCN: Record<string, string> = {
   "settings.mcp.status.disconnectedReason": "MCP 服务器当前未连接。",
   "settings.mcp.status.unknownReason": "暂时无法获取 MCP 服务器状态。",
   "settings.mcp.failure.config_invalid": "MCP 配置无效，请检查服务器配置。",
-  "settings.mcp.failure.runtime_unavailable": "MCP 运行环境不可用，请检查插件和本地依赖。",
+  "settings.mcp.failure.runtime_unavailable":
+    "MCP 运行环境不可用：缺少启动该服务器所需的运行时（如 Node.js/uv）。可让 agent 通过 zcode-workspace-runtimes 技能安装工作区级运行时后重试。",
   "settings.mcp.failure.process_start_failed": "MCP 进程启动失败。",
   "settings.mcp.failure.network_unreachable":
     "无法连接到 MCP 服务器，请检查网络、代理和服务器地址。",

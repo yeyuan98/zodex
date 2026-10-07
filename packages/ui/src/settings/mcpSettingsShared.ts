@@ -19,6 +19,9 @@ export interface FormState {
   timeoutMs: string;
   oauth?: string;
   protocolVersion: string;
+  // specs/agent-runtimes.md §2.3 面6（C1）：stdio 专用 PATH 前插目录列表。
+  // 结构化承载（无表单控件，经 JSON 粘贴编辑），保证设置页保存不剥掉 S1 写入值。
+  pathPrepend?: string[];
 }
 
 export const EMPTY_FORM: FormState = {
@@ -64,6 +67,9 @@ export function serverToForm(server: ZCodeMcpServer): FormState {
     headers: cfg.headers ? JSON.stringify(cfg.headers, null, 2) : "",
     timeoutMs: typeof cfg.timeoutMs === "number" ? String(cfg.timeoutMs) : "",
     oauth: isRecord(cfg.oauth) ? JSON.stringify(cfg.oauth, null, 2) : "",
+    // pathPrepend 与 oauth 同型：表单没有自由文本入口，但保存链路经 FormState 重建，
+    // 不显式承载则用户改一次 args 保存即剥掉 S1 写入的 PATH 注入。
+    ...(Array.isArray(cfg.pathPrepend) ? { pathPrepend: [...cfg.pathPrepend] } : {}),
     // 非法枚举值归一为未设置（等价 auto），与 shared DTO 的 isMcpProtocolVersion
     // 静默丢弃行为对齐；否则 config 里的手滑值会让协议版本下拉显示空白。
     protocolVersion: isMcpProtocolVersion(cfg.protocolVersion) ? cfg.protocolVersion : "",
@@ -90,6 +96,9 @@ export function formToConfig(form: FormState): McpServerConfig {
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       ...(form.protocolVersion
         ? { protocolVersion: form.protocolVersion as McpServerConfig["protocolVersion"] }
+        : {}),
+      ...(form.pathPrepend && form.pathPrepend.length > 0
+        ? { pathPrepend: [...form.pathPrepend] }
         : {}),
     };
   }
@@ -207,7 +216,37 @@ export function jsonDraftToForm(jsonText: string, fallback: FormState): FormStat
     protocolVersion: isMcpProtocolVersion(normalizedConfig.protocolVersion)
       ? normalizedConfig.protocolVersion
       : "",
+    // specs/agent-runtimes.md §2.2 层(2)（C1）：JSON 粘贴入口在输入时拒绝相对
+    // pathPrepend 元素（不进 FormState）；合法列表（含 ~ 前缀）结构化承载。
+    ...(normalizedConfig.pathPrepend !== undefined
+      ? { pathPrepend: parsePathPrependDraft(normalizedConfig.pathPrepend) }
+      : {}),
   };
+}
+
+// 与 jsonDraftToForm 其他非法输入同一错误风格（抛中文 Error，由 JSON 模式 UI 展示）。
+// 浏览器/Node 双端共用本模块，绝对路径判定不用 node:path：posix 根、win 盘符与
+// UNC 前缀按形态识别，~ 前缀元素展开后天然落在 home 之下（视为绝对）。
+function parsePathPrependDraft(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    throw new Error("pathPrepend 必须是字符串数组");
+  }
+  return value.map((element) => {
+    if (typeof element !== "string" || element.trim().length === 0) {
+      throw new Error("pathPrepend 元素必须是非空字符串");
+    }
+    if (element === "~" || element.startsWith("~/")) return element;
+    if (!isAbsolutePathLike(element)) {
+      throw new Error(
+        `pathPrepend 元素必须是展开 ~ 后的绝对路径（absolute path after ~ expansion），非法元素：${element}`,
+      );
+    }
+    return element;
+  });
+}
+
+function isAbsolutePathLike(value: string): boolean {
+  return value.startsWith("/") || value.startsWith("\\\\") || /^[A-Za-z]:[\\/]/.test(value);
 }
 
 // 与 shared 层 convertToZCodeAgentMcpServer 的 isMcpProtocolVersion 守卫保持同一语义：

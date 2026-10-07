@@ -261,7 +261,7 @@ export const useMcpStore = create<McpStoreState>((set, get) => {
     if (!currentProjectPath) return;
     // rig D1 判据（spec §6）：v4 桌面 draftSessionId 恒 null、helper 自身 info 行
     // 是 legacy-only，MCP 缝必须自带这条 info 才有观测判据。
-    logger.info("[mcpStore] draft runtime invalidated after MCP settings change", {
+    logger.lifecycle.info("[mcpStore] draft runtime invalidated after MCP settings change", {
       reason,
       workspacePath: currentProjectPath,
       workspaceIdentity: currentWorkspaceIdentity ?? null,

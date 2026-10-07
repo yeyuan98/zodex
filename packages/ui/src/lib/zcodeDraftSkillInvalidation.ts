@@ -36,20 +36,26 @@ export async function invalidateDeferredDraftSessionForRuntimeChange(
       ...(workspaceIdentity ? { workspaceIdentity } : {}),
       sessionId: draftSessionId,
     });
-    logger.info(`[${params.logScope}] invalidated deferred draft session after runtime change`, {
-      draftSessionId,
-      reason: params.reason,
-      workspaceIdentity: workspaceIdentity ?? null,
-      workspacePath: params.workspacePath,
-    });
+    logger.lifecycle.info(
+      `[${params.logScope}] invalidated deferred draft session after runtime change`,
+      {
+        draftSessionId,
+        reason: params.reason,
+        workspaceIdentity: workspaceIdentity ?? null,
+        workspacePath: params.workspacePath,
+      },
+    );
   } catch (error) {
-    logger.warn(`[${params.logScope}] close deferred draft session after runtime change failed`, {
-      draftSessionId,
-      reason: params.reason,
-      workspaceIdentity: workspaceIdentity ?? null,
-      workspacePath: params.workspacePath,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    logger.lifecycle.warn(
+      `[${params.logScope}] close deferred draft session after runtime change failed`,
+      {
+        draftSessionId,
+        reason: params.reason,
+        workspaceIdentity: workspaceIdentity ?? null,
+        workspacePath: params.workspacePath,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    );
   }
 }
 

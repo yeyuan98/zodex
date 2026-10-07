@@ -27,6 +27,9 @@ export interface McpServerConfig {
   command?: string; // stdio server command
   args?: string[]; // stdio server arguments
   env?: Record<string, string>; // stdio server environment variables
+  // stdio 专用（specs/agent-runtimes.md §2.1）：spawn 时按序前插到最终 PATH 最左侧的目录列表；
+  // 元素支持 ~ / ~/ 前缀展开（运行时侧展开），展开后必须是绝对路径。
+  pathPrepend?: string[];
   headers?: Record<string, string>; // HTTP/SSE server request headers
   http_headers?: Record<string, string>; // 兼容旧配置字段，历史 BigModel MCP 配置会把鉴权头写在这里
   oauth?: McpOAuthConfig; // HTTP/SSE OAuth 机器凭据配置
@@ -171,6 +174,9 @@ export type ZCodeAgentMcpServer =
       isolation?: "session" | "workspace";
       protocolVersion?: "legacy" | "auto" | "2026-07-28";
       timeoutMs?: number;
+      // specs/agent-runtimes.md §2.1/§2.4：desktop 三下发点（session create/resume、
+      // mcp/list）的 stdio PATH 前插；仅在 CLI 上报 mcpPathPrepend capability 时下发。
+      pathPrepend?: string[];
     }
   | {
       name: string;
@@ -304,6 +310,9 @@ export function convertToZCodeAgentMcpServer(
       ...(isMcpProtocolVersion(config.protocolVersion)
         ? { protocolVersion: config.protocolVersion }
         : {}),
+      // pathPrepend 与 timeoutMs 同型：非法形态（空串元素/空数组）就地丢弃，
+      // 不把可立即发现的配置错误留给 strict 协议 schema 硬拒整次请求。
+      ...(isValidMcpPathPrepend(config.pathPrepend) ? { pathPrepend: config.pathPrepend } : {}),
     };
   } else if (config.url && inferredType) {
     const normalizedType: "http" | "sse" = inferredType === "sse" ? "sse" : "http";
@@ -340,6 +349,16 @@ function isMcpIsolation(value: unknown): value is "session" | "workspace" {
 
 function isMcpProtocolVersion(value: unknown): value is "legacy" | "auto" | "2026-07-28" {
   return value === "legacy" || value === "auto" || value === "2026-07-28";
+}
+
+// specs/agent-runtimes.md §2.1：非空 string 数组才透传；~ 展开与绝对路径校验属于
+// CLI 运行时/配置装载腿职责（协议层原样透传）。
+function isValidMcpPathPrepend(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every((element) => typeof element === "string" && element.trim().length > 0)
+  );
 }
 
 function isValidMcpOAuthConfig(value: unknown): value is McpOAuthConfig {

@@ -2338,7 +2338,7 @@ const enUS: Record<string, string> = {
   "settings.mcp.failure.config_invalid":
     "The MCP configuration is invalid. Check the server settings.",
   "settings.mcp.failure.runtime_unavailable":
-    "The MCP runtime is unavailable. Check the plugin and local dependencies.",
+    "The MCP runtime is unavailable: the runtime required to start this server (e.g. Node.js/uv) is missing. Ask the agent to install a workspace-level runtime via the zcode-workspace-runtimes skill, then retry.",
   "settings.mcp.failure.process_start_failed": "The MCP process failed to start.",
   "settings.mcp.failure.network_unreachable":
     "Unable to connect to the MCP server. Check the network, proxy, and server URL.",

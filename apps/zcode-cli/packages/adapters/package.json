@@ -94,6 +94,7 @@
   "scripts": {
     "build": "tsc",
     "clean": "node ../../scripts/clean-dist.mjs",
+    "test": "node --test --experimental-transform-types --import ./test/registerTsLoader.mjs \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint src",
     "lint:fix": "oxlint --write src"

@@ -23,6 +23,9 @@ export function protocolMcpServersToRuntimeMcpConfig(
         ...(server.protocolVersion !== undefined
           ? { protocolVersion: server.protocolVersion }
           : {}),
+        // specs/agent-runtimes.md §2.3 面4（C1）：pathPrepend 不拷贝则 desktop 下行被
+        // 静默剥除，spawn 侧永远看不到 PATH 前插；~ 展开属于 adapters 运行时职责。
+        ...(server.pathPrepend !== undefined ? { pathPrepend: server.pathPrepend } : {}),
       };
       continue;
     }

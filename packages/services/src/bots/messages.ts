@@ -78,6 +78,9 @@ const messages = {
     statusModeUnset: "未设置",
     modeSelectTitle: "当前模式 {mode}\n选择模式",
     modeMissing: "未找到模式。",
+    // 3.16.0 PR1 rider（specs/bot-permissions.md §8.4，owner 裁定 §7.38③）：无模型草稿
+    // /mode 的空选项回复换可行动文案；其余空选项路径继续共用 modeMissing。
+    modeMissingNoModel: "尚未选择模型：请先通过 /model 选择模型，再设置协作模式。",
     modeChanged: "当前任务模式已切换为 {mode}。",
     thoughtLevelSelectTitle: "当前思考级别 {level}\n选择思考级别",
     thoughtLevelMissing: "当前模型不支持思考级别。",
@@ -247,6 +250,10 @@ const messages = {
     statusModeUnset: "not set",
     modeSelectTitle: "Current mode {mode}\nSelect mode",
     modeMissing: "Mode option not found.",
+    // 3.16.0 PR1 rider (specs/bot-permissions.md §8.4, owner ruling §7.38③): actionable
+    // copy for model-less draft /mode; other empty-option paths keep modeMissing.
+    modeMissingNoModel:
+      "No model selected yet. Pick a model with /model first, then set the collaboration mode.",
     modeChanged: "Current task mode changed to {mode}.",
     thoughtLevelSelectTitle: "Current thought level {level}\nSelect thought level",
     thoughtLevelMissing: "The current model does not support thought level.",

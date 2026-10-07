@@ -2890,7 +2890,16 @@ export function createBotsService(
     });
   }
 
-  function getConfigCommandMissingMessageId(configId: "mode" | "thoughtLevel"): BotMessageId {
+  function getConfigCommandMissingMessageId(
+    configId: "mode" | "thoughtLevel",
+    options: { noModel?: boolean } = {},
+  ): BotMessageId {
+    // 3.16.0 PR1 rider（specs/bot-permissions.md §8.4，owner 裁定 §7.38③）：无模型草稿
+    // /mode 的空选项回复换 modeMissingNoModel 可行动文案；其余空选项路径（set 无效值、
+    // active 任务、thoughtLevel）保持原短文案 modeMissing/thoughtLevelMissing。
+    if (configId === "mode" && options.noModel) {
+      return "modeMissingNoModel";
+    }
     return configId === "mode" ? "modeMissing" : "thoughtLevelMissing";
   }
 
@@ -3249,6 +3258,27 @@ export function createBotsService(
     };
   }
 
+  // rider §7.38③ choke point 复用：draft 视图按 modelSelection 是否在场选择
+  // effective/preferred Selection，再解析出具体 model；解析不出 = 无模型草稿。
+  function resolveDraftSelectionFromView(
+    view: ModelSelectionView | null | undefined,
+    modelSelection: BotDraftOptions["modelSelection"],
+  ) {
+    return modelSelection ? view?.effectiveSelection : view?.preferredSelection;
+  }
+
+  function resolveDraftModelFromView(
+    view: ModelSelectionView | null | undefined,
+    modelSelection: BotDraftOptions["modelSelection"],
+  ) {
+    const selection = resolveDraftSelectionFromView(view, modelSelection);
+    return selection
+      ? view?.providers
+          .find((provider) => provider.providerId === selection.providerId)
+          ?.models.find((candidate) => candidate.modelId === selection.modelId)
+      : undefined;
+  }
+
   async function listDraftConfigOptions(
     context: BotContextState,
     draftOptions: BotDraftOptions,
@@ -3258,17 +3288,11 @@ export function createBotsService(
       resolvedView === undefined
         ? await readModelSelectionView(context, draftOptions.modelSelection)
         : resolvedView;
-    const selection = draftOptions.modelSelection
-      ? view?.effectiveSelection
-      : view?.preferredSelection;
-    // F4（spec §8.4 接受边界）：模型不可解析的 draft 仍不列任何选项（modeMissing）——
+    // F4（spec §8.4 接受边界）：模型不可解析的 draft 仍不列任何选项——
     // 与 thoughtLevel 平权（thought_level 依赖 model.optionSpecs，mode 依赖模型已在场）；
     // rig C1 使用已配置模型的 bot。
-    const model = selection
-      ? view?.providers
-          .find((provider) => provider.providerId === selection.providerId)
-          ?.models.find((candidate) => candidate.modelId === selection.modelId)
-      : undefined;
+    const selection = resolveDraftSelectionFromView(view, draftOptions.modelSelection);
+    const model = resolveDraftModelFromView(view, draftOptions.modelSelection);
     if (!model) return [];
     // F4（specs/bot-permissions.md §8.4，rig-221723 RC1）：draft /mode 选项源——从
     // getZCodeAgentAvailableModes（桌面 composer 同源）合成 mode select；当前值 =
@@ -8817,7 +8841,17 @@ export function createBotsService(
             }
             if (auth.context.mode === "draft" || !auth.context.activeTaskId) {
               const draftOptions = await ensureDraftOptions(auth.context);
-              const optionSource = await listDraftConfigOptions(auth.context, draftOptions);
+              // rider §7.38③：视图在 handler 读一次并显式传入，避免 list 内部重复读取；
+              // 空选项时同一快照用于判定「无模型」文案分流。
+              const draftView = await readModelSelectionView(
+                auth.context,
+                draftOptions.modelSelection,
+              );
+              const optionSource = await listDraftConfigOptions(
+                auth.context,
+                draftOptions,
+                draftView,
+              );
               const rawCurrentValue =
                 commandName === "mode"
                   ? draftOptions.mode
@@ -8839,10 +8873,16 @@ export function createBotsService(
                 provider: draftOptions.provider,
               });
               if (options.length === 0) {
+                // 3.16.0 PR1 rider §7.38③ 唯一改文案点：/mode 列表在无模型草稿上
+                // 回 modeMissingNoModel（先 /model 的可行动指引）；thoughtLevel 与
+                // 其余空选项路径不受影响。
+                const noModel =
+                  commandName === "mode" &&
+                  !resolveDraftModelFromView(draftView, draftOptions.modelSelection);
                 return [
                   createOutbound(
                     message.actor,
-                    msg(auth.locale, getConfigCommandMissingMessageId(commandName)),
+                    msg(auth.locale, getConfigCommandMissingMessageId(commandName, { noModel })),
                   ),
                 ];
               }

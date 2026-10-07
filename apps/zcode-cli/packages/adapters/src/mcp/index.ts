@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { delimiter, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   Client,
@@ -33,6 +34,11 @@ import type {
 } from "@zcode/contracts";
 import { normalizeMcpToolDescriptor } from "./descriptor.js";
 import type { McpServerFailureKind } from "@zcode/shared";
+import {
+  applyPathPrependToEnv,
+  McpPathPrependInvalidError,
+  validatePathPrepend,
+} from "./path-prepend.js";
 import {
   buildMcpStdioEnv,
   createMcpTransportFetch,
@@ -80,6 +86,44 @@ const DEFAULT_MCP_TIMEOUT_MS = 30_000;
 const MCP_PING_TIMEOUT_MS = 5_000;
 const MAX_MCP_VERSION_PROBE_TIMEOUT_MS = 5_000;
 const MCP_STDIO_STDERR_LOG_MAX_CHARS = 4_000;
+
+// specs/agent-runtimes.md §3（C2 runtime_unavailable producer）：stdio spawn 失败的
+// ENOENT + 命令白名单分类。白名单覆盖 npx/npm/node/uvx/uv/python 家族——issue #27 的
+// 「无系统运行时的机器上 npx/uvx 类 MCP 全灭」形态。Windows .cmd/.exe/.bat 变体按
+// 剥掉后缀的 base name 匹配（跨平台统一剥除：unix 上名为 mybinary.cmd 的命令按
+// mybinary 匹配属可接受过判）；base name 提取同时接受 / 与 \ 分隔（win 路径形态），
+// 比较大小写不敏感（win 惯例；unix 上 NPX 之类大写命令命中同族分类亦无害）。
+const RUNTIME_COMMAND_BASE_NAMES = new Set([
+  "npx",
+  "npm",
+  "node",
+  "uvx",
+  "uv",
+  "python",
+  "python3",
+]);
+
+function isEnoentLikeError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { code?: unknown; message?: unknown };
+  if (candidate.code === "ENOENT") return true;
+  // spawn ENOENT 形态兜底：transport/SDK 包装后 code 可能丢失，只剩 message 文本。
+  return typeof candidate.message === "string" && /spawn .* ENOENT/i.test(candidate.message);
+}
+
+/** 纯函数（单测见 test/pathPrependEnv.test.ts）：ENOENT + 白名单命令 → runtime_unavailable；其余 → process_start_failed。 */
+export function classifyStdioProcessStartFailure(
+  command: string,
+  error: unknown,
+): "runtime_unavailable" | "process_start_failed" {
+  if (!isEnoentLikeError(error)) {
+    return "process_start_failed";
+  }
+  const baseName = (command.split(/[\\/]/).pop() ?? command).replace(/\.(cmd|exe|bat)$/i, "");
+  return RUNTIME_COMMAND_BASE_NAMES.has(baseName.toLowerCase())
+    ? "runtime_unavailable"
+    : "process_start_failed";
+}
 
 export interface CreateMcpAdapterOptions {
   clientName?: string;
@@ -994,6 +1038,18 @@ class NodeMcpAdapter implements McpPort {
       const negotiationFailureKind = isProtocolNegotiationFailure(error)
         ? ("protocol_negotiation_failed" as const)
         : undefined;
+      // spec §2.2 层(3)（C1）：pathPrepend 展开后非绝对（createTransport 防御腿抛出）
+      // → 仅该 server 失败并归类 config_invalid，会话其余 server 不受影响。
+      const pathPrependFailureKind =
+        config.type === "stdio" && error instanceof McpPathPrependInvalidError
+          ? ("config_invalid" as const)
+          : undefined;
+      // spec §3（C2）：stdio spawn ENOENT + 白名单命令 → runtime_unavailable，
+      // 其余维持默认 process_start_failed（i18n 已有可行动指路文案）。
+      const runtimeFailureKind =
+        config.type === "stdio"
+          ? classifyStdioProcessStartFailure(config.command, error)
+          : undefined;
       return this.failConnection({
         client,
         config,
@@ -1005,7 +1061,8 @@ class NodeMcpAdapter implements McpPort {
         name,
         startedAt,
         transport,
-        failureKind: negotiationFailureKind ?? failureKind,
+        failureKind:
+          negotiationFailureKind ?? pathPrependFailureKind ?? runtimeFailureKind ?? failureKind,
       });
     }
   }
@@ -1153,6 +1210,15 @@ class NodeMcpAdapter implements McpPort {
     workingDirectory?: string,
   ): Promise<{ transport: McpTransport }> {
     if (config.type === "stdio") {
+      // specs/agent-runtimes.md §2.2 层(3)（传输防御腿）：配置装载腿漏掉的相对元素在
+      // spawn 前最后拦截——仅令该 server 失败（错误沿 openServerConnection 既有
+      // per-server 失败路径归类 config_invalid），禁止 -32602 整请求硬拒。
+      const pathPrependValidation = config.pathPrepend
+        ? validatePathPrepend(config.pathPrepend, homedir())
+        : undefined;
+      if (pathPrependValidation && !pathPrependValidation.ok) {
+        throw new McpPathPrependInvalidError(pathPrependValidation.invalidElement);
+      }
       return {
         transport: new ProcessTreeStdioClientTransport({
           command: config.command,
@@ -1160,10 +1226,17 @@ class NodeMcpAdapter implements McpPort {
           cwd: config.cwd
             ? resolve(workingDirectory ?? this.workingDirectory ?? process.cwd(), config.cwd)
             : (workingDirectory ?? this.workingDirectory),
-          env: {
-            ...buildMcpStdioEnv({ env: this.env, network: this.network }),
-            ...config.env,
-          },
+          // specs/agent-runtimes.md §2.5 L4→L5（C1）：pathPrepend 前插必须在
+          // `...config.env` spread 之后应用——「pathPrepend 最优先」不变量：即使
+          // server 显式用 env.PATH 整串替换，前插目录仍然胜出。
+          env: applyPathPrependToEnv(
+            {
+              ...buildMcpStdioEnv({ env: this.env, network: this.network }),
+              ...config.env,
+            },
+            config.pathPrepend,
+            { homeDir: homedir(), pathSeparator: delimiter },
+          ),
           stderr: "pipe",
         }),
       };
