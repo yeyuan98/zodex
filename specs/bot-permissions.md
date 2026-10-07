@@ -7,11 +7,14 @@ READY-WITH-NITS 收口——4 NIT，3 折叠于 `21a269e`，transient 卡片自�
 32/32、server 10/10、root E2E 10/10、typecheck/lint/fmt/pre-push/architecture
 0 违规；11 条红测 assertion 失败实证后全部转绿）——**rig C0-C6 全 PASS
 （owner 陈述 2026-10-07，handoff §8.1 分级；含 C5 remote 门控写腿——
-alpha.0 从未测项）→ alpha.1 里程碑关闭。下一步 = alpha.2 收尾批次（计划
-`../ZCode-trackb-alpha2-plan.md` v2 [ulw] 收口：R1 MCP 设置保存失效
-pending draft 平权 + 新 spec `draft-session-invalidation.md` / R2
-bot-file-delivery §5.9 安全节修订 / R3 帮助注记 ×3）→ rig D0-D3 →
-official 3.15.0 切版评估。**修订
+alpha.0 从未测项）→ alpha.1 里程碑关闭。**alpha.2 收尾批次 SHIPPED（PR #34，
+release `08089d7`，tag `v3.15.0-alpha.2`，2026-10-07；R1 MCP 草稿失效平权 +
+R2 bot-file-delivery §5.9 安全节修订 + R3 /help 三注记；新 spec
+`draft-session-invalidation.md`；[ulw] 一轮收口）——rig D0-D3 收口（2026-10-07，
+bundle zcode-logs-20261007-141821，分级记录见该 spec §7：D0/D2/D3 log-evidenced
+PASS；D1 行为 PASS + host 侧佐证；附带登记：无模型草稿 /mode 回复 "Mode option
+not found." 选模型后恢复，owner 裁定非阻塞）→ official 3.15.0 切版（owner
+裁定 2026-10-07）。**修订
 = 本文 §8（F1 host 收口去重 / F2 deadline 冻结+持久化 / F3 自答 ack 单确认 /
 F4 mode 选项源），验收场景 §7.16-§7.22。alpha.0 已发版
 （PR #28，release `5c20edf`，2026-10-06）；rig 2026-10-06 晚（bundle
