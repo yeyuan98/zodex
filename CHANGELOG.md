@@ -1,5 +1,53 @@
 # Changelog
 
+## [3.16.0-alpha.1](https://github.com/yeyuan98/zodex/compare/v3.16.0-alpha.0...v3.16.0-alpha.1) (2026-10-07)
+
+### Features
+
+* **cli:** .agents/mcp.json 运行时腿四源逐名合并 ([795583f](https://github.com/yeyuan98/zodex/commit/795583fb5d843d80e1d4037df599f52dedfc8e49))
+  * 根因：CLI 运行时从不读 .agents/mcp.json（alpha.0 rig §2m）而 skills 教了等价，.agents 条目在会话中完全缺席；修复依据 = spec §5.1 四源逐名合并 + skills/roots.ts merge-not-fallback 先例（合并键 = 精确 server 名，不用 normalizeMcpNameKey）
+  * 新增 agents-mcp-config.ts：MCP 专用平行发现（worktree 根 → 当前目录，与 .zcode 项目发现同广度）+ .agents 条目装载；绝不进入 buildWorkspaceHookCandidatePaths/hookCandidates/bundleDigest（§5.3 信任记录不可失效，hook digest 钉测保持绿）
+  * schema.ts 抽出 parseMcpServerEntriesWithDiagnostics：.zcode 与 .agents 两条文件腿共用同一 mcpStdioServerSchema strict 逐 server 丢警告环（§5.2，不新增第二条丢弃路径）
+  * config-factory.ts resolveEffectiveMcpServers 全序钉死：project .agents < project .zcode < user .agents < user .zcode < env < cli；.agents 诊断按 scope 并入 user/project diagnostics 并沿既有 warn 汇总落日志
+  * enabled:false 装载保留、pathPrepend 原样进入运行时 spawn 配置（§5.1）；skipUserConfig = 跳过全部 user 级文件源（含 .agents 腿）
+  * 红测转绿：adapters agentsMcpRuntimeLeg 8/8（原 7 红）；bootstrap mcpServersReplaceSemantics 整替契约钉 2/2 保持绿
+
+* **desktop:** MCP 显示三位点统一共享 helper 逐名合并 ([f090787](https://github.com/yeyuan98/zodex/commit/f09078726c2f34ec866c0ee9b5ce312890c585ce))
+  * 根因：三位点同为文件级 fallback（同 scope .zcode 非空 → 整个 .agents 文件被遮蔽），设置页显示集 ≠ 运行时加载集；修复依据 = spec §5.4 逐名合并（[ulw] m3：孪生分叉正是本 bug 类成因，禁止再复制粘贴）
+  * 共享纯函数 helper mergeDirectoryMcpRecordsByName 落在 @zcode/shared mcp-sync.ts（services 与 desktop main 均已依赖 shared、类型同源；放 services 会迫使 desktop main 为纯函数反向依赖服务层）：无 IO，吃两个已读取结果，按精确 server 名合并、.zcode 逐名胜出、.agents 独有名追加在后
+  * services mcpSyncService：readDirectoryServersFromPreferredSources + collectEffectiveUserMcpRecords（喂 listLocalUserMcpCandidates/exportMcpServers/listRemoteUserMcpStatuses/import 去重缝，§5.5(a) 互动①）切换到共享 helper
+  * desktop main mcpUserDirectory 孪生 readDirectoryServersFromPreferredSources 同源切换，legacy-enable 迁移管线不动
+  * 写路径不变：upsert/delete 恒写 .zcode 腿；set-enabled 沿 location 写回源文件
+  * 红测转绿：services mcpSyncAgentsLegMerge 4/4（原 4 红）；desktop mcpUserDirectoryAgentsLeg 2/2（原 2 红）
+
+
+### Bug Fixes
+
+* [ulw] 评审折叠（helper 精确名单测 + S2 cwd 行限域 + McpSettingsSection 注释） ([e61e5e2](https://github.com/yeyuan98/zodex/commit/e61e5e2922177a9688c5e72f64234f2b605bcd73))
+  * shared 新增 mergeDirectoryMcpRecordsByName 单测：同名 .zcode 胜出、.agents 独有名追加、精确键（大小写/下划线不折叠）三条契约，钉住 normalizeMcpNameKey 类重构下的精确名不变量
+  * zcode-config-reference SKILL cwd 行改为 project/user 区分：project 腿相对路径以配置文件目录（workspace 根）解析，user 腿保持不归一、由 spawn 按会话工作目录解析
+  * McpSettingsSection 显式下发注释改为 status-snapshot 理由：createConfig 已读 .agents，缺显式参数的行没有 status snapshot 会被 UI 误标红
+
+
+### Documentation
+
+* **skills:** S1/S2 假等价修正 + mcp.ts 注释更新 ([577bae9](https://github.com/yeyuan98/zodex/commit/577bae931f1bf9968ace0baa733858049408028b))
+  * S2（zcode-config-reference）：四文件「per server name 合并」陈述成真（§5.1 接线后）；等价节补同名冲突规则段（同 scope .zcode 逐名胜出 + user 级遮蔽 workspace 级 = S1 事故模式明说 + 排障指引查两级 user 文件）
+  * S2 isolation 行改对：仅协议形状携带，两条文件腿 strict schema 均不接受——写入任一文件 = 整 server 丢警告（§5.2）；strict schema 警告节扩为双文件腿；cwd 行更新为双腿语义
+  * S1（zcode-workspace-runtimes）Step 9 + patterns.md §10：保留 .agents 优先建议（修复后成立）+ 补同名冲突注记（.zcode 腿逐名胜出、user 遮蔽 workspace，接线前查 ~/.zcode/cli/config.json 与 ~/.agents/mcp.json）
+  * bootstrap zcode-protocol/mcp.ts:63-65 陈旧注释更新：agent createConfig 自 alpha.1 起四源逐名合并，文件腿回落已含 .agents 条目；desktop main 下发 params.mcpServers 的 mcp/list 探针理据保留
+  * 红测转绿：desktop bundledSkillsMcpLegs 3/3（原 3 红，钉不变量非逐字）；bundledSkillsPin 3/3 保持绿
+
+* **specs:** agent-runtimes §5 重写 + §5.x .agents 运行时腿（alpha.1 spec-first） ([e2b5890](https://github.com/yeyuan98/zodex/commit/e2b58900c7fbf49aa54973737c902ebf1b49eb17))
+  * Status 行翻转：alpha.0 已发布、alpha.1 纠偏实现中；废除 §5 旧「四文件合并/两腿等价/isolation 由 .agents 腿携带」假表述（handoff §2m 证伪）
+  * 新增权威节 §5.1-§5.5：四源读取（project/user × .zcode/.agents）+ 逐名合并全序钉死（project .agents < project .zcode < user .agents < user .zcode < env < cli，合并键 = 精确 server 名）
+  * §5.2 同一 strict schema（mcpStdioServerSchema）解析 .agents 条目，坏条目逐 server 丢警告（含 isolation 未知键）
+  * §5.3 接缝钉死：.agents/mcp.json 为 MCP 专用平行发现，禁入 hook candidates/snapshot/digest（信任记录不可失效）
+  * §5.4 desktop 三位点统一为共享纯函数 helper 逐名合并 + 写路径不变披露（删除 .agents 来源行 = 僵尸复活）
+  * §5.5 §7.40 fold-ins 全量披露：settingsSyncService 第四读点边界与两条互作 / params.mcpServers 整替语义 / .agents 腿自动加载行为变化 / strict-parse vs raw-read 分歧 / 设置页已连接 ≠ 会话可用 / mcpId 双身份 + 发现广度不对称
+  * 重编号记账：原 PR2（A1/A2/C3）顺延 alpha.2+（[ulw] n2）；Owners 增补 alpha.1 装载/接缝/合并 helper 所有者；§4.5/§8/§9 同步（§8 收录 alpha.1 红测清单）
+  * feature-boundary-planner 种子图补 MCP 配置发现节点 service.mcp-config-discovery（graph-drift-candidate 收口，§7.40④）
+
 ## [3.16.0-alpha.0](https://github.com/yeyuan98/zodex/compare/v3.15.0...v3.16.0-alpha.0) (2026-10-07)
 
 ### Features
