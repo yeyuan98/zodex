@@ -87,6 +87,44 @@ const MCP_PING_TIMEOUT_MS = 5_000;
 const MAX_MCP_VERSION_PROBE_TIMEOUT_MS = 5_000;
 const MCP_STDIO_STDERR_LOG_MAX_CHARS = 4_000;
 
+// specs/agent-runtimes.md §3（C2 runtime_unavailable producer）：stdio spawn 失败的
+// ENOENT + 命令白名单分类。白名单覆盖 npx/npm/node/uvx/uv/python 家族——issue #27 的
+// 「无系统运行时的机器上 npx/uvx 类 MCP 全灭」形态。Windows .cmd/.exe/.bat 变体按
+// 剥掉后缀的 base name 匹配（跨平台统一剥除：unix 上名为 mybinary.cmd 的命令按
+// mybinary 匹配属可接受过判）；base name 提取同时接受 / 与 \ 分隔（win 路径形态），
+// 比较大小写不敏感（win 惯例；unix 上 NPX 之类大写命令命中同族分类亦无害）。
+const RUNTIME_COMMAND_BASE_NAMES = new Set([
+  "npx",
+  "npm",
+  "node",
+  "uvx",
+  "uv",
+  "python",
+  "python3",
+]);
+
+function isEnoentLikeError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { code?: unknown; message?: unknown };
+  if (candidate.code === "ENOENT") return true;
+  // spawn ENOENT 形态兜底：transport/SDK 包装后 code 可能丢失，只剩 message 文本。
+  return typeof candidate.message === "string" && /spawn .* ENOENT/i.test(candidate.message);
+}
+
+/** 纯函数（单测见 test/pathPrependEnv.test.ts）：ENOENT + 白名单命令 → runtime_unavailable；其余 → process_start_failed。 */
+export function classifyStdioProcessStartFailure(
+  command: string,
+  error: unknown,
+): "runtime_unavailable" | "process_start_failed" {
+  if (!isEnoentLikeError(error)) {
+    return "process_start_failed";
+  }
+  const baseName = (command.split(/[\\/]/).pop() ?? command).replace(/\.(cmd|exe|bat)$/i, "");
+  return RUNTIME_COMMAND_BASE_NAMES.has(baseName.toLowerCase())
+    ? "runtime_unavailable"
+    : "process_start_failed";
+}
+
 export interface CreateMcpAdapterOptions {
   clientName?: string;
   clientVersion?: string;
@@ -1006,6 +1044,12 @@ class NodeMcpAdapter implements McpPort {
         config.type === "stdio" && error instanceof McpPathPrependInvalidError
           ? ("config_invalid" as const)
           : undefined;
+      // spec §3（C2）：stdio spawn ENOENT + 白名单命令 → runtime_unavailable，
+      // 其余维持默认 process_start_failed（i18n 已有可行动指路文案）。
+      const runtimeFailureKind =
+        config.type === "stdio"
+          ? classifyStdioProcessStartFailure(config.command, error)
+          : undefined;
       return this.failConnection({
         client,
         config,
@@ -1017,7 +1061,8 @@ class NodeMcpAdapter implements McpPort {
         name,
         startedAt,
         transport,
-        failureKind: negotiationFailureKind ?? pathPrependFailureKind ?? failureKind,
+        failureKind:
+          negotiationFailureKind ?? pathPrependFailureKind ?? runtimeFailureKind ?? failureKind,
       });
     }
   }
