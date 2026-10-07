@@ -14,7 +14,7 @@ R2 bot-file-delivery §5.9 安全节修订 + R3 /help 三注记；新 spec
 bundle zcode-logs-20261007-141821，分级记录见该 spec §7：D0/D2/D3 log-evidenced
 PASS；D1 行为 PASS + host 侧佐证；附带登记：无模型草稿 /mode 回复 "Mode option
 not found." 选模型后恢复，owner 裁定非阻塞）→ official 3.15.0 切版（owner
-裁定 2026-10-07）。**修订
+裁定 2026-10-07）。修订
 = 本文 §8（F1 host 收口去重 / F2 deadline 冻结+持久化 / F3 自答 ack 单确认 /
 F4 mode 选项源），验收场景 §7.16-§7.22。alpha.0 已发版
 （PR #28，release `5c20edf`，2026-10-06）；rig 2026-10-06 晚（bundle

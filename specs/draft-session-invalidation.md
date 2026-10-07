@@ -1,8 +1,8 @@
 # Spec: Draft Session Runtime Invalidation (3.15.0-alpha.2)
 
 Status: **SHIPPED in `3.15.0-alpha.2`（PR #34，release `08089d7`，2026-10-07）——rig
-D0-D3 收口（2026-10-07，分级记录见 §7：D0/D2/D3 log-evidenced PASS；D1 行为 PASS
-+ host 侧佐证，日志判据生产不可达 → §6 披露 + post-3.15.0 候选）；随
+D0-D3 收口（2026-10-07，分级记录见 §7：D0/D2/D3 log-evidenced PASS；D1 行为
+PASS 且有 host 侧佐证，日志判据生产不可达 → §6 披露 + post-3.15.0 候选）；随
 official `3.15.0` 切版（owner 裁定 2026-10-07：不出观测性 alpha.3，spec 同步
 修订保持一致）。本 spec 收编既有失效行为为
 不变量——该家族此前是纯代码事实，无 spec 承载；同时新增 MCP 变更源（R1：MCP 设置保存
