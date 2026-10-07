@@ -4,7 +4,9 @@ Status: **SHIPPED in `3.15.0-alpha.2`（PR #34，release `08089d7`，2026-10-07�
 D0-D3 收口（2026-10-07，分级记录见 §7：D0/D2/D3 log-evidenced PASS；D1 行为
 PASS 且有 host 侧佐证，日志判据生产不可达 → §6 披露 + post-3.15.0 候选）；随
 official `3.15.0` 切版（owner 裁定 2026-10-07：不出观测性 alpha.3，spec 同步
-修订保持一致）。本 spec 收编既有失效行为为
+修订保持一致）；**3.16.0 PR1 rider §7.38②（2026-10-07）落地三缝
+`logger.lifecycle.*` 修复，§6 观测缺口关闭（红测
+`loggerLifecycleDraftInvalidation.test.ts` 3/3 绿）**。本 spec 收编既有失效行为为
 不变量——该家族此前是纯代码事实，无 spec 承载；同时新增 MCP 变更源（R1：MCP 设置保存
 不失效 pending draft，skills/plugins 均失效，MCP 漏网）。MCP 行红测先行
 （`packages/ui/test/mcpStoreDraftInvalidation.test.ts`），实现随本批 W2 落地。[ulw] 评审
@@ -62,13 +64,22 @@ legacy v3 草稿经 `closeSession` 关闭（仅 web/replayable 受益；桌面 v
 - 失效在持久化之后触发；磁盘持久化失败被 `persistScopedChange`（`store/mcpStore.ts:233`）
   warn 吞掉时失效仍然发生——多余失效 = 一次廉价重建，无害。
 
-## 6. 观测（rig D1 判据；2026-10-07 rig 后修订）
+## 6. 观测（rig D1 判据；2026-10-07 rig 后修订；3.16.0 PR1 rider 后再修订）
 
 新 MCP 缝每次触发打一条 `[mcpStore]` info 行（字段
 `reason=settings-mcp-save|add|delete|enabled` + `workspacePath`）。helper 自身的
 info 行是 legacy-only（v4 桌面 draftSessionId 恒 null，恒不出现），不得作判据。
 
-**生产可达性披露（alpha.2 rig 实证后修订）**：`packages/ui/src/logger.ts` 在
+**3.16.0 PR1 rider §7.38② 修复（2026-10-07）**：3.15.0 cut 时披露的观测缺口已
+关闭——三缝（`mcpStore.ts` MCP 写 action info 行、共享 helper 成功腿 info /
+失败腿 warn）全部改走 `logger.lifecycle.*`，经桌面桥**生产可达**（web 无桥
+仍 no-op，仅桌面 rig 受益）。**scope widening 披露**：共享 helper 同时服务
+skills/hooks/settings-sync 等域调用方（`useSettingsSync.ts`、`HooksSection.tsx`
+等），这些域的同类行切换后同样变为生产持久化——owner 已接受（§7.1）。红测
+`packages/ui/test/loggerLifecycleDraftInvalidation.test.ts`（3 用例）锁定三缝
+判据。以下为历史披露，保留作裁决背景：
+
+**生产可达性披露（alpha.2 rig 实证后修订，rider 前状态）**：`packages/ui/src/logger.ts` 在
 生产构建（桌面与 web）对普通 `logger.*` 全级 no-op，仅 `logger.lifecycle.*` 经
 桌面桥落盘——本缝现行 info 行**仅 dev 可见**。因此 rig D1 的日志判据在生产
 不可达；D1 以行为验证 + host 侧佐证分级关闭（见 §7 rig 记录）。**已知观测
