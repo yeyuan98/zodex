@@ -229,6 +229,11 @@ Backfill: any existing entry with `command` `npx`/`uvx`/`npx.cmd`/`uvx.cmd` gets
 `pathPrepend`; do not touch anything else in the entry. On Windows, JSON paths use escaped
 backslashes (`C:\\ws\\...`) or forward slashes. Changes take effect on the next task.
 
+Either file leg works (`.agents/mcp.json` preferred). Same-name conflict rule: within one
+scope the `.zcode` leg wins per name, and a user-level same-name entry shadows the
+workspace-level one — check `~/.zcode/cli/config.json` and `~/.agents/mcp.json` before
+wiring, or the workspace edit silently loses.
+
 ## 11. Verify / teardown one-liners
 
 ```bash

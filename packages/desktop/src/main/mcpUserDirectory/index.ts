@@ -15,6 +15,7 @@ import type {
   NativeMcpServerRecord,
   SaveCliMcpToUserDirectoryRequest,
 } from "@zcode/shared";
+import { mergeDirectoryMcpRecordsByName } from "@zcode/shared";
 import type { McpConfigKeyName } from "./types.js";
 import { isRecord, readJsonObject, writeTextAtomic } from "./utils.js";
 import { migrateLegacyCommonMcp } from "./legacy.js";
@@ -335,16 +336,15 @@ async function readDirectoryServersFromPreferredSources(
   scope: Exclude<McpScope, "common">,
   workspacePath?: string,
 ): Promise<NativeMcpServerRecord[]> {
-  const zcodeServers = await readDirectoryServersFromFile(
-    ZCODE_MCP_DESCRIPTOR,
-    scope,
-    workspacePath,
-  );
-  // `.zcode` 是强优先级来源；只要读到 MCP server，同 scope 的 `.agents` 就不再参与。
-  if (zcodeServers.length > 0) {
-    return zcodeServers;
-  }
-  return readDirectoryServersFromFile(AGENTS_MCP_DESCRIPTOR, scope, workspacePath);
+  // spec §5.4：逐名合并（共享纯函数 helper mergeDirectoryMcpRecordsByName，与 services
+  // mcpSyncService 同源——孪生禁止再分叉）——同 scope `.zcode` 腿按精确 server 名胜出，
+  // `.agents` 独有名不再被非空 `.zcode` 整文件遮蔽。写路径不变：upsert/delete 恒写
+  // `.zcode` 腿；set-enabled 沿 location 写回源文件。
+  const merged = mergeDirectoryMcpRecordsByName({
+    zcodeServers: await readDirectoryServersFromFile(ZCODE_MCP_DESCRIPTOR, scope, workspacePath),
+    agentsServers: await readDirectoryServersFromFile(AGENTS_MCP_DESCRIPTOR, scope, workspacePath),
+  });
+  return merged;
 }
 
 async function writeZCodeServersToFile(

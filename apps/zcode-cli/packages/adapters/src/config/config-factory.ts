@@ -24,6 +24,12 @@ import { createConfigPort } from "./index.js";
 import { loadFileConfig, getDefaultConfigPath, type LoadedConfig } from "./file-config.adapter.js";
 import { parseEnvConfig } from "./env-config.adapter.js";
 import { mergeConfigs, createPrioritizedConfig } from "./config-merger.js";
+import {
+  discoverAgentsMcpConfigPaths,
+  getUserAgentsMcpConfigPath,
+  loadAgentsMcpConfigFile,
+  mergeAgentsMcpConfigFiles,
+} from "./agents-mcp-config.js";
 import { createNodeLoggerFactory } from "../logging/index.js";
 import {
   loadProjectConfigFile,
@@ -121,10 +127,14 @@ export interface PluginConfigSources {
  *
  * Priority (lowest to highest):
  * 1. System defaults
- * 2. User config file (~/.zcode/cli/config.json)
- * 3. Project config files (root to cwd, then explicit projectConfigPath)
- * 4. Environment variables (ZCODE_*)
- * 5. CLI overrides
+ * 2. `.agents` MCP leg: project `<ws>/.agents/mcp.json` files, then user `~/.agents/mcp.json`
+ * 3. User config file (~/.zcode/cli/config.json)
+ * 4. Project config files (root to cwd, then explicit projectConfigPath)
+ * 5. Environment variables (ZCODE_*)
+ * 6. CLI overrides
+ *
+ * MCP servers additionally merge per exact name across the `.agents`/`.zcode` file legs
+ * (specs/agent-runtimes.md §5.1); other config fields are unaffected by `.agents` files.
  */
 export function createConfig(options: ConfigFactoryOptions = {}): ConfigResult {
   // 1. System defaults
@@ -136,6 +146,18 @@ export function createConfig(options: ConfigFactoryOptions = {}): ConfigResult {
   const userConfigResult: LoadedConfig = options.skipUserConfig
     ? { config: {}, diagnostics: [], path: getDefaultConfigPath(), loaded: false }
     : loadFileConfig(options.userConfigPath);
+
+  // 2b. User `.agents` MCP leg（specs/agent-runtimes.md §5.1 四源之一）。skipUserConfig
+  // 语义 = 跳过全部 user 级文件源（含 `.agents` 腿），保持 prompt-trajectory 等密闭调用方
+  // 不吸入环境 user 配置。
+  const userAgentsConfigResult = options.skipUserConfig
+    ? {
+        config: {} as RuntimeConfigPatch,
+        diagnostics: [] as LoadedConfig["diagnostics"],
+        path: getUserAgentsMcpConfigPath(),
+        loaded: false,
+      }
+    : loadAgentsMcpConfigFile(getUserAgentsMcpConfigPath());
 
   if (userConfigResult.loaded) {
     configs.push(
@@ -166,14 +188,35 @@ export function createConfig(options: ConfigFactoryOptions = {}): ConfigResult {
   // 去重、失败候选占位和 discoveryOrder 均与 Settings builder 同源。
   const projectConfigFiles = discoveredProjectConfigs.files;
   const projectSummary = discoveredProjectConfigs;
-  const projectDiagnostics = discoveredProjectConfigs.diagnostics;
+
+  // 3b. Project `.agents` MCP leg（specs/agent-runtimes.md §5.1/§5.3）：MCP 专用平行
+  // 发现（worktree 根 → 当前目录，与上方 `.zcode` 项目发现同广度）。发现结果不进入
+  // projectSummary.paths / hookCandidates / workspaceHookSnapshot——hook 信任记录的
+  // bundleDigest 输入保持只含 `.zcode` 候选（§5.3 钉测）。仅有显式 projectConfigPath、
+  // 无 workingDirectory 时无 workspace 上下文，不做 `.agents` 平行发现（与显式模式
+  // 只装载该文件的既有语义一致）。
+  const projectAgentsConfigs = options.workingDirectory
+    ? discoverAgentsMcpConfigPaths({ workingDirectory: options.workingDirectory }).map((path) =>
+        loadAgentsMcpConfigFile(path, { normalizeProjectCwd: true }),
+      )
+    : [];
+  const projectAgentsConfigResult = mergeAgentsMcpConfigFiles(projectAgentsConfigs);
+
+  const projectDiagnostics: LoadedConfig["diagnostics"] = [
+    ...discoveredProjectConfigs.diagnostics,
+    ...projectAgentsConfigResult.diagnostics,
+  ];
+  const userDiagnostics: LoadedConfig["diagnostics"] = [
+    ...userConfigResult.diagnostics,
+    ...userAgentsConfigResult.diagnostics,
+  ];
   // 配置 diagnostics 过去只返回给调用方，用户导出日志时看不到加载失败或被跳过的 MCP server。
   // 在汇总入口统一写 warn，保留具体文件路径和 JSON path，方便定位迁移配置问题。
   logConfigDiagnostics({
     env: options.env,
     loggerFactory: options.loggerFactory,
     projectDiagnostics,
-    userDiagnostics: userConfigResult.diagnostics,
+    userDiagnostics,
   });
   const projectConfigResult: OptionalPathLoadedConfig =
     summarizeOptionalProjectConfig(projectConfigFiles);
@@ -239,7 +282,9 @@ export function createConfig(options: ConfigFactoryOptions = {}): ConfigResult {
   const mcpServerResolution = resolveEffectiveMcpServers({
     cliOverrides: options.cliOverrides,
     envConfig,
+    projectAgentsConfig: projectAgentsConfigResult.config,
     projectConfig: projectConfigResult.config,
+    userAgentsConfig: userAgentsConfigResult.config,
     userConfig: userConfigResult.config,
   });
   merged.mcp = {
@@ -255,7 +300,7 @@ export function createConfig(options: ConfigFactoryOptions = {}): ConfigResult {
     config: configPort.getAll(),
     sources: {
       user: {
-        diagnostics: userConfigResult.diagnostics,
+        diagnostics: userDiagnostics,
         path: userConfigResult.path,
         loaded: userConfigResult.loaded,
         hasMcpServers: userConfigResult.config.mcp?.servers !== undefined,
@@ -372,7 +417,9 @@ export function resolveWorkspaceStorageDir(input: {
 function resolveEffectiveMcpServers(input: {
   cliOverrides?: RuntimeConfigPatch;
   envConfig: RuntimeConfigPatch;
+  projectAgentsConfig: RuntimeConfigPatch;
   projectConfig: RuntimeConfigPatch;
+  userAgentsConfig: RuntimeConfigPatch;
   userConfig: RuntimeConfigPatch;
 }): {
   servers: Record<string, McpServerConfig>;
@@ -390,7 +437,14 @@ function resolveEffectiveMcpServers(input: {
   apply("system", DefaultRuntimeConfig);
   // MCP server discovery has an extension-specific rule: user config shadows project config.
   // This does not change the global config precedence for model/permission/UI fields.
+  // 根因：CLI 运行时从不读 `.agents/mcp.json`（alpha.0 rig §2m）而 bundled skills 教了
+  // 等价写法，导致 `.agents` 条目在会话中完全缺席；修复依据 = spec §5.1 四源逐名合并
+  // （project .agents < project .zcode < user .agents < user .zcode < env < cli，同 scope
+  // 内 `.zcode` 逐名胜出、`.agents` 独有名共存）+ skills/roots.ts merge-not-fallback
+  // 先例。合并键 = 精确 server 名（与运行时 exact-key 语义一致，不用 normalizeMcpNameKey）。
+  apply("project", input.projectAgentsConfig);
   apply("project", input.projectConfig);
+  apply("user", input.userAgentsConfig);
   apply("user", input.userConfig);
   apply("env", input.envConfig);
   apply("cli", input.cliOverrides);

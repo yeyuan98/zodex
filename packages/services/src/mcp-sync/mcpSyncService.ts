@@ -18,6 +18,7 @@ import type {
   SettingsDirectoryLocation,
   SettingsDirectorySource,
 } from "@zcode/shared";
+import { mergeDirectoryMcpRecordsByName } from "@zcode/shared";
 import type { IMcpSyncService } from "./mcpSync.js";
 import { checkRemoteSyncDirectoryWriteAccess } from "../remote-sync/remoteSyncWriteAccess.js";
 
@@ -198,11 +199,15 @@ function findDescriptorByLocation(location: SettingsDirectoryLocation): Director
 }
 
 async function collectEffectiveUserMcpRecords(): Promise<UserMcpRecord[]> {
-  const zcodeRecords = await readUserMcpRecordsFromFile(ZCODE_MCP_DESCRIPTOR);
-  if (zcodeRecords.length > 0) {
-    return sortMcpRecords(zcodeRecords);
-  }
-  return sortMcpRecords(await readUserMcpRecordsFromFile(AGENTS_MCP_DESCRIPTOR));
+  // spec §5.4：user 级双文件腿逐名合并（共享纯函数 helper mergeDirectoryMcpRecordsByName，
+  // desktop main 孪生同源）——user `.zcode` 非空不再整体遮蔽 `~/.agents/mcp.json`，
+  // 同名条目 `.zcode` 胜出、`.agents` 独有名可见（喂 listLocalUserMcpCandidates/
+  // exportMcpServers/import 去重缝，§5.5(a) 互动①）。
+  const merged = mergeDirectoryMcpRecordsByName({
+    zcodeServers: await readUserMcpRecordsFromFile(ZCODE_MCP_DESCRIPTOR),
+    agentsServers: await readUserMcpRecordsFromFile(AGENTS_MCP_DESCRIPTOR),
+  });
+  return sortMcpRecords(merged);
 }
 
 async function collectEffectiveUserMcpRecordByName(): Promise<Map<string, UserMcpRecord>> {
@@ -278,15 +283,14 @@ async function readDirectoryServersFromPreferredSources(
   scope: Exclude<McpScope, "common">,
   workspacePath?: string,
 ): Promise<NativeMcpServerRecord[]> {
-  const zcodeServers = await readDirectoryServersFromFile(
-    ZCODE_MCP_DESCRIPTOR,
-    scope,
-    workspacePath,
-  );
-  if (zcodeServers.length > 0) {
-    return zcodeServers;
-  }
-  return readDirectoryServersFromFile(AGENTS_MCP_DESCRIPTOR, scope, workspacePath);
+  // spec §5.4：逐名合并（共享纯函数 helper mergeDirectoryMcpRecordsByName，desktop main
+  // 孪生同源）——同 scope `.zcode` 腿按名胜出，`.agents` 独有名不再被非空 `.zcode`
+  // 整文件遮蔽（显示集 = 运行时加载集）。写路径不变：upsert/delete 恒写 `.zcode` 腿。
+  const merged = mergeDirectoryMcpRecordsByName({
+    zcodeServers: await readDirectoryServersFromFile(ZCODE_MCP_DESCRIPTOR, scope, workspacePath),
+    agentsServers: await readDirectoryServersFromFile(AGENTS_MCP_DESCRIPTOR, scope, workspacePath),
+  });
+  return merged;
 }
 
 async function readDirectoryServersFromFile(

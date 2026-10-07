@@ -1,7 +1,7 @@
 /* eslint-disable max-lines -- zcode-cli 配置 schema 需要集中维护文件解析和 provider 继承，拆散会让配置语义更难对齐。 */
 import { homedir } from "node:os";
 import { z } from "zod";
-import type { RuntimeConfigPatch } from "@zcode/contracts";
+import type { McpServerConfig, RuntimeConfigPatch } from "@zcode/contracts";
 import { validatePathPrepend } from "../mcp/path-prepend.js";
 
 const stringRecordSchema = z.record(z.string(), z.string());
@@ -499,7 +499,29 @@ function normalizeConfigFileInput(value: unknown, diagnostics: ConfigDiagnostic[
     return root;
   }
 
-  const parsedServers: Record<string, unknown> = {};
+  const parsed = parseMcpServerEntriesWithDiagnostics(servers, "mcp.servers");
+  diagnostics.push(...parsed.diagnostics);
+
+  root.mcp = {
+    ...mcp,
+    servers: parsed.servers,
+  };
+  return root;
+}
+
+/**
+ * 逐 server strict 解析环（specs/agent-runtimes.md §5.2）：
+ * `.zcode`（mcp.servers）与 `.agents`（mcpServers）两条文件腿共用同一
+ * `mcpStdioServerSchema` 严格解析——坏条目（未知键、相对 pathPrepend 元素等）
+ * 逐 server 丢弃 + `config_mcp_server_invalid` warning 诊断（pathPrefix 点名
+ * server 名），其余条目照常装载。不新增第二条丢弃路径，不做字段级 salvage。
+ */
+export function parseMcpServerEntriesWithDiagnostics(
+  servers: Record<string, unknown>,
+  pathPrefix: string,
+): { servers: Record<string, McpServerConfig>; diagnostics: ConfigDiagnostic[] } {
+  const diagnostics: ConfigDiagnostic[] = [];
+  const parsedServers: Record<string, McpServerConfig> = {};
   for (const [name, server] of Object.entries(servers)) {
     const parsed = mcpServerSchema.safeParse(server);
     if (parsed.success) {
@@ -511,16 +533,11 @@ function normalizeConfigFileInput(value: unknown, diagnostics: ConfigDiagnostic[
     diagnostics.push({
       code: "config_mcp_server_invalid",
       message: formatMcpServerError(parsed.error),
-      path: `mcp.servers.${name}`,
+      path: `${pathPrefix}.${name}`,
       severity: "warning",
     });
   }
-
-  root.mcp = {
-    ...mcp,
-    servers: parsedServers,
-  };
-  return root;
+  return { servers: parsedServers, diagnostics };
 }
 
 function formatMcpServerError(error: z.ZodError): string {
