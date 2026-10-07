@@ -2311,6 +2311,53 @@ test("场景22a2（guard·F4 model-less 边界）：模型不可解析的 draft 
   }
 });
 
+test("场景22a3（红·rider B 无模型文案 zh）：无模型 draft /mode ⇒ modeMissingNoModel 新文案（今回「未找到模式。」）", async () => {
+  // specs/agent-runtimes.md §7.2（handoff §7.38③）：无模型草稿 /mode 的回复必须给出
+  // 可行动指引（先 /model 选模型），不得再复用其他空选项路径共享的 modeMissing 短文案。
+  // 空选项行为不变（仍不列选项）；仅文案换成新键 modeMissingNoModel。W4 落地后
+  // 场景22a2 的既有断言将随之更新（行为对 no-model 场景按 owner 裁定有意变更）。
+  const harness = await createPermissionsHarness({
+    stateEntry: (botId, workspace) => draftStateEntry(botId, workspace, true),
+  });
+  try {
+    const result = await harness.service.handleProviderCallbackResponse(
+      "weixin",
+      weixinInboundPayload([{ id: "wx-msg-mode-nomodel-zh", text: "/mode" }]),
+    );
+    assert.equal(result.ok, true, "前置：/mode 必须成功");
+    assert.ok(
+      (result.replies[0]?.text ?? "").includes(
+        "尚未选择模型：请先通过 /model 选择模型，再设置协作模式。",
+      ),
+      "无模型 draft 的 /mode 必须回复 modeMissingNoModel 新文案（zh-CN 钉串；今天回「未找到模式。」）",
+    );
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("场景22a3-en（红·rider B 无模型文案 en）：无模型 draft /mode ⇒ modeMissingNoModel 新文案（en-US）", async () => {
+  const harness = await createPermissionsHarness({
+    locale: "en-US",
+    stateEntry: (botId, workspace) => draftStateEntry(botId, workspace, true),
+  });
+  try {
+    const result = await harness.service.handleProviderCallbackResponse(
+      "weixin",
+      weixinInboundPayload([{ id: "wx-msg-mode-nomodel-en", text: "/mode" }]),
+    );
+    assert.equal(result.ok, true, "前置：/mode 必须成功");
+    assert.ok(
+      (result.replies[0]?.text ?? "").includes(
+        "No model selected yet. Pick a model with /model first, then set the collaboration mode.",
+      ),
+      "无模型 draft 的 /mode 必须回复 modeMissingNoModel 新文案（en-US 钉串；今天回 \"Mode option not found.\"）",
+    );
+  } finally {
+    await harness.dispose();
+  }
+});
+
 test("场景22b（红·F4 active 列表+设置往返）：active task 的 /mode 列表来自 active.configOptions；/mode plan ⇒ setConfigOption(mode,plan)（今走死 stub 恒空）", async () => {
   // (1) 列表：task meta 带 remote-shaped workspaceIdentity（远端形态负载经同一 stub 缝）。
   {
