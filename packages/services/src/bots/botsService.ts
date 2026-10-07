@@ -7535,6 +7535,15 @@ export function createBotsService(
       }
       lines.push(msg(locale, helpMessageByCommand[command]));
     }
+    // 3.15.0-alpha.2 Track B 收尾 R3：三条使用注记（配置变更生效时机 / 技能按名
+    // 调用 / 插件不热加载）是说明文本而非命令，不参与 allowedCommands 过滤——
+    // 命令被收紧时注记仍须渲染（guard 测试锁定该不变量）。
+    lines.push(
+      "",
+      msg(locale, "helpNoteConfigNextTask"),
+      msg(locale, "helpNoteSkillsByName"),
+      msg(locale, "helpNotePluginsNoHotLoad"),
+    );
     return lines.join("\n");
   }
 

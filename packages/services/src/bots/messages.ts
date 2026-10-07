@@ -163,6 +163,11 @@ const messages = {
     retainedBacklogTruncatedHead: "…(更早的积压消息已截断)",
     // /status 在保留缓冲非空期间显示的待补发行（条数 + 约 KB 数）。
     statusPendingDelivery: "待补发：{count} 条断线积压消息（约 {kb} KB）",
+    // 3.15.0-alpha.2（Track B 收尾 R3）：/help 尾部三条注记——配置变更生效时机 /
+    // 技能按名调用 / 插件不热加载。本批仅落 key，buildHelpText 追加由 W2 接线。
+    helpNoteConfigNextTask: "模式/超时等配置变更自下一个任务生效",
+    helpNoteSkillsByName: "已安装技能可在会话中按名称调用",
+    helpNotePluginsNoHotLoad: "插件不会热加载进运行中的会话",
   },
   "en-US": {
     botDisabled: "This bot is not enabled.",
@@ -329,6 +334,10 @@ const messages = {
     retainedBacklogPreamble: "Delivered {count} messages queued during the outage",
     retainedBacklogTruncatedHead: "…(earlier queued messages were truncated)",
     statusPendingDelivery: "Pending delivery: {count} messages queued during the outage (~{kb} KB)",
+    // 3.15.0-alpha.2 (Track B closing R3): three trailing /help notes — see zh-CN block.
+    helpNoteConfigNextTask: "Config changes (mode, timeout) take effect on the next task",
+    helpNoteSkillsByName: "Installed skills can be invoked by name mid-session",
+    helpNotePluginsNoHotLoad: "Plugins never hot-load into a running session",
   },
 } as const;
 

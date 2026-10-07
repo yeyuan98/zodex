@@ -9,7 +9,11 @@ import type {
 import { logger } from "@/logger.js";
 import { useServices } from "@/hooks/useServices.js";
 import { useZCodeSessionService } from "@/hooks/useZCodeSessionService.js";
-import { invalidateDeferredDraftSessionForSkillChange } from "@/lib/zcodeDraftSkillInvalidation.js";
+import {
+  settingsSyncDraftInvalidationReason,
+  settingsSyncImportInvalidatesDraft,
+} from "@/lib/settingsSyncDraftInvalidation.js";
+import { invalidateDeferredDraftSessionForRuntimeChange } from "@/lib/zcodeDraftSkillInvalidation.js";
 import type { SettingsSyncUiState, SettingsSyncUiTask } from "@/settings-sync/types.js";
 
 const IMPORTING_TASK_DELAY_MS = 320;
@@ -460,12 +464,19 @@ export function useSettingsSync(params: { workspacePath?: string; workspaceIdent
           return;
         }
 
-        if (selections.some((selection) => selection.category === "skills")) {
-          await invalidateDeferredDraftSessionForSkillChange({
+        // 门本批扩为 skills|mcpServers|plugins（spec §3）：任一能力类别导入即失效，
+        // 失效只做一次，reason 取第一个命中类别的名词（形状与既有 skills 腿一致）。
+        const draftInvalidationSelection = selections.find((selection) =>
+          settingsSyncImportInvalidatesDraft([selection.category]),
+        );
+        if (draftInvalidationSelection) {
+          // logScope 用 settings-sync 如实反映这条腿的来源，避免日志误标 [skills]（[ulw] NIT-3）。
+          await invalidateDeferredDraftSessionForRuntimeChange({
+            logScope: "settings-sync",
             zcodeSessionService,
             workspacePath: params.workspacePath,
             workspaceIdentity: params.workspaceIdentity,
-            reason: "settings-sync-skill-import",
+            reason: settingsSyncDraftInvalidationReason(draftInvalidationSelection.category),
           });
         }
 

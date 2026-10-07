@@ -32,7 +32,7 @@ import {
   shouldOpenFallbackWorkspaceAfterCreate,
 } from "@/lib/rootStartupGate.js";
 import { StoreProvider, useZCodeStore } from "@/store/StoreProvider.js";
-import { setMcpStorePlatform } from "@/store/mcpStore.js";
+import { setMcpStorePlatform, setMcpStoreSessionService } from "@/store/mcpStore.js";
 import { useZCodeSessionStore } from "@/store/zcodeSessionStore.js";
 import { TabStoreProvider, useTabStore, useTabStoreApi } from "@/store/TabStoreProvider.js";
 import { isSettingsTab, isWorkspaceTab } from "@/store/tabStore.js";
@@ -146,6 +146,16 @@ function RootInner({
       setMcpStorePlatform(null);
     };
   }, [platform]);
+
+  useEffect(() => {
+    // MCP 设置写操作失效 pending draft 时，legacy v3 草稿还需 closeSession 腿
+    // （specs/draft-session-invalidation.md §3）；RootInner 位于 ServiceProvider
+    // 内且直接持有同一 services prop，与 setMcpStorePlatform 同点位注入/回收。
+    setMcpStoreSessionService(services.zcodeSessionService);
+    return () => {
+      setMcpStoreSessionService(null);
+    };
+  }, [services.zcodeSessionService]);
 
   // 动态工作流灰度快照的唯一求值点：
   // 放在 app 级 ServiceProvider 这一层求一次，自动化页与 run 面板只读。

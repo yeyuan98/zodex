@@ -105,17 +105,16 @@ Related: `docs/versioning.md` (patch 3.14.4 = full bidirectional file sync).
    remote-materialized delivery filename vs the user-requested path). When the two are
    identical (top-level workspace paths, pre-resolution failures), `file=` is omitted —
    never printed twice (the same-value dedup the forward-pin rejected line already
-   applies). **3.14.5 Alpha 7 amendment (§5.9, honest guard statement — replaces the
-   stale one-liner "Bot sessions are force-yolo; the workspace-only policy + audit log +
-   5MB cap are the exfiltration guards"):** bot sessions today run in forced yolo mode —
-   `BOT_FORCED_MODE` is applied at three botsService sites (draft init, inherit-task
-   draft, and the task-creation `setMode` throat, the single point where mode enters the
-   agent session; providers without yolo support keep their own default mode) — so
-   interactive permission prompts are structurally absent for bot tasks TODAY, and the
-   operative exfiltration guards are the workspace-only path policy + this audit log +
-   the 5MB cap. Track B (3.15.0, specs/off-peak-local-admission.md is the auto-deny
-   precedent) removes the force-yolo lock for bot permission parity; from that point the
-   permission surface joins the guard set and this statement must be revised again.
+   applies). **3.15.0 Track B amendment (§5.9 — supersedes the 3.14.5 Alpha 7
+   honest-guard statement):** Track B permission parity (shipped in `3.15.0-alpha.0`,
+   PR #28; spec = specs/bot-permissions.md) removed the force-yolo lock, so the
+   operative exfiltration guards are now the workspace-only path policy + this audit
+   log + the 5MB cap + **the permission surface**: bot sessions share the single
+   session-wide permission model with the desktop — default `build` = ask before
+   changes; the user can switch modes via `/mode` (including yolo), so mode is NOT
+   permanently build; per-bot permission timeout auto-denies; and the AI cannot switch
+   its own mode. weixin self-loop residual: see specs/bot-permissions.md §1.5
+   (disclosed, unfixed).
 
 ## Invariants (Alpha 0)
 
