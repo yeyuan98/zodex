@@ -9,8 +9,13 @@ desktop 三位点共享 helper + §7.40 fold-in 披露）+ S1/S2/isolation 行�
 成立 + [ulw] 计划评审折叠账全收，handoff §7.39/§7.40）。**§5 alpha.0 版的「四文件合并/
 两腿等价/isolation 由 `.agents` 腿携带」表述已被 alpha.0 rig postmortem（handoff
 §2m）证伪，随本修订废除——勿据旧版实现。** 原 PR2（A1 发布资产 / A2 设置页下载卡 /
-C3 app 级 PATH 前插）**顺延 alpha.2+**（重编号记账，[ulw] n2），本 spec 仅收编其语义
-边界（§2.5 L3、§4.2、§4.6、§9 残留表），实现契约随 alpha.2+ 再修订。红测清单见 §8。
+C3 app 级 PATH 前插）**顺延 alpha.2+**（重编号记账，[ulw] n2）。
+**alpha.2 范围（in progress）= A2′（上游直采下载器）+ 设置页 MCP 区「运行时环境」卡
+（生命周期 + 镜像速率排名展示与切换）+ C3（app 级 L3 前插 + 镜像缺省填空 + Bash 腿）**；
+A1（自有 release 资产）**整体废除**（owner 裁定 2026-10-08，`../ZCode-runtime-alpha2-plan.md`
+§2.0——运行时工件不经我们的发布渠道再分发，下载器直采上游）。本修订收编其语义边界
+（§2.5 L3、§4.2、§4.6、§9 残留表）并落定实现契约（§2.5 L3 实现契约、§4.7）。
+红测清单见 §8（alpha.2 批）。
 
 Owners:
 
@@ -167,6 +172,21 @@ L5 [C1/PR1] pathPrepend 目录前插（~ 展开后绝对路径）
   钉为单测事实，防未来 sanitize 扩名单悄悄破坏用户偏好。
 - **Bash 工具（非 MCP spawn）**：ws 级 = agent 按 AGENTS.md 标记块自行 export（天然最高
   优先）；app 级 = host 侧 `buildRuntimeProcessEnvPatch` 追加（PR2）——两级不冲突。
+- **L3 实现契约（alpha.2 C3）**：
+  - **应用点** = `adapters/src/mcp/index.ts` `createTransport` 调用点，
+    `buildMcpStdioEnv(...)` 输出**之后**、`...config.env` spread **之前**（外层包裹，形制同
+    `applyPathPrependToEnv`；不改 `buildMcpStdioEnv` 内部——保持 `prependRunningNodeDirectory`
+    守卫语义）。
+  - **`<config>` 解析（adapters 不依赖 services）**：`env.ZCODE_DATA_BASE_DIR ?? homedir()`
+    - `.zcode/.runtime`——与 A2′ 写入（services `paths.ts` 同一解析）**同源**；homedir
+      fallback 必须保留（desktop 默认不注入该 env）。
+  - **每次 spawn 同步读 CURRENT + runtime.json，不跨 spawn 缓存**（镜像切换/换版后下一次
+    spawn 生效；`accessSync` 同步 IO 先例）。
+  - **CURRENT 读端容错** = §4.3 同规：缺失/垃圾/悬空（指向已 GC 目录）→ L3 缺席 + warn，
+    **禁止**回退扫描最高 `v<ver>` 目录。
+  - **镜像缺省填空**：存在性检查在 **L2 输出 env** 上**大小写不敏感**进行；键已存在不覆盖；
+    `config.env` 胜出由 L4 spread 顺序结构性达成；**填空值 = effective decision（§4.7
+    override ?? probed）**。
 
 ## 3. C2 — `runtime_unavailable` producer（issue #27 的 UX 闭环，PR1）
 
@@ -201,8 +221,10 @@ proxy = 仅传输层，永不作校验来源）：
 | PBS（uv 托管 python） | `registry.npmmirror.com/-/binary/python-build-standalone`（首选）→ origin GitHub                                 | 目录 JSON 首 64KB                         |
 
 **探测**：每候选一次 Range GET（`curl -r 0-65536 --max-time 5` 形；TS 版 = fetch +
-AbortController 5s），记录 `{candidate, httpCode, latencyMs, ok}`，逐行落日志（技能 →
-会话输出；A2 → `logger.lifecycle`）。失败/超时 = 淘汰。**探针版本来源**（消除「探测先于
+AbortController 5s），记录 `{candidate, httpCode, latencyMs, ok}`，落日志（ws 级技能 →
+会话输出逐行；app 级 A2′ = services 侧实现 → `createServiceLogger`（info/warn/error，经
+host log relay 生产落盘），卡片/renderer 侧行 → `logger.lifecycle`）。**app 级探测日志
+粒度 = 每轮探测一行汇总**（不逐候选刷屏）。失败/超时 = 淘汰。**探针版本来源**（消除「探测先于
 钉版」循环依赖）：探针 URL 中的版本号 = runtime.json 上一轮钉住版本；首轮无记录时用
 技能/下载器**内置 known-good tag**。探针只测传输延迟，不代表目标版本工件存在（tuna 陈旧行
 「命中须校验版本存在」语义保留——版本不存在 = 该候选按失败处理）。
@@ -218,8 +240,12 @@ AbortController 5s），记录 `{candidate, httpCode, latencyMs, ok}`，逐行�
 
 **固化与复用**：结果写 `<rt>/runtime.json`（两级各自一份）：
 `{probedAt, ttlDays: 7, decisions: {nodeDist, uvRelease, pypiIndex, npmRegistry, pbsMirror},
-measurements: [...]}`。**重探触发** = probedAt 超 TTL（7d）/ 显式 refresh / 所选源下载
-硬失败（此时按 measurements 中的次优顺位重试，全部失败才重新探测）。
+measurements: [...]}`。**app 级 runtime.json = 本 schema 的扩展**（见 §4.7：另含
+`overrides` 与 `pinned`，键名尽量与 S1 ws 级的 `versions.node/uv` 对齐）。**schema 分叉
+披露**：S1 ws 级用 `versions.node/uv` + `manual` 决策旗标，app 级用 §4.7 扩展——两级文件
+互不相通、读者不相交（实证 L3 只读 app 级），无互操作义务。**重探触发** = probedAt 超
+TTL（7d）/ 显式 refresh / 所选源下载硬失败（此时按 measurements 中的次优顺位重试，全部
+失败才重新探测）。
 
 ### 4.2 版本解析与跨源校验
 
@@ -227,12 +253,14 @@ measurements: [...]}`。**重探触发** = probedAt 超 TTL（7d）/ 显式 refr
   npmmirror 同名文件）解析精确 `vX.Y.Z`（**npmmirror `latest-*` 目录陈旧——实测坑，禁用**）；
   uv 经 GitHub API latest release；两者钉入 runtime.json 后才构造下载 URL。
 - **跨源校验不变量**：tarball 来自 X，校验值必来自**另一源**——node：SHASUMS256.txt 取自
-  「nodejs.org ↔ npmmirror 中的另一方」；uv：GitHub API asset digest 恒直连
-  `api.github.com`（直连不可达 = 明确报错并提示稍后重试/走 ws 级技能，**不降级为无校验**）；
-  gh-proxy 系内容**永不 pipe 进 shell**、永不作为校验来源。
-- **自有资产（PR2 A1）校验锚点**：各平台 sha256 由构建期烧录进 app 资源（首装/重新验证
-  离线可用）；`runtime-manifest.json` 仅服务「检查更新」的版本发现，其网络获取失败 = 更新
-  检查明确报错（不影响已装版本使用）。
+  「nodejs.org ↔ npmmirror 中的另一方」（tuna **永不作校验来源**）；uv：GitHub API asset
+  digest 恒直连 `api.github.com`（直连不可达 = 明确报错并提示稍后重试/走 ws 级技能，
+  **不降级为无校验**）；gh-proxy 系内容**永不 pipe 进 shell**、永不作为校验来源。
+- **两级同一条不变量（alpha.2 起）**：app 级（A2′ 下载器）与 ws 级（S1 技能）使用**同一条**
+  跨源校验不变量——本节上一条对两级均适用。原「自有资产（PR2 A1）校验锚点：构建期烧录
+  sha256 进 app 资源」段随 A1 废除（owner 裁定 2026-10-08，plan §2.0）删除：运行时工件不经
+  我们的发布渠道再分发，下载器直采上游，校验值 = 上游官方 sha（node SHASUMS256 跨源 / uv
+  GitHub API digest），无 `runtime-manifest.json`、无烧录常量。
 
 ### 4.3 安装布局（版本化目录 + CURRENT 原子指针）
 
@@ -267,18 +295,45 @@ measurements: [...]}`。**重探触发** = probedAt 超 TTL（7d）/ 显式 refr
 
 ### 4.6 生命周期矩阵（收编 runtime-plan 1.5.3）
 
-| 操作    | ws 级（S1 技能，agent 执行）                                                                                                          | app 级（PR2 A2 设置卡，TS 下载器）                                                                                                                                                                  |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| install | 探测→钉版→下载→跨源校验→解压到 `v<ver>/` →写 CURRENT→接线（AGENTS.md 块 + pathPrepend + 镜像 env）                                    | 探测（github/proxy）→经 runtime-manifest.json 解析→下载→sha256→解压 `v<ver>/` →写 CURRENT→`--version` 冒烟                                                                                          |
-| status  | runtime.json（版本/镜像/probedAt）；技能教读取与判读命令                                                                              | 卡片：已装版本（CURRENT）+可用版本（manifest）+最近验证结果+探测摘要                                                                                                                                |
-| test    | 技能 Verify 节：`node --version` / `npm config get registry`（验镜像 env 生效）/ `uvx --version`；再触发 MCP 设置页 mcp/list 重探     | 「重新验证」按钮：重跑 `--version` 冒烟 + 刷新 MCP 状态列表（复用既有 mcp/list 重探）                                                                                                               |
-| update  | 重跑技能→新版本装进**新 `v<ver>/` 目录**→重写 CURRENT（rename 原子）→重写 pathPrepend/AGENTS.md 块/runtime.json→旧目录 best-effort GC | 「检查更新」：比对 manifest 版本→新版本目录就绪→**CURRENT 原子换指针**→旧目录 GC（Windows 文件锁 → 保留、下次启动重试 GC；运行中 MCP 进程 POSIX 下持旧 inode 自然续命，win 下旧目录留存至进程退出） |
-| remove  | 技能 Teardown 节：删 `.zcode/.runtime/` + 摘除 AGENTS.md 标记块 + 清 MCP 条目 pathPrepend/镜像 env + 下一任务验证回落                 | 卡片「删除」：确认对话框→删目录与 runtime.json→解析回落（系统 PATH 或 ws 级）；运行中服务器说明（下一任务生效）                                                                                     |
+| 操作    | ws 级（S1 技能，agent 执行）                                                                                                          | app 级（PR2 A2 设置卡，TS 下载器）                                                                                                                                                                                                                                                                                      |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| install | 探测→钉版→下载→跨源校验→解压到 `v<ver>/` →写 CURRENT→接线（AGENTS.md 块 + pathPrepend + 镜像 env）                                    | 探测（五类工件候选表，§4.1）→经上游版本解析（node dist `index.json` / uv GitHub API latest）→下载→跨源校验（§4.2 同一条不变量）→解压 `v<ver>/` →写 CURRENT→`--version` 冒烟                                                                                                                                             |
+| status  | runtime.json（版本/镜像/probedAt）；技能教读取与判读命令                                                                              | 卡片：已装版本（CURRENT）+可用版本（上游解析）+最近验证结果+探测摘要（五类 × 候选延迟排名）+镜像切换                                                                                                                                                                                                                    |
+| test    | 技能 Verify 节：`node --version` / `npm config get registry`（验镜像 env 生效）/ `uvx --version`；再触发 MCP 设置页 mcp/list 重探     | 「重新验证」按钮：重跑 `--version` 冒烟 + 刷新 MCP 状态列表（复用既有 mcp/list 重探）                                                                                                                                                                                                                                   |
+| update  | 重跑技能→新版本装进**新 `v<ver>/` 目录**→重写 CURRENT（rename 原子）→重写 pathPrepend/AGENTS.md 块/runtime.json→旧目录 best-effort GC | 「检查更新」：重解析上游 latest（node index.json / uv GitHub API）与 runtime.json `pinned` 比对→新版本目录就绪→**CURRENT 原子换指针**→旧目录 GC（Windows 文件锁 → 保留、下次启动重试 GC；运行中 MCP 进程 POSIX 下持旧 inode 自然续命，win 下旧目录留存至进程退出）。**运行时更新不随 app 版本**——上游发现任意时刻可进行 |
+| remove  | 技能 Teardown 节：删 `.zcode/.runtime/` + 摘除 AGENTS.md 标记块 + 清 MCP 条目 pathPrepend/镜像 env + 下一任务验证回落                 | 卡片「删除」：确认对话框→删目录与 runtime.json→解析回落（系统 PATH 或 ws 级）；运行中服务器说明（下一任务生效）                                                                                                                                                                                                         |
 
 原则：**版本化目录 + CURRENT 原子指针**让 update 永不出现半状态；删除与换版对运行中进程
 的影响 = POSIX inode 自然续命 / win 延迟 GC，均无强制重启要求（披露）。**GC 重试归属**：
 app 级 = desktop main 启动时扫 `<config>/.runtime/*/` 清理无指针引用且已过宽限期的版本目录；
 ws 级 = 技能 best-effort、无重试钩子（披露）。
+
+### 4.7 A2′ 实现契约（app 级上游直采下载器；alpha.2）
+
+- **归属**：`packages/services/src/runtime-tools/` 新子模块 `local-runtime/`（探测/版本解析/
+  下载/跨源校验/解压归一化/CURRENT/更新/GC/重验 + runtime.json 读写）。UI 卡经服务 seam
+  消费；adapters 的 L3 读取**不 import services**（§2.5 `<config>` 解析同源约束）。
+- **app 级 runtime.json = 决策与状态唯一持久层**（`<config>/.runtime/runtime.json`），
+  schema = §4.1 的扩展：`{probedAt, ttlDays: 7, decisions: {nodeDist, uvRelease, pypiIndex,
+npmRegistry, pbsMirror}, overrides: {…同形，用户切换项}, measurements: [...], pinned:
+{node, uv}}`（键名对齐披露见 §4.1 固化与复用）。
+- **effective decision = `override ?? probed`**：卡内镜像切换 = 写 `overrides`，优先于探测
+  决策。重探触发（TTL 7d / 显式 refresh / 所选源下载硬失败按次优顺位重试）**只作用于无
+  override 的决策位**。
+- **写读契约**：(i) runtime.json 写入 = tmp + rename 原子（L3 每 spawn 解析，半写 JSON
+  不可见）；(ii) 读端容错与 CURRENT 同规——缺失/损坏 = treat-as-absent + warn，**不猜**；
+  (iii) **更新顺序不变量**：新 `v<ver>/` 目录就绪 → 写 runtime.json（pinned）→ CURRENT
+  原子换指针 → 旧目录 GC（stale pinned 只影响卡片/检查更新显示，有界）；(iv) **override
+  源硬失败 = 明确报错 + 保留 override**，绝不静默回落到用户已弃用的源。
+- **探测全五类工件**：install 相关（nodeDist/uvRelease）+ 填空相关（npmRegistry/pypiIndex/
+  pbsMirror）——镜像切换与 L3 缺省填空依赖后三类。
+- **校验锚点**：tuna 永不作校验来源；node 双锚点（nodejs.org + npmmirror）均不可达 =
+  明确报错，不降级为无校验（与 uv `api.github.com` 规则**对称**）；uv digest 恒直连
+  `api.github.com`，不可达 = 明确报错。
+- **GitHub API 匿名调用**：匿名限流（60 req/h）对偶发检查足够；命中限流 = 明确报错稍后
+  重试。
+- **日志通道**：services 侧 `createServiceLogger`（info/warn/error；每轮探测一行汇总，
+  经 host log relay 生产落盘），renderer 卡片行 `logger.lifecycle`（§4.1）。
 
 ## 5. S2 — bundled skill `zcode-config-reference` 契约（alpha.0 落地；alpha.1 修正假等价）
 
@@ -476,6 +531,34 @@ return [];` 一带）插装：无模型时 `getConfigCommandMissingMessageId` �
 - rig：E0-E2 + E4 随 PR1 正文发布（PR2 后补 E3/E5；清单见 runtime-plan Part 3）。E4 =
   破坏 PATH 复现 #27 → 状态行显示新文案（指路 S1）；按 S1 修复后下一任务恢复。
   alpha.1 rig 门 = E6-E8（§5.1；清单细化见 alpha1-plan Part 3）。
+- **alpha.2 红测（PR2：A2′ + 镜像卡 + C3；W1 先红，W5/W6 转绿）**：
+  1. sanitize 钉测（shared）：`npm_config_registry`/`UV_*`（多大小写形态）不剥；
+     `*_proxy/cafile/ca` 族仍剥（含 `pnpm_config_ca` 形态）。
+  2. L3 前插纯函数（adapters）：`ZCODE_DATA_BASE_DIR` 优先 + homedir fallback + 拼接
+     `.zcode/.runtime`；CURRENT 有效 → PATH 序 L5→L3→L2；缺失/垃圾/悬空 → 无前插 +
+     不扫目录。
+  3. 镜像缺省填空（adapters）：effective decision（override 胜 probed）填
+     `npm_config_registry`/`UV_DEFAULT_INDEX`/`UV_PYTHON_INSTALL_MIRROR`；L2 输出 env
+     大小写不敏感存在性；已存在不覆盖。
+  4. Bash 腿（services）：app 运行时在场（CURRENT 有效 + bin 存在）→ 追加 bin 目录 +
+     填空；缺席 → null/不变。
+  5. 探测择优纯函数（services）：origin 存活时 mirror 须 ≤0.6×origin-latency 才胜；
+     origin 死 → 存活最快者胜；平局 ±10% → 候选表序；全灭 → 明确报错。
+  6. 跨源校验选择（services）：node tarball 自 X → SHASUMS 取 nodejs.org↔npmmirror 另
+     一方（tuna 永不作校验来源）；node 双锚点均不可达 = 明确报错；uv digest 恒
+     `api.github.com`、不可达 = 明确报错（不降级无校验）。
+  7. CURRENT 原子换指针 + GC（services）：tmp+rename（读者无半写）；无引用 + 过宽限期 →
+     删除、被引用 → 保留；win 锁模拟 → 保留 + 标记重试。
+  8. 解压归一化布局矩阵（services）：node win/unix 顶层剥离、uv win 平铺 / unix 顶层
+     剥离、tar.exe 兼 .zip/.tar.xz。
+  9. runtime.json 决策与覆盖（services）：override 优先；TTL/硬失败重探只作用于无
+     override 位；tmp+rename 原子写 + 读端容错（缺失/损坏 = 缺席 + warn）；override 硬
+     失败 = 报错 + 保留；更新顺序不变量（新目录→runtime.json→CURRENT→GC）。
+  10. UI 卡（ui）：状态呈现（已装/可用/最近验证/排名）+ 安装/删除流进度事件 + 镜像切换
+      写 overrides（沿 mcpStore/pluginManagementStore 测试形制，service seam 可注入）。
+  11. C2 文案 pin 更新（ui）：两 locale `runtime_unavailable` 同时指路 S1 技能**与设置
+      运行时卡**。
+  12. 回归契约：`mcpSettingsPathPrependRoundTrip` 等既有钉测保持绿。
 
 ## 9. 残留与不做（披露）
 
@@ -487,8 +570,18 @@ return [];` 一带）插装：无模型时 `getConfigCommandMissingMessageId` �
 - **remote 混版窗口**：desktop 新、远端 CLI 旧 → capability flag falsy → pathPrepend 暂不
   下发（功能缺席但无硬拒）；重连部署匹配 bundle 后自动收敛。已知瞬态（§3e.4 同族）。
 - **探针只测传输延迟**，不代表目标版本工件存在（tuna 陈旧坑由「命中须校验版本存在」兜）。
-- **GitHub 整体不可达**：app 级**更新**与 uv 新版本安装不可用（ws 级同理受上游限制）；
-  uv 校验锚点（api.github.com）不可达 = 明确报错，不降级为无校验。
+- **GitHub 整体不可达（对称约束）**：app 级**更新**与 uv 新版本安装不可用，与 ws 级同受
+  上游限制（**对称披露**）；uv 校验锚点（api.github.com）不可达 = 明确报错，不降级为无
+  校验；GitHub API 匿名限流（60 req/h）命中 = 明确报错稍后重试。
+- **Bash 腿池化新鲜度（alpha.2 披露）**：`buildRuntimeProcessEnvPatch` 每 host 进程一次 +
+  agent 进程按 workspaceKey 池化 → 安装/换版/**镜像切换**后**新 spawn 的 agent 进程**才
+  生效（agent spawn 缝重算 app-bin 追加段**与**镜像填空值两段）；池内复用进程需回收/
+  重连后才反映新环境。
+- **`ZCODE_DATA_BASE_DIR` shell-export 边角（披露不修）**：settings dataBaseDir 显式 =
+  homedir 且 shell 另行 export 自定义值 → main 侧启动 GC 与 host/A2′/C3 解析可能分叉
+  （既有链路属性，pre-existing chain property）——登记残留，不加防御代码。
+- **dataBaseDir 生命周期中变更（alpha.2 披露）**：运行时卡在操作时点读取当前 dataBaseDir
+  （卡 = 本机全局事实源）；变更后已 spawn 进程的环境不回填，语义靠重启收敛。
 - **不做**：installer 时间组件勾选（仅 Windows NSIS 可行且需自定义 components 页；
   mac DMG/Linux AppImage-deb 无安装期 UI——跨平台正解 = PR2 按需下载）；volta（官方弃维）、
   corepack（node 26 已不随发行）、fnm/nvm 类（shell 修改或全局 shim，违背零系统修改）；
