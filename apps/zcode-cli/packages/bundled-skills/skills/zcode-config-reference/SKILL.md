@@ -46,7 +46,7 @@ to take effect.
 | `isolation` | `"session" \| "workspace"` | Server instance sharing scope — **protocol shape only** (desktop → CLI session payload). No file leg carries it: the strict server schema for both `.zcode/config.json` and `.agents/mcp.json` rejects this key, and writing it in either file drops the whole server entry with a warning. |
 | `protocolVersion` | `"auto" \| "legacy" \| "2026-07-28"` | MCP protocol negotiation mode. |
 | `enabled` | boolean | Defaults to true; `false` keeps the entry but does not start it. |
-| `cwd` | string | Working directory for the spawned process (both file legs; a relative path resolves against the directory containing the config file's scope root). |
+| `cwd` | string | Working directory for the spawned process (both file legs). Scope-dependent resolution: project-scope entries resolve a relative path against the config file's directory (the workspace root containing `.zcode`/`.agents`); user-level entries keep it unnormalized and the spawn resolves it against the session working directory. |
 
 http-shaped servers use `type: "http"` (or `"sse"`), `url`, and `headers` (a legacy
 `http_headers` key on the `.zcode` leg is migrated to `headers`).

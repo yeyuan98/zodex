@@ -767,8 +767,9 @@ export function McpSettingsSection({
           getCurrentWorkspaceKey: getCurrentRefreshWorkspaceKey,
           markServerStatusListRefreshFailed,
           mergeServerStatusSnapshots,
-          // 设置页列表可能来自 `.agents/mcp.json` fallback；agent 侧 mcp/list 自己
-          // createConfig 读不到这批 UI-resolved MCP，必须和真实 session 一样显式下发。
+          // 设置页列表可能来自 `.agents/mcp.json` fallback；agent createConfig 自 alpha.1
+          // 起四源逐名合并已能读到这批条目，但 mcp/list 探针仍需与显示集一致——缺失该批
+          // 显式参数的行会没有 status snapshot 并被 UI 误标红，必须和真实 session 一样显式下发。
           mcpServers: requestedMcpServers,
           mode: options?.mode,
           requestedWorkspaceKey,
