@@ -1,5 +1,45 @@
 # Changelog
 
+## [3.15.0-alpha.2](https://github.com/yeyuan98/zodex/compare/v3.15.0-alpha.1...v3.15.0-alpha.2) (2026-10-07)
+
+### Features
+
+* **bots:** /help 尾部追加三条使用注记（zh/en） ([4b925a1](https://github.com/yeyuan98/zodex/commit/4b925a1f8bdc897da3c2720bc8864d2b608b41dd))
+  * buildHelpText 命令目录后追加空行 + helpNoteConfigNextTask/helpNoteSkillsByName/helpNotePluginsNoHotLoad 三条注记（3.15.0-alpha.2 Track B R3）
+  * 注记是说明文本非命令，不参与 allowedCommands 过滤，命令收紧时仍渲染（guard 测试锁定）
+
+
+### Bug Fixes
+
+* **ci:** CLI workspace 格式门修复——5 文件 oxfmt 重排 + pre-push 补 CLI format:check ([868e4b9](https://github.com/yeyuan98/zodex/commit/868e4b98fac59399341aa9fee58bd4250f68cb5f))
+  * apps/zcode-cli 为独立 workspace：根 fmt:check 不覆盖其文件，仅 CI 的 CLI job 检查——本 train（alpha.0×3 + alpha.1×2）触碰的 5 个文件未过 CLI 侧 oxfmt，main 上 CI 自 alpha.0 发版起连续红（Release Desktop 不受影响）
+  * 5 文件纯格式重排（参数折行/对象缩进），bootstrap 32/32、CLI typecheck/lint/registry 均绿
+  * verify:pre-push 追加 pnpm --dir apps/zcode-cli format:check——本地关上同类缺口，pre-push 与 CI 的 CLI job 对齐
+
+* **ui:** MCP 导入与远端同步补失效 + 评审折叠（logScope/reason/spec 行号） ([402df55](https://github.com/yeyuan98/zodex/commit/402df552e2761ebbbf337fc652a324bf1824caeb))
+  * MAJOR-1: McpSettingsSection onImported/onMcpSynced 回调补 invalidateDeferredDraftSessionForRuntimeChange（reason=settings-mcp-import / settings-remote-mcp-sync，skills 先例平权；导入/远端同步直写磁盘不经 store 四写 action）
+  * NIT-3: useSettingsSync 门改用 RuntimeChange + logScope=settings-sync，legacy web 关闭日志不再误标 [skills]
+  * NIT-4: settingsSyncDraftInvalidationReason 未知类别按原名入 reason，不再误标 plugin；谓词测试补未知类别断言
+  * spec §3 新增 MCP 导入/远端同步两行并刷新过期行号（mcpStore 四写 :416/:432/:447/:479、mergePreloaded :692/deletePreloaded :724、persistScopedChange :233、useSettingsSync 门 :469、sidebar/header :1169/:733）；§7 验收改为诚实覆盖表述；Status 折叠 [ulw] 评审
+
+* **ui:** MCP 设置写操作失效 pending draft session（与 skills/plugins 平权） ([fd9d20b](https://github.com/yeyuan98/zodex/commit/fd9d20b9ad1914bb41719b8ce9b68e947f94eecc))
+  * mcpStore 四写 action（add/update/delete/toggle）接入 invalidateDeferredDraftSessionForRuntimeChange，reason=settings-mcp-add|save|delete|enabled，版本 bump 于 helper 首个 await 前同步完成
+  * 新增 setMcpStoreSessionService DI（Pick<IZCodeSessionService,"closeSession">，Root 于 ServiceProvider 内注入 legacy v3 草稿 closeSession 腿），未注入时以 no-op 桩保证 bump；MCP 缝自带 [mcpStore] info 日志作 rig D1 判据（spec §6）
+  * settings-sync 导入门扩为 skills|mcpServers|plugins（新纯谓词 lib/settingsSyncDraftInvalidation.ts），失效仍只做一次、reason 按首个命中类别取 settings-sync-skill|mcp|plugin-import，spec §3 表同步
+
+
+### Documentation
+
+* **specs:** bot-permissions Status——alpha.1 rig C0-C6 全 PASS + alpha.2 计划指针 ([49d4b0e](https://github.com/yeyuan98/zodex/commit/49d4b0ecd077f6e41149e58195460d384877b1a9))
+  * rig 判定入档：C0-C6 全 PASS（owner 陈述 2026-10-07，§8.1 分级；含 C5 remote 门控写腿）
+  * 下一步指针：alpha.2 收尾批次（R1 MCP 草稿失效平权 / R2 安全节修订 / R3 帮助注记）→ rig D0-D3 → official 3.15.0 评估
+
+* **specs:** bot-permissions Status——alpha.1 已发版 + awaiting rig C0-C6 ([c797e93](https://github.com/yeyuan98/zodex/commit/c797e93f759c5e5f5708570a75294709160b7ae7)), closes [#30]()
+
+* **spec:** 收编草稿失效不变量 + bot-file-delivery §5.9 post-Track-B 修订 ([870114c](https://github.com/yeyuan98/zodex/commit/870114c6c412cbfaf5685f3a2f4a77b08379e0e3))
+  * 新建 specs/draft-session-invalidation.md：收编 draftRuntimeInvalidationVersion 唯一失效货币不变量与变更源清单表（skills/plugins/hooks/browser/settings-sync 既有 + MCP 本批新增 mcpStore 四写 action store 层缝），排除项守卫行（mergePreloaded/deletePreloaded 零调用方）、user-scope 平权与失败语义披露、rig D1 判据日志行（[mcpStore] scope + reason=settings-mcp-*）
+  * bot-file-delivery.md §5.9：守卫表述翻为 post-Track-B 形态——workspace-only 路径策略 + 审计日志 + 5MB 上限 + 权限面（默认 build 变更前询问、用户经 /mode 可切含 yolo 非恒为 build、per-bot 超时自动拒绝、全会话单一权限模型、AI 不能自切模式），交叉引用 bot-permissions.md（weixin 自回环 residual 见其 §1.5），删除括号内 off-peak 先例引用
+
 ## [3.15.0-alpha.1](https://github.com/yeyuan98/zodex/compare/v3.15.0-alpha.0...v3.15.0-alpha.1) (2026-10-06)
 
 ### Features
