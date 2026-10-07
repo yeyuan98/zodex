@@ -282,7 +282,13 @@ absolute paths. Before writing, check the 100 KB AGENTS.md cap: if the file is a
 
 MCP config lives in `<ws>/.agents/mcp.json` (`mcpServers` key) and/or
 `<ws>/.zcode/config.json` (`mcp.servers`); field semantics are documented in the
-`zcode-config-reference` skill.
+`zcode-config-reference` skill. Either file works — the `.agents` convention is preferred.
+
+**Same-name conflict rule:** when both files define the same server name in the same
+scope, the `.zcode` leg wins for that name (`.agents`-unique names are unaffected), and a
+user-level entry with the same name shadows the workspace-level one. Before wiring, check
+the user-level files (`~/.zcode/cli/config.json`, `~/.agents/mcp.json`) for an existing
+entry with the same name — otherwise the workspace edit silently loses.
 
 - **New or edited entries** for `npx`/`uvx` servers carry `pathPrepend` (absolute versioned
   bin dirs from the Step 6 table) plus the mirror env keys from Step 7:

@@ -12,8 +12,9 @@ guessable, the `.zcode` paths are not.
 
 ## MCP server configuration
 
-Four files are read and merged; a server defined in any of them is available in every
-workspace (user level) or this workspace only (workspace level):
+Four files are read and merged **per server name** (same-name conflicts resolve per entry,
+not per file): a server defined in any of them is available in every workspace (user level)
+or this workspace only (workspace level):
 
 | Level | `.zcode` leg | `.agents` leg |
 | --- | --- | --- |
@@ -22,6 +23,15 @@ workspace (user level) or this workspace only (workspace level):
 
 Both legs are equivalent in effect; keep a workspace's servers in `<ws>/.agents/mcp.json`
 (the widely-followed convention) unless the user already uses the `.zcode` leg.
+
+**Same-name conflict rule (per entry, not per file):** when both legs in the same scope
+define the same server name, the `.zcode` leg wins for that name — only that one
+`.agents` entry is shadowed, and `.agents`-unique names still load. Across scopes, a
+user-level entry with the same name shadows the workspace-level entry. This is the classic
+incident pattern: writing an entry into `<ws>/.agents/mcp.json` while a user-level file
+(`~/.zcode/cli/config.json` or `~/.agents/mcp.json`) already defines that name makes the
+workspace edit silently lose — check both user-level files when a workspace entry refuses
+to take effect.
 
 ### stdio server fields
 
@@ -33,18 +43,19 @@ Both legs are equivalent in effect; keep a workspace's servers in `<ws>/.agents/
 | `env` | object | Extra environment for the spawned process. **Whole-key replacement**: each key here replaces that key entirely — an explicit `env.PATH` replaces the *whole* PATH (killing the runtime prepend and the inherited login PATH). Prefer `pathPrepend` over writing `env.PATH`. |
 | `pathPrepend` | string[] | Directories prepended to the far left of PATH when spawning this server. Elements support `~`/`~/` expansion and **must be absolute after expansion** — a relative element makes the server config invalid (rejected loudly, never silently dropped or truncated). Prepended at spawn time after `env` is applied, so it wins even over an explicit `env.PATH`: highest PATH precedence. Elements join with the platform path separator. |
 | `timeoutMs` | number | Positive startup timeout in milliseconds. |
-| `isolation` | `"session" \| "workspace"` | Server instance sharing scope (carried on the `.agents` leg / protocol shape). NOT accepted by the `.zcode/config.json` strict schema — writing it there drops the whole server entry with a warning; keep it to `.agents/mcp.json`. |
+| `isolation` | `"session" \| "workspace"` | Server instance sharing scope — **protocol shape only** (desktop → CLI session payload). No file leg carries it: the strict server schema for both `.zcode/config.json` and `.agents/mcp.json` rejects this key, and writing it in either file drops the whole server entry with a warning. |
 | `protocolVersion` | `"auto" \| "legacy" \| "2026-07-28"` | MCP protocol negotiation mode. |
 | `enabled` | boolean | Defaults to true; `false` keeps the entry but does not start it. |
-| `cwd` | string | Working directory for the spawned process (`.zcode` config leg). |
+| `cwd` | string | Working directory for the spawned process (both file legs; a relative path resolves against the directory containing the config file's scope root). |
 
 http-shaped servers use `type: "http"` (or `"sse"`), `url`, and `headers` (a legacy
 `http_headers` key on the `.zcode` leg is migrated to `headers`).
 
-**Strict schema warning for `<ws>/.zcode/config.json`:** the CLI validates each server entry
-strictly — an unknown field makes it drop the *whole server* with a warning diagnostic
-(`config_mcp_server_invalid`), not just the field. Do not invent fields on that leg; write
-only the fields above that apply to your server's shape.
+**Strict schema warning (both file legs):** the CLI validates each server entry in
+`<ws>/.zcode/config.json` and `<ws>/.agents/mcp.json` with the same strict schema — an
+unknown field makes it drop the *whole server* with a warning diagnostic
+(`config_mcp_server_invalid`), not just the field. Do not invent fields on either leg;
+write only the fields above that apply to your server's shape.
 
 Example entry (see the `zcode-workspace-runtimes` skill when `command` is `npx`/`uvx` and the
 machine has no runtime):

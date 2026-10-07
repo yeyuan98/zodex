@@ -60,9 +60,10 @@ export async function listMcpServers(
   const explicitRuntimeMcp = protocolMcpServersToRuntimeMcpConfig(params.mcpServers);
   const configuredMcpServers = {
     ...pluginOutcome.mcpServers,
-    // 设置页的本地 MCP 列表由 desktop main 解析 `.zcode` / `.agents` fallback，
-    // session runtime 也使用这批 params.mcpServers。mcp/list 不能再只靠 agent createConfig，
-    // 否则 `.agents` fallback 行会缺少 status snapshot 并被 UI 误标红。
+    // agent createConfig 自 alpha.1 起四源逐名合并（specs/agent-runtimes.md §5.1），回落腿
+    // configResult.config.mcp.servers 已含 `.agents` 条目；设置页仍由 desktop main 下发
+    // params.mcpServers（三位点逐名合并后的显示集，§5.4）驱动 mcp/list 探针，缺失该批
+    // 显式参数的行会没有 status snapshot 并被 UI 误标红——mcp/list 不能只靠文件腿回落。
     ...(explicitMcpServersProvided
       ? (explicitRuntimeMcp?.servers ?? {})
       : configResult.config.mcp.servers),
