@@ -38,6 +38,8 @@ interface HelpHarnessOptions {
   locale?: "zh-CN" | "en-US";
   /** 显式 false 时 /file 行必须从 /help 输出中隐藏。 */
   fileAllowed?: boolean;
+  /** 追加覆盖 allowedCommands（R3 注记 guard 测试：收紧命令后注记仍须渲染）。 */
+  allowedCommandsOverrides?: Record<string, boolean>;
 }
 
 interface HelpHarness {
@@ -67,6 +69,7 @@ async function createHelpHarness(options: HelpHarnessOptions = {}): Promise<Help
           allowedCommands: {
             ...baseAllowedCommands(),
             ...(options.fileAllowed === false ? { file: false } : {}),
+            ...(options.allowedCommandsOverrides ? { ...options.allowedCommandsOverrides } : {}),
           },
           currentOptions: {},
           replyMode: "assistant_changes",
@@ -216,5 +219,89 @@ test("allowedCommands.file: false → /help 输出隐藏 /file 行（zh + en）"
     assert.ok(replies[0].text.includes("**/reply**"));
   } finally {
     await enHarness.dispose();
+  }
+});
+
+// 红测依据 = 3.15.0-alpha.2 Track B 收尾 R3（plan Part 2 / messages.ts 同批新增 key）：
+// buildHelpText 尾部必须追加三条注记（配置变更生效时机 / 技能按名调用 / 插件不热加载），
+// 文案与 messages.ts 的 helpNoteConfigNextTask / helpNoteSkillsByName /
+// helpNotePluginsNoHotLoad 逐字一致。今日 buildHelpText 尚未追加 ⇒ 断言红；W2 接线后转绿。
+const HELP_NOTE_TEXTS_ZH = [
+  "模式/超时等配置变更自下一个任务生效",
+  "已安装技能可在会话中按名称调用",
+  "插件不会热加载进运行中的会话",
+] as const;
+const HELP_NOTE_TEXTS_EN = [
+  "Config changes (mode, timeout) take effect on the next task",
+  "Installed skills can be invoked by name mid-session",
+  "Plugins never hot-load into a running session",
+] as const;
+
+test("/help 尾部渲染三条注记（zh）", async () => {
+  const harness = await createHelpHarness();
+  try {
+    const replies = await harness.sendHelp("/帮助");
+    assert.equal(replies.length, 1);
+    const text = replies[0].text;
+    for (const note of HELP_NOTE_TEXTS_ZH) {
+      assert.ok(text.includes(note), `missing note line: ${note}\n${text}`);
+    }
+    // 注记必须位于命令目录尾部（bind 为最后一条目录行），不能插在命令中间。
+    const bindIndex = text.indexOf("**/bind <code>**");
+    for (const note of HELP_NOTE_TEXTS_ZH) {
+      assert.ok(
+        text.indexOf(note) > bindIndex,
+        `note must render after bind line: ${note}\n${text}`,
+      );
+    }
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("/help 尾部渲染三条注记（en）", async () => {
+  const harness = await createHelpHarness({ locale: "en-US" });
+  try {
+    const replies = await harness.sendHelp("/help");
+    assert.equal(replies.length, 1);
+    const text = replies[0].text;
+    for (const note of HELP_NOTE_TEXTS_EN) {
+      assert.ok(text.includes(note), `missing note line: ${note}\n${text}`);
+    }
+    const bindIndex = text.indexOf("**/bind <code>**");
+    for (const note of HELP_NOTE_TEXTS_EN) {
+      assert.ok(
+        text.indexOf(note) > bindIndex,
+        `note must render after bind line: ${note}\n${text}`,
+      );
+    }
+  } finally {
+    await harness.dispose();
+  }
+});
+
+test("guard：allowedCommands 大幅收紧时三条注记仍渲染（注记非命令，永不过滤）", async () => {
+  // 守卫（不变量反向）：注记是说明文本不是命令，不参与 allowedCommands 过滤；
+  // 控制变量 = 同一输出中命令行确实被收紧（/状态 隐藏），注记仍全部在场。
+  const harness = await createHelpHarness({
+    allowedCommandsOverrides: {
+      status: false,
+      new: false,
+      workspace: false,
+      model: false,
+      thoughtLevel: false,
+      reply: false,
+    },
+  });
+  try {
+    const replies = await harness.sendHelp("/帮助");
+    assert.equal(replies.length, 1);
+    const text = replies[0].text;
+    assert.ok(!text.includes("**/状态**"), `status line must be hidden: ${text}`);
+    for (const note of HELP_NOTE_TEXTS_ZH) {
+      assert.ok(text.includes(note), `missing note line: ${note}\n${text}`);
+    }
+  } finally {
+    await harness.dispose();
   }
 });
