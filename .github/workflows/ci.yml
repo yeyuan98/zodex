@@ -132,6 +132,13 @@ jobs:
           pnpm --filter @zcode/services test
           pnpm --filter @zcode/desktop test
           pnpm --filter @zcode/server test
+      # CLI 包 exports 指向 dist/*.js（与主 workspace 的 src 直出不同）；单测经
+      # node_modules 解析 @zcode/*，须先构建被测包的依赖闭包（本地 dist 为开发
+      # 产物，CI 干净环境无之——首个 CI runner 接入时实锤）。
+      - name: CLI workspace unit tests
+        run: |
+          pnpm --filter @zcode/adapters... build
+          pnpm --filter @zcode/bootstrap... build
           # CLI workspace 测试此前无任何 runner（3.16.0 PR1 起纳入，含 pathPrepend 契约矩阵）
           pnpm --filter @zcode/adapters test
           pnpm --filter @zcode/bootstrap test
