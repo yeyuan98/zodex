@@ -73,19 +73,15 @@ test("A（红·到期 deny）：permission kind + per-entry deadline 注册 ⇒ 
 test("B（红·无隐藏宽限）：permission 注册 ⇒ 首个 autoResolution 状态即 visibleCountdown（永不 hiddenGrace）", async () => {
   const registry = new V4InteractionRegistry();
   const states: V4InteractionAutoResolution[] = [];
-  const unregister = registry.register(
-    "perm-grace",
-    () => {},
-    {
-      sessionId: "sess-perm-b",
-      kind: "permission",
-      // deadline 足够长：本场景只观察首个状态，不触发到期。
-      autoResolutionMs: 5_000,
-      onAutoResolutionUpdated: (state) => {
-        states.push(state);
-      },
+  const unregister = registry.register("perm-grace", () => {}, {
+    sessionId: "sess-perm-b",
+    kind: "permission",
+    // deadline 足够长：本场景只观察首个状态，不触发到期。
+    autoResolutionMs: 5_000,
+    onAutoResolutionUpdated: (state) => {
+      states.push(state);
     },
-  );
+  });
   try {
     assert.ok(
       await waitFor(() => states.length > 0, 2000),

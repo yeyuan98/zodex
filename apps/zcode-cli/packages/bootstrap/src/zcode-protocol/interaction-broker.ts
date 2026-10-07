@@ -632,11 +632,7 @@ async function resolvePermissionDeadline(
   const permissionAutoDenyMs =
     sessionRecord?.permissionAutoDenyMs ??
     (await readPersistedPermissionDeadline(context, request));
-  const initialAutoResolution = await readPersistedAutoResolution(
-    context,
-    request,
-    "permission",
-  );
+  const initialAutoResolution = await readPersistedAutoResolution(context, request, "permission");
   return {
     ...(permissionAutoDenyMs !== undefined ? { permissionAutoDenyMs } : {}),
     ...(initialAutoResolution ? { initialAutoResolution } : {}),
