@@ -355,6 +355,31 @@ nodes:
     codeSeeds:
       - file: apps/zcode-cli/packages/core/src/runtime/methods/turn-model.ts
         symbol: applySubmissionExecutionState
+  - id: service.mcp-config-discovery
+    kind: service
+    label: MCP config file discovery and per-name merge (CLI runtime + desktop display)
+    aliases:
+      - mcp config
+      - mcp.json
+      - .agents mcp
+      - mcp.servers
+      - MCP 配置发现
+      - 四文件合并
+    codeSeeds:
+      - file: apps/zcode-cli/packages/adapters/src/config/config-factory.ts
+        symbol: createConfig
+      - file: packages/shared/src/workspace-hook-config.ts
+        symbol: discoverWorkspaceHookConfigPaths
+      - file: packages/services/src/mcp-sync/mcpSyncService.ts
+        symbol: createMcpSyncService
+      - file: packages/desktop/src/main/mcpUserDirectory/index.ts
+        symbol: loadCliMcpFromUserDirectory
+    invariants:
+      - "Runtime loading merges four file legs per server name (project .agents < project .zcode
+        < user .agents < user .zcode < env < cli); display sites must not shadow whole .agents
+        files when the same-scope .zcode file is non-empty."
+      - ".agents/mcp.json discovery is MCP-only parallel discovery and must never enter workspace
+        hook candidates, bundle snapshot or digest, or existing trust records churn."
 edges:
   - from: capability.model-selection
     to: surface.conversation-model-control

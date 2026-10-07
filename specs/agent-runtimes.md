@@ -1,11 +1,15 @@
 # Spec: Agent Runtime Self-Sufficiency（3.16.0 train：pathPrepend 环境缝 + runtime_unavailable 闭环 + bundled 配置/运行时技能）
 
-Status: **DRAFT — 随 `3.16.0-alpha.0` 实现中（spec-first；红测先行）。** 范围 = PR1
-（C1 pathPrepend / C2 runtime_unavailable / S1 `zcode-workspace-runtimes` / S2
-`zcode-config-reference` + 四清单钉测 + W4 两 rider）；PR2（A1 发布资产 / A2 设置页
-下载卡 / C3 app 级 PATH 前插）为后续 PR，本 spec 仅收编语义边界（§2.5 L3、§4.2、§4.6、
-§9 残留表），实现契约随 PR2 再修订。依据 = 权威计划 `../ZCode-runtime-plan.md` v3.1
-（owner 全裁定 + [ulw] 两轮收口）Part 1/Part 1.5 逐条收编；红测清单见 §8。
+Status: **DRAFT — alpha.0 已发布（PR #39，release `8878a2a`）；`3.16.0-alpha.1`
+纠偏实现中（spec-first；红测先行）。** alpha.1 范围 = `.agents/mcp.json` 运行时腿接线：
+§5.1-§5.5 为**权威节**（四源逐名合并 + 全序钉死 + 同一 strict schema + hook 接缝钉死 +
+desktop 三位点共享 helper + §7.40 fold-in 披露）+ S1/S2/isolation 行技能修正；依据 =
+权威计划 `../ZCode-runtime-alpha1-plan.md` v1（owner GO = Option A 使等价成立 +
+[ulw] 计划评审折叠账全收，handoff §7.39/§7.40）。**§5 alpha.0 版的「四文件合并/
+两腿等价/isolation 由 `.agents` 腿携带」表述已被 alpha.0 rig postmortem（handoff
+§2m）证伪，随本修订废除——勿据旧版实现。** 原 PR2（A1 发布资产 / A2 设置页下载卡 /
+C3 app 级 PATH 前插）**顺延 alpha.2+**（重编号记账，[ulw] n2），本 spec 仅收编其语义
+边界（§2.5 L3、§4.2、§4.6、§9 残留表），实现契约随 alpha.2+ 再修订。红测清单见 §8。
 
 Owners:
 
@@ -36,6 +40,17 @@ Owners:
 - **Riders（W4 独立 commit）**：logger 三缝 = `packages/ui/src/store/mcpStore.ts` +
   `packages/ui/src/lib/zcodeDraftSkillInvalidation.ts`；/mode 文案 =
   `packages/services/src/bots/botsService.ts` + `packages/services/src/bots/messages.ts`。
+- **`.agents` 运行时腿（alpha.1）四源装载唯一所有者** =
+  `apps/zcode-cli/packages/adapters/src/config/config-factory.ts`（`createConfig` /
+  `resolveEffectiveMcpServers`：project `.zcode`（沿 `discoverWorkspaceHookConfigPaths`
+  既有候选）+ project `.agents` + user `.zcode` + user `.agents` 逐名合并，§5.1）；
+  **hook 接缝所有者** = `packages/shared/src/workspace-hook-config.ts`
+  （`buildWorkspaceHookCandidatePaths` 不得引入 `.agents/mcp.json`，§5.3）。
+- **desktop 显示合并（alpha.1）共享纯函数 helper**：三位点统一调用——
+  `packages/services/src/mcp-sync/mcpSyncService.ts`
+  （`readDirectoryServersFromPreferredSources` + `collectEffectiveUserMcpRecords`）与
+  desktop main 孪生 `packages/desktop/src/main/mcpUserDirectory/index.ts`（§5.4；禁止
+  孪生复制粘贴）。
 
 Related: `draft-session-invalidation.md`（MCP 写缝失效 + §6 logger.lifecycle 披露 =
 rider A 前科）、`bot-permissions.md` §8.4（F4 mode 选项源 = rider B 同缝）、
@@ -245,7 +260,9 @@ measurements: [...]}`。**重探触发** = probedAt 超 TTL（7d）/ 显式 refr
 ### 4.5 MCP 接线
 
 新写/改写 `.agents/mcp.json` 条目带 `pathPrepend`（C1）+ 镜像 env；对存量
-`command:"npx"/"uvx"` 条目同样补 `pathPrepend`。
+`command:"npx"/"uvx"` 条目同样补 `pathPrepend`。目标文件两腿任一（alpha.1 起等价，
+§5.1）；同名冲突时 `.zcode` 腿逐名胜出、user 级遮蔽 workspace 级——S1 文案必须
+携带该冲突注记。
 
 ### 4.6 生命周期矩阵（收编 runtime-plan 1.5.3）
 
@@ -262,15 +279,21 @@ measurements: [...]}`。**重探触发** = probedAt 超 TTL（7d）/ 显式 refr
 app 级 = desktop main 启动时扫 `<config>/.runtime/*/` 清理无指针引用且已过宽限期的版本目录；
 ws 级 = 技能 best-effort、无重试钩子（披露）。
 
-## 5. S2 — bundled skill `zcode-config-reference` 契约（PR1，W3 实现）
+## 5. S2 — bundled skill `zcode-config-reference` 契约（alpha.0 落地；alpha.1 修正假等价）
 
-内容 = 配置契约参考（纯文档型 skill，**英文正文**）：
+内容 = 配置契约参考（纯文档型 skill，**英文正文**）。MCP 文件腿的读取、合并与冲突
+语义以 §5.1-§5.5 为**权威**（skill 文案必须忠实承载，不得弱化；技能内容测试钉不变量
+而非逐字）：
 
-- **MCP 配置路径表**：ws 级 `<ws>/.zcode/config.json`（`mcp.servers`）与
+- **MCP 配置路径表**：四文件 = ws 级 `<ws>/.zcode/config.json`（`mcp.servers`）与
   `<ws>/.agents/mcp.json`（`mcpServers`）、user 级 `~/.zcode/cli/config.json` 与
-  `~/.agents/mcp.json`（`mcpSyncService.ts:43-58`）。
-- **字段表**：`command` / `args` / `env` / **`pathPrepend`**（C1 新增，含 `~` 展开与绝对
-  路径不变量）/ `type` /（http 形态 `url`/`headers`）。
+  `~/.agents/mcp.json`（描述符 `mcpSyncService.ts:43-59`）。四文件**都被读取并参与
+  逐名合并**（§5.1）；skill 必须陈述**同名冲突规则**：同 scope 内 `.zcode` 腿胜出、
+  user 级同名条目遮蔽 workspace 级（= S1 事故模式，明说）。
+- **字段表**：`command` / `args` / `env` / **`pathPrepend`**（C1，含 `~` 展开与绝对
+  路径不变量）/ `type` /（http 形态 `url`/`headers`）；**isolation 行**：仅协议形状
+  （`zcodeProtocolMcpServerSchema`）携带，**两条文件腿 strict schema
+  （`mcpStdioServerSchema`）均不接受**——写入任一文件 = 整 server 丢警告（§5.2）。
 - **下一任务生效语义**：MCP server 配置改动对**下一次任务**生效（运行中任务保持其已装配
   能力集）。
 - **prewarm 失效边界**：agent 直改文件**不触发**桌面 draft 失效缝
@@ -285,6 +308,93 @@ ws 级 = 技能 best-effort、无重试钩子（披露）。
   `installed_plugins.json` 注册表，marketplace 来源），手改不安全不支持的结论**明说**；
   指引 =「要 MCP/skills 能力 → ws 级 vendoring；要插件完整体验 → 桌面插件商店」。
 - **交叉引用 S1**（需要 npx/uvx 运行时时）。
+
+### 5.1 「`.agents` 运行时腿」— 四源发现与逐名全序（权威）
+
+CLI 运行时（spawn MCP server 的进程）的 MCP 配置装载 = **四源逐名合并**，
+owner = `config-factory.ts`（沿既有 `resolveEffectiveMcpServers` 的
+user-shadows-project 扩展）：
+
+- **四源**：project scope = `<ws>/.zcode/config.json`（含既有 `zcode.json` 候选与
+  文件内顺序，沿 `discoverWorkspaceHookConfigPaths` 祖先向上发现）+
+  `<ws>/.agents/mcp.json`（键 `mcpServers`）；user scope =
+  `~/.zcode/cli/config.json` + `~/.agents/mcp.json`。
+- **逐名合并（merge-not-fallback；先例 `skills/roots.ts:99`）+ 全序钉死**：
+  `project .agents < project .zcode（zcode.json → .zcode/config.json，既有顺序）<
+user .agents < user .zcode < env < cli`。同 scope 内 `.zcode` 胜出 = desktop 强偏好
+  语义从**文件级**收窄为**逐名**（`.agents` 独有名不再被同 scope 非空 `.zcode` 整文件
+  遮蔽）。**合并键 = 精确 server 名**（与运行时 exact-key 语义一致；不使用
+  `normalizeMcpNameKey`）。
+- **显式 `params.mcpServers` = 整替语义**：session create 显式携带非空
+  `runtimeConfig.mcp.servers` 时**整体替换**全部文件腿（`resolveAppRuntimeConfig`
+  `options.runtimeConfig?.mcp?.servers ?? configResult.config.mcp.servers` 缝，
+  `bootstrap/src/app/runtime-config.ts:92-96`）——不与文件腿逐名合并。真实非空路径 =
+  CUA resolver（`node.ts` 插件门）；desktop 常规会话创建不携带（alpha.0 rig 全天
+  `paramMcpServerCount:0`）。
+- `enabled:false` 沿既有语义（`mcp/index.ts` + `pool.ts` 已处理，装载保留条目、
+  运行时不 spawn）。
+- rig 门：E6（owner 场景：S1/S2 写 `.agents` → 下一任务 connected + 模型可见）、
+  E7（冲突腿：同名 `.zcode` 胜出 + `.agents` 独有名加载 + user `.agents` vs
+  project `.zcode` 全序）、E8（user 级两文件腿 + 设置页列表 = 运行时实际加载集 +
+  导出/导入去重含 `.agents` 条目）。
+
+### 5.2 同一 strict schema 解析（逐 server 丢警告）
+
+`.agents` 条目与 `.zcode` 条目走**同一** `mcpStdioServerSchema`（strict）解析：
+坏条目（未知键（含 alpha.0 S2 曾教写的 `isolation`）、相对 `pathPrepend` 元素等）
+按既有 per-server invalid 机制**逐 server 丢弃 + warning 诊断**（code
+`config_mcp_server_invalid`，消息点名文件与 server 名），其余条目照常装载——不新增
+第二条丢弃路径，不做字段级 salvage。
+
+### 5.3 与 workspace hook 发现的接缝（信任记录不可失效）
+
+`.agents/mcp.json` 的发现是 **MCP 专用平行发现**，**禁入** hook 发现链：
+`buildWorkspaceHookCandidatePaths` / `WorkspaceHookConfigFileKind` /
+`projectSummary.hookCandidates` / hook bundle snapshot / digest
+（`workspace-hook-digest.ts` 的 `bundleDigest` 以 hookCandidates 为输入）。否则加一个
+`.agents/mcp.json` 即改变 `bundleDigest` → 既有 workspace 信任记录全部失效、用户被
+重新弹信任。钉测：加/删 `<ws>/.agents/mcp.json` 前后 `bundleDigest` 与
+`sources.project.paths` 不变。
+
+### 5.4 desktop 三位点显示合并（共享纯函数 helper）与写路径语义
+
+- **三位点**统一改为逐名合并（同 scope `.zcode` 胜出、`.agents` 独有名可见）：
+  `mcpSyncService.readDirectoryServersFromPreferredSources`、
+  `mcpSyncService.collectEffectiveUserMcpRecords`（喂 `listLocalUserMcpCandidates` /
+  `exportMcpServers` / `listRemoteUserMcpStatuses` / `importMcpServers` 去重）、
+  desktop main 孪生 `desktop/src/main/mcpUserDirectory/index.ts`
+  `readDirectoryServersFromPreferredSources`。实现 = **一个共享纯函数 helper**
+  （services 与 desktop main 共同调用；孪生分叉正是本 bug 类成因，禁止再复制粘贴）。
+- **写路径不变**：upsert/delete 恒写 `.zcode` 腿（`saveMcpToUserDirectory` /
+  `writeZCodeServersToFile`）；set-enabled 沿 `location` 写回源文件（`.agents` 来源行
+  的启停写回 `.agents` 文件）。
+- **语义披露**：设置页**删除**一个 `.agents` 来源行 = **僵尸复活**（源文件条目仍在，
+  下次读取重新出现；「删除」实际只是把显示列表里的副本拿掉）；**保存副本**落 `.zcode`
+  腿即逐名遮蔽源行。彻底移除须删源文件条目本身。
+
+### 5.5 残留与披露（alpha.1 fold-ins，handoff §7.40）
+
+- **(a) settingsSyncService 第四读点边界**：`SUPPORTED_MCP_AGENT_SOURCES` 的
+  `.agents` 条目（`settingsSyncService.ts:406-411`）= **外部 agent import 候选**
+  语义，不参与本统一。两条互作：① §5.4 合并后，import 去重缝对 `.agents` 条目的
+  可见性随逐名合并变化（user `.zcode` 非空不再遮蔽 `.agents` 去重可见性）；② import
+  对话框仍以「外部源」形式提供现已原生的 `.agents` 文件——import 恒写 user `.zcode`
+  目标 → user 腿遮蔽 project `.agents` 条目。
+- **(b) `params.mcpServers` 整替语义**：见 §5.1——显式非空参数替换全部文件腿（含
+  W2 后的 `.agents` 条目），非合并。
+- **(c) `.agents` 腿自动加载残留（行为变化披露）**：project scope MCP 沿既有自动信任
+  语义；接线后 repo 自带 `<ws>/.agents/mcp.json` 与存量 `~/.agents/mcp.json` 将真实
+  spawn（含 remote 主机）。此前这些文件从不进入运行时。
+- **(d) strict-parse vs raw-read 分歧残留**：desktop 设置页读 `.agents` 为 raw JSON
+  透传（无 schema 校验），schema-invalid 条目（含 alpha.0 S2 教写的 `isolation`
+  条目）仍**显示**、仍可能被显式探针 connect，而运行时按 §5.2 丢警告——无迁移/
+  回填，登记不修（彻底解 = 设置页 schema-invalid 行标红，Beyond 池）。
+- **(e) 设置页「已连接」≠ 会话可用**：探针链路（`mcp/list` 显式下发）与运行时装载
+  链路分离；§5.4 合并缩窄两者差集（显示集 = 运行时加载集）但探针成功仍不代表下一任务
+  会话可用（下一任务生效语义 + (d) 分歧）。
+- **(f) mcpId 双身份登记不修**：探针链路 vs CLI 装载链路对同一条目产生不同
+  `custom:<hash>` id（归一化化妆差异）；**发现广度不对称**：CLI 沿祖先向上走到
+  worktree 根 vs desktop 显示仅读 ws 根——既有行为，披露。
 
 ## 6. Bundled skills plumbing（四清单 + 钉测）
 
@@ -351,11 +461,26 @@ return [];` 一带）插装：无模型时 `getConfigCommandMissingMessageId` �
   frontmatter name/description 契约。
 - Riders 红测（本批）：lifecycle.info 收到 `[mcpStore]` 行（helper 腿 + store 写 action
   腿）；/mode no-model 新文案 zh/en。
+- **alpha.1 红测（`.agents` 运行时腿，§5.1-§5.5；W1 先红，W2 转绿）**：
+  CLI loader 腿——`.agents` ws 条目进入 runtime config（今日红：候选硬编码不含
+  `.agents`）；同名双文件 `.zcode` 逐名胜出 + `.agents` 独有名共存；user 级
+  `~/.agents/mcp.json` 腿生效 + user `.agents` 遮蔽 project `.zcode`（全序）；坏条目
+  逐 server 丢警告且其余照常；`.agents` 条目 `pathPrepend` 保留；`enabled:false`
+  保留；hook digest 加/删 `.agents` 前后不变（§5.3 契约钉测，今绿须保持绿）。
+  desktop 三位点——`loadMcpFromUserDirectory` / `listLocalUserMcpCandidates` /
+  `exportMcpServers` / desktop main 孪生逐名合并可见（今日红：文件级遮蔽）；
+  import 去重缝对 `.agents` 条目可见（§5.5(a)）。技能不变量——S2 陈述同名冲突规则、
+  S2/S1 无「isolation 被文件腿接受」表述、S1 接线节含冲突注记（今日红：alpha.0
+  假等价文案）。契约钉测——`params.mcpServers` 整替语义（§5.1，今绿契约钉）。
 - rig：E0-E2 + E4 随 PR1 正文发布（PR2 后补 E3/E5；清单见 runtime-plan Part 3）。E4 =
   破坏 PATH 复现 #27 → 状态行显示新文案（指路 S1）；按 S1 修复后下一任务恢复。
+  alpha.1 rig 门 = E6-E8（§5.1；清单细化见 alpha1-plan Part 3）。
 
 ## 9. 残留与不做（披露）
 
+- **alpha.1 残留与 fold-in 披露集中节 = §5.5**（settingsSyncService 第四读点边界 /
+  `params.mcpServers` 整替 / `.agents` 自动加载行为变化 / strict-parse vs raw-read
+  分歧 / 设置页「已连接」≠ 会话可用 / mcpId 双身份 + 发现广度不对称）。
 - **remote 不自动供给 app 级运行时**：remote workspace 无桌面设置卡，运行时供给走 ws 级
   S1 技能（agent 执行）；PR2 A2 仅本地 desktop。
 - **remote 混版窗口**：desktop 新、远端 CLI 旧 → capability flag falsy → pathPrepend 暂不
