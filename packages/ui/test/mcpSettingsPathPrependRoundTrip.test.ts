@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EMPTY_FORM, formToConfig, jsonDraftToForm } from "../src/settings/mcpSettingsShared.ts";
+import {
+  EMPTY_FORM,
+  formToConfig,
+  jsonDraftToForm,
+  serverToForm,
+} from "../src/settings/mcpSettingsShared.ts";
 
 // specs/agent-runtimes.md §2.3 面6（C1 pathPrepend 设置表单往返）红测：
 // mcpSettingsShared 的 FormState 是固定形状、formToConfig 从 FormState 重建配置，
@@ -60,5 +65,29 @@ test("C1 表单往返（guard）：无 pathPrepend 的粘贴 JSON 保存后不�
     config.pathPrepend,
     undefined,
     "未携带 pathPrepend 的配置经表单保存后不得凭空出现该字段",
+  );
+});
+
+test("C1 表单往返：设置页编辑既有 server（serverToForm → formToConfig）保留 pathPrepend（[ulw] MAJOR-2 钉测）", () => {
+  // 真实设置页编辑路径：serverToForm 从既有 server 构建 FormState，用户改一次
+  // args 保存后 formToConfig 重建配置——pathPrepend 若不被 serverToForm 承载，
+  // 该保存链路同样剥掉 S1 写入（与 jsonDraftToForm 腿同型，分开钉死）。
+  const server = {
+    name: "runtime-server",
+    scope: "workspace",
+    config: {
+      type: "stdio",
+      command: "npx",
+      args: ["-y", "server"],
+      env: { FOO: "bar" },
+      pathPrepend: ["/opt/rt/bin", "~/.zcode/.runtime/node/v22.0.0/bin"],
+    },
+  };
+  const form = serverToForm(server as never);
+  const config = formToConfig(form) as Record<string, unknown>;
+  assert.deepEqual(
+    config.pathPrepend,
+    ["/opt/rt/bin", "~/.zcode/.runtime/node/v22.0.0/bin"],
+    "设置页编辑保存链路（serverToForm → formToConfig）必须保留 pathPrepend（spec §2.3 面6）",
   );
 });

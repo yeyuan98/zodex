@@ -186,11 +186,11 @@ For each runtime (skip one if the user only asked for the other):
    - **node:** `SHASUMS256.txt` from the *other* one of `nodejs.org/dist/<node-ver>/` ↔
      `registry.npmmirror.com/-/binary/node/<node-ver>/`. (Tarball from a mirror → checksum from
      the origin, and vice versa. Tuna never serves as a checksum source.)
-   - **uv:** the GitHub API release object's asset `digest` field
-     (`api.github.com/repos/astral-sh/uv/releases/tags/<uv-ver>`, small JSON, always DIRECT —
-     never via gh-proxy/ghfast), or the official `sha256.sum` from the origin release URL
-     fetched directly. If `api.github.com` is unreachable, STOP with an explicit error advising
-     a retry later; **never downgrade to an unverified install**.
+    - **uv:** the GitHub API release object's asset `digest` field
+      (`api.github.com/repos/astral-sh/uv/releases/tags/<uv-ver>`, small JSON, always DIRECT —
+      never via gh-proxy/ghfast, and never the `sha256.sum` file from a proxied or origin release
+      URL). If `api.github.com` is unreachable, STOP with an explicit error advising
+      a retry later; **never downgrade to an unverified install**.
 3. **Verify before unpack:** `sha256sum -c` (or `certutil -hashfile <file> SHA256` on Windows)
    against the downloaded tarball. **On mismatch: delete the tarball, report both sources, and
    STOP.** Do not unpack, and do not retry the same pair silently.

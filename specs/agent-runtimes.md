@@ -110,8 +110,15 @@ parseParams 抛错），非优雅降级——§7.36 先例（非 strict payload 
   响应不含该 flag → 解析后 falsy → desktop 关闭下发；新 CLI 上报 `true`。
 - desktop 在**三个下发点**统一门控：session create（`buildSessionCreateParams`）、session
   resume（`buildSessionResumeParams`）、mcp/list（`listMcpServerStatuses` ~:3529；该命令可能
-  经隔离进程 client 发送 ~:2885，该 client 也须能拿到 `runtime/capabilities` —— W2 验证）。
+  经隔离进程 client 发送 ~:2885，该 client 也须能拿到 `runtime/capabilities` —— W2 已验证：
+  隔离进程与 chat/plugin 泳道共用同一 app-server 入口，capabilities handler 无 lane 裁剪）。
   仅当连接的 CLI 上报 flag 才在 mcpServers payload 中携带 pathPrepend。
+- **V4 载体防御性收口（[ulw] 评审 MAJOR-1 折叠）**：V4 `createSession` 命令 envelope 的
+  `mcpServers` 与 v3 下行共用同一 strict 元素 schema（`zcode-protocol-v4/command.ts`），旧
+  CLI 未知键同样 -32602 硬拒整条命令——`sendConversationCommandV4` 携带 mcpServers 的
+  payload 一律经同一 `gateMcpServersPathPrepend` 门（当前无调用方携带，防御性收口）。
+- `convertToZCodeAgentMcpServer` 对非字符串数组的 `pathPrepend` 做形状守卫（静默剥除、
+  不整 server 拒绝——timeoutMs 前科同型语义），由 shared 协议契约测试覆盖。
 - 本地 desktop 捆绑同版本 CLI（无 skew）；远程混版 = 已知瞬态残留（重连自动收敛，§9）。
 - 能力探测沿 `independentPlanSupport.ts` per-client WeakMap 缓存先例。
 

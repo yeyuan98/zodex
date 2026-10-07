@@ -8,6 +8,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { ensureIndependentPlanSupport } from "./independentPlanSupport.js";
 import { gateMcpServersPathPrepend } from "./mcpPathPrependSupport.js";
+import type { ZCodeAgentMcpServer } from "@zcode/shared";
 import { isUserInputBackedPermissionToolName } from "./permissionToolNames.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -3547,12 +3548,16 @@ export function createZCodeAgentService(
         // 与 session create/resume 同一 capability 门（spec §2.4）：mcp/list 走隔离
         // 控制面进程，但该进程与 chat/plugin 泳道共用同一 app-server 入口（运行时
         // capabilities handler 无 lane 裁剪），这里同样按连接上报决定是否携带。
-        const mcpServers = await gateMcpServersPathPrepend(client, params.mcpServers);
+        // omitMcpServers 时跳过探测，避免无谓的 capabilities 往返。
+        const mcpServers =
+          params.mcpServers !== undefined && !options?.omitMcpServers
+            ? await gateMcpServersPathPrepend(client, params.mcpServers)
+            : undefined;
         return client.request(
           zcodeProtocolMethods.mcpList,
           {
             workspace: buildWorkspaceRef(params),
-            ...(params.mcpServers !== undefined && !options?.omitMcpServers ? { mcpServers } : {}),
+            ...(mcpServers ? { mcpServers } : {}),
             ...(params.mode !== undefined && !options?.omitMode ? { mode: params.mode } : {}),
           },
           zcodeMcpListResultSchema,
@@ -4765,6 +4770,17 @@ export function createZCodeAgentService(
         "desktop-continuous";
       // P2：V4 草稿预热创建前的 Account Config 屏障已删除；Built-in / Personal 由 Worker Registry 自己装配。
       let envelope = await buildConversationCommandEnvelope(params);
+      // specs/agent-runtimes.md §2.4（C1 capability 门，V4 载体）：V4 createSession 的
+      // mcpServers 与 v3 下行共用同一 strict 元素 schema——旧 CLI 未知键 -32602 硬拒
+      // 整条命令。当前无调用方经此路径携带 mcpServers（botsService v4Create 腿不传），
+      // 此处为防御性收口：与 session create/resume/mcp/list 同门剥除。
+      if (envelope.type === "createSession") {
+        const payload = envelope.payload as { mcpServers?: ZCodeAgentMcpServer[] };
+        if (payload.mcpServers) {
+          const mcpServers = await gateMcpServersPathPrepend(client, payload.mcpServers);
+          envelope = { ...envelope, payload: { ...payload, mcpServers } };
+        }
+      }
       // TTFT 首版只允许可信桌面本地 continuous，手机/远端透传不能开启本地观测。
       if (
         commandClientMode !== "desktop-continuous" ||

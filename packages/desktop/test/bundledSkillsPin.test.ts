@@ -86,7 +86,7 @@ test("bundledSkillsPin：磁盘 skills 目录 ⊇ 三个技能且每个目录有
   }
 });
 
-test("bundledSkillsPin：每个 SKILL.md frontmatter 有非空 name + description ≤1024 字符", async () => {
+test("bundledSkillsPin：每个 SKILL.md frontmatter 有非空 name + description ≤1024 字符（预期绿：dynamic-workflows 基线即满足，钉住新增技能不回退）", async () => {
   // 行级解析（dynamic-workflows 与两个新技能的 frontmatter 均为单行键值）；
   // 若未来出现折叠多行 description，解析会因取不到值而响亮失败——届时再升级解析器。
   const dirNames = (await readdir(SKILLS_DIR, { withFileTypes: true }))

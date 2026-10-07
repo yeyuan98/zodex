@@ -33,7 +33,7 @@ Both legs are equivalent in effect; keep a workspace's servers in `<ws>/.agents/
 | `env` | object | Extra environment for the spawned process. **Whole-key replacement**: each key here replaces that key entirely — an explicit `env.PATH` replaces the *whole* PATH (killing the runtime prepend and the inherited login PATH). Prefer `pathPrepend` over writing `env.PATH`. |
 | `pathPrepend` | string[] | Directories prepended to the far left of PATH when spawning this server. Elements support `~`/`~/` expansion and **must be absolute after expansion** — a relative element makes the server config invalid (rejected loudly, never silently dropped or truncated). Prepended at spawn time after `env` is applied, so it wins even over an explicit `env.PATH`: highest PATH precedence. Elements join with the platform path separator. |
 | `timeoutMs` | number | Positive startup timeout in milliseconds. |
-| `isolation` | `"session" \| "workspace"` | Server instance sharing scope (carried on the `.agents` leg / protocol shape). |
+| `isolation` | `"session" \| "workspace"` | Server instance sharing scope (carried on the `.agents` leg / protocol shape). NOT accepted by the `.zcode/config.json` strict schema — writing it there drops the whole server entry with a warning; keep it to `.agents/mcp.json`. |
 | `protocolVersion` | `"auto" \| "legacy" \| "2026-07-28"` | MCP protocol negotiation mode. |
 | `enabled` | boolean | Defaults to true; `false` keeps the entry but does not start it. |
 | `cwd` | string | Working directory for the spawned process (`.zcode` config leg). |

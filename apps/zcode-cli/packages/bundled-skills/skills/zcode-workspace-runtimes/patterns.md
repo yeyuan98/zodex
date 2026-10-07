@@ -25,6 +25,22 @@ probe() { # probe <label> <url>
 Every line this prints goes into the session output verbatim — the measurements are the audit
 trail and the fallback order.
 
+PowerShell equivalent (Windows legs use this shape):
+
+```powershell
+function probe($label, $url) {
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  try {
+    $req = [System.Net.HttpWebRequest]::Create($url)
+    $req.AddRange(0, 65536); $req.Timeout = 5000; $req.Method = "GET"
+    $resp = $req.GetResponse(); $code = [int]$resp.StatusCode; $resp.Close()
+  } catch { $code = 0 }
+  $sw.Stop()
+  $ok = ($code -eq 200 -or $code -eq 206)
+  "{candidate: $label, httpCode: $code, latencyMs: $([int]$sw.ElapsedMilliseconds), ok: $ok}"
+}
+```
+
 ## 2. Probe sweep for one class (nodeDist, first run)
 
 ```bash
@@ -120,8 +136,8 @@ curl -fsS -o <rt>/SHASUMS256.txt "https://nodejs.org/dist/<node-ver>/SHASUMS256.
 cd <rt> && sha256sum -c --ignore-missing SHASUMS256.txt   # must say OK; mismatch -> delete + report + STOP
 ```
 
-uv — checksum from the GitHub API digest (pattern §5) or the official `sha256.sum` fetched
-direct from the origin release URL:
+uv — checksum is ALWAYS the GitHub API asset digest (pattern §5, api.github.com direct;
+api.github.com unreachable → STOP, never an alternative checksum source):
 
 ```bash
 curl -fL --retry 2 -o <rt>/uv-x86_64-unknown-linux-gnu.tar.gz \
@@ -157,7 +173,10 @@ Windows (built-in tar.exe handles both .zip and .tar.xz; layouts end flat):
 New-Item -ItemType Directory -Force <rt>\node, <rt>\uv
 tar -xf <rt>\node-<node-ver>-win-x64.zip -C <rt>\node
 Move-Item <rt>\node\node-<node-ver>-win-x64 <rt>\node\<node-ver>
-tar -xf <rt>\uv-x86_64-pc-windows-msvc.zip -C <rt>\uv\<uv-ver>   # zip is already flat
+# uv zip 也是先解到临时目录再改名——半解包目录绝不落在最终 v<ver> 名下（与 Step 6.1 一致）
+New-Item -ItemType Directory -Force <rt>\uv\.unpack-$PID
+tar -xf <rt>\uv-x86_64-pc-windows-msvc.zip -C <rt>\uv\.unpack-$PID   # zip is flat
+Move-Item <rt>\uv\.unpack-$PID <rt>\uv\<uv-ver>
 
 Set-Content -NoNewline -Path <rt>\node\CURRENT.tmp-$PID -Value "<node-ver>"
 Move-Item -Force <rt>\node\CURRENT.tmp-$PID <rt>\node\CURRENT
