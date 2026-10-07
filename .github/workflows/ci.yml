@@ -132,6 +132,9 @@ jobs:
           pnpm --filter @zcode/services test
           pnpm --filter @zcode/desktop test
           pnpm --filter @zcode/server test
+          # CLI workspace 测试此前无任何 runner（3.16.0 PR1 起纳入，含 pathPrepend 契约矩阵）
+          pnpm --filter @zcode/adapters test
+          pnpm --filter @zcode/bootstrap test
       # scripts 测试此前无任何 runner；CI 显式执行，避免再次失管。
       - name: Scripts tests
         run: node --test scripts/check-vendor-free.test.mjs scripts/flat-asset-names.test.mjs
