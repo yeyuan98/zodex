@@ -1,11 +1,12 @@
 # Spec: Agent Runtime Self-Sufficiency（3.16.0 train：pathPrepend 环境缝 + runtime_unavailable 闭环 + bundled 配置/运行时技能）
 
-Status: **DRAFT — alpha.0 已发布（PR #39，release `8878a2a`）；`3.16.0-alpha.1`
-纠偏实现中（spec-first；红测先行）。** alpha.1 范围 = `.agents/mcp.json` 运行时腿接线：
+Status: **SHIPPED in `3.16.0-alpha.1`（PR #40，release `bb40344`，tag
+`v3.16.0-alpha.1`，2026-10-07）——rig T0-T9 PENDING（owner 裁定延后；随 PR #40
+正文执行）。** alpha.1 范围 = `.agents/mcp.json` 运行时腿接线：
 §5.1-§5.5 为**权威节**（四源逐名合并 + 全序钉死 + 同一 strict schema + hook 接缝钉死 +
 desktop 三位点共享 helper + §7.40 fold-in 披露）+ S1/S2/isolation 行技能修正；依据 =
-权威计划 `../ZCode-runtime-alpha1-plan.md` v1（owner GO = Option A 使等价成立 +
-[ulw] 计划评审折叠账全收，handoff §7.39/§7.40）。**§5 alpha.0 版的「四文件合并/
+权威计划 `../ZCode-runtime-alpha1-plan.md` v1（EXECUTED；owner GO = Option A 使等价
+成立 + [ulw] 计划评审折叠账全收，handoff §7.39/§7.40）。**§5 alpha.0 版的「四文件合并/
 两腿等价/isolation 由 `.agents` 腿携带」表述已被 alpha.0 rig postmortem（handoff
 §2m）证伪，随本修订废除——勿据旧版实现。** 原 PR2（A1 发布资产 / A2 设置页下载卡 /
 C3 app 级 PATH 前插）**顺延 alpha.2+**（重编号记账，[ulw] n2），本 spec 仅收编其语义
