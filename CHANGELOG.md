@@ -1,5 +1,70 @@
 # Changelog
 
+## [3.16.0-alpha.0](https://github.com/yeyuan98/zodex/compare/v3.15.0...v3.16.0-alpha.0) (2026-10-07)
+
+### Features
+
+* **mcp:** C1 pathPrepend 六面同步 + 三层校验 + capability 门控三下发点 ([b9cf909](https://github.com/yeyuan98/zodex/commit/b9cf909a3302d0be173790847b14528136a4c5fc))
+  * 面1 shared/mcp.ts：McpServerConfig 与 ZCodeAgentMcpServer stdio 成员显式声明 pathPrepend?: string[]；convertToZCodeAgentMcpServer 带 isMcpPathPrepend 守卫透传（非法形态就地丢弃，与 timeoutMs 同型）
+  * 面2 shared/zcode-protocol：zcodeProtocolMcpServerSchema stdio 成员增 additive-optional pathPrepend（z.array(z.string().min(1)).min(1).optional()，保持 strict）；zcodeRuntimeCapabilitiesSchema 增 mcpPathPrepend flag（非 strict，旧 CLI 响应解析后剥除）
+  * 面3 adapters/config/schema.ts：mcpStdioServerSchema 增字段 + superRefine 校验（展开 ~ 后必须绝对路径），非法沿既有 :486-500 per-server 丢警告环，不新增丢弃路径
+  * 新增 adapters/src/mcp/path-prepend.ts 纯函数模块：expandPathPrependElement/validatePathPrepend/applyPathPrependToEnv/McpPathPrependInvalidError，配置腿与传输腿共用
+  * 传输防御腿 + L5：createTransport 在 ...config.env spread 之后应用 pathPrepend 前插（最优先不变量）；非绝对元素仅令该 server 失败并归类 config_invalid（禁止 -32602）
+  * 面4 bootstrap protocol-mcp-config mapper 逐字段补拷 pathPrepend；面5 contracts McpStdioServerConfig 增字段
+  * 面6 ui mcpSettingsShared：FormState 显式承载 pathPrepend（无表单控件，经 JSON 粘贴编辑）；serverToForm/formToConfig 往返保留；jsonDraftToForm 输入时拒绝相对元素（spec 层2，浏览器端 node:path-free 判定）
+  * capability 门：CLI runtime/capabilities 上报 mcpPathPrepend:true（全泳道共用 app-server 入口，含 mcp/list 隔离进程）；services 新增 mcpPathPrependSupport（沿 independentPlanSupport WeakMap 先例，探测失败 fail-closed + warn）；session create/resume（含兼容重试腿）与 mcp/list 三下发点统一走 gateMcpServersPathPrepend 剥除
+
+* **mcp:** C2 stdio ENOENT→runtime_unavailable 分类 + i18n 可行动指引 ([155dc4b](https://github.com/yeyuan98/zodex/commit/155dc4bf8e6f8d80b8667b528b13fc1f4f2cf62b)), closes [#27]()
+  * adapters/mcp/index.ts 新增导出纯函数 classifyStdioProcessStartFailure：ENOENT 类错误 + 命令 base name（剥 .cmd/.exe/.bat 后缀、大小写不敏感）∈ {npx,npm,node,uvx,uv,python,python3} → runtime_unavailable，其余维持 process_start_failed
+  * openServerConnection 失败收口接入 runtimeFailureKind（协商失败/pathPrepend config_invalid 分类优先级不变）
+
+* **skills:** bundled zcode-workspace-runtimes + zcode-config-reference 技能（S1/S2） ([da9131c](https://github.com/yeyuan98/zodex/commit/da9131c1f29b4d322ee6435b0f888e9cebbfb206))
+  * S1 十步 playbook 收编 1.5.1/1.5.3：五类工件独立镜像探测与确定性择优、跨源校验、版本化目录 + CURRENT 原子指针、env/AGENTS.md/MCP 接线与 install/status/test/update/remove 生命周期
+  * S2 配置契约参考：MCP 四路径与字段表（含 pathPrepend/env 语义与下一任务生效）、skills frontmatter 契约、插件 vendoring 边界，交叉引用 S1
+  * 四清单门扩展：bootstrap 常量拼接 + SEA/remote/桌面 bundle 三处字面量，各加 S1 三件套与 S2 单文件
+  * 钉测转绿：bundledSkillsPin 3/3（四清单覆盖、磁盘布局、frontmatter 契约）
+
+
+### Bug Fixes
+
+* [ulw] 评审折叠（V4 载体门 + serverToForm 钉测 + S1 文档三处 + mcp/list 顺序） ([2adbc3e](https://github.com/yeyuan98/zodex/commit/2adbc3e94c411882c4a745d161f4edcc2d8ed85a))
+  * MAJOR-1：sendConversationCommandV4 的 createSession mcpServers 经同一 capability 门（当前无调用方携带，防御性收口）
+  * MAJOR-2：serverToForm→formToConfig 编辑保存链路 pathPrepend 保留钉测补入
+  * MINOR-3：S1 uv 校验锚点收口为仅 api.github.com 直连（删除 sha256.sum 备选矛盾表述，SKILL.md+patterns.md）
+  * MINOR-4：S1 Windows uv 解包改临时目录+改名（半解包目录不落最终 v<ver> 名下）
+  * NIT-5：patterns.md 补 PowerShell 探测等价实现
+  * NIT-6：mcp/list omitMcpServers 时跳过 capabilities 探测（省一次往返）
+  * NIT-7：S2 isolation 行注明 .zcode strict 腿未知键整 server 丢弃
+  * NIT-8：desktop 钉测预期绿子测标题标注 + spec 补 convertToZCodeAgentMcpServer 形状守卫注记
+  * spec §2.4 补 V4 载体与形状守卫两条
+
+* **bots:** rider §7.38③ 无模型草稿 /mode 可行动文案（modeMissingNoModel） ([4a49527](https://github.com/yeyuan98/zodex/commit/4a495276e8016923793d3781fb32f90808c5e534))
+  * messages 新键 modeMissingNoModel zh/en 钉文案（先 /model 选模型再设协作模式）
+  * 无模型 choke point（mode.list draft 空选项分支）区分其余空选项路径，仅 /mode 列表换新文案
+  * 场景22a2 守卫更新（modeMissingNoModel + 不回落旧短文案）+ 22a3/22a3-en 红测转绿
+  * bot-permissions §8.4 接受边界注记：无模型 case 换可行动文案（3.16.0 PR1 rider §7.38③），其余空选项路径不变
+  * 顺手修复 W1 遗留 botPermissions.test.ts fmt（引号风格）
+
+* **ui:** rider §7.38② logger.lifecycle 三缝一行修复（生产落盘） ([6abf9ed](https://github.com/yeyuan98/zodex/commit/6abf9edde2868204c27a6ee1115b87e05272d3b1))
+  * 三缝（mcpStore.ts:264 info、zcodeDraftSkillInvalidation.ts:39 info、:46 warn）改走 lifecycle 通道，经桌面桥生产落盘
+  * 共享 helper 使 skills 域行同样落盘（scope widening 披露，owner §7.1 已接受）
+  * draft-session-invalidation §6 披露翻转：三缝生产可达，Status 头登记 3.16.0 PR1 rider 变更
+
+
+### Documentation
+
+* **specs:** 新增 agent-runtimes spec（3.16.0 PR1 spec-first 收编） ([06ad256](https://github.com/yeyuan98/zodex/commit/06ad256d5ff9906f404e3f280832ffd56dc07413))
+  * 收编 runtime-plan Part 1/1.5：C1 pathPrepend 字段语义（~ 展开 + 绝对路径不变量 + 三层层校验）与六处同步面清单表
+  * 钉死 env 五层解析表 L1-L5 与「pathPrepend 最优先」不变量（应用点 = config.env spread 之后）
+  * capability 门语义：zcodeRuntimeCapabilitiesSchema 增 mcpPathPrepend 可选 flag，desktop 三个下发点统一门控
+  * C2 runtime_unavailable producer 触发条件（ENOENT + 命令白名单 + win 变体）与 i18n 指路 S1 技能（PR2 再改指设置卡）
+  * S1 zcode-workspace-runtimes 契约：候选探测表、0.6× origin 偏置、±10% 平局、全灭报错、探针版本=上轮钉版/内置 known-good、TTL 7d
+  * S1 安装布局（版本化目录 + CURRENT 原子指针 + 读端容错禁扫目录）、env 固化（UV_*/npm_config_registry 小写优先）、AGENTS.md 幂等块 + 100KB 上限、MCP 接线
+  * S2 zcode-config-reference 契约：配置路径表、字段表含 pathPrepend、下一任务生效、prewarm 失效边界、plugins vendoring 边界
+  * bundled skills 四清单 required-asset 门 + 新增 packages/desktop/test/bundledSkillsPin.test.ts 钉测不变量
+  * riders（W4）：logger.lifecycle 三缝 + scope widening 披露；modeMissingNoModel 新键 + 旧 modeMissing 保留 + guard test 更新预告
+  * 残留与不做：remote 不自动供给 app 级运行时、混版窗口、探针只测传输延迟、GitHub 不可达边界、不做 installer/自动安装/volta/corepack
+
 ## [3.15.0](https://github.com/yeyuan98/zodex/compare/v3.15.0-alpha.2...v3.15.0) (2026-10-07)
 
 ### Documentation
