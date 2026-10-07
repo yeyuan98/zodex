@@ -16,6 +16,10 @@ export const bundledSkillPackRequiredPaths = [
   "skills/dynamic-workflows/SKILL.md",
   "skills/dynamic-workflows/patterns.md",
   "skills/dynamic-workflows/examples.md",
+  "skills/zcode-workspace-runtimes/SKILL.md",
+  "skills/zcode-workspace-runtimes/patterns.md",
+  "skills/zcode-workspace-runtimes/examples.md",
+  "skills/zcode-config-reference/SKILL.md",
 ];
 
 export const collectSeaBundledSkillAssets = async ({ root, stagingDirectory }) => {
