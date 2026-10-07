@@ -74,6 +74,9 @@ export const ZCODE_PROTOCOL_VERSION = 1 as const;
 export const ZCODE_PROTOCOL_V4_WIRE_VERSION = 3 as const;
 export const zcodeRuntimeCapabilitiesSchema = z.object({
   independentPlanState: z.boolean().optional(),
+  // specs/agent-runtimes.md §2.4：CLI 上报是否支持 mcpServers 的 stdio pathPrepend 字段。
+  // 本 schema 非 strict：旧 CLI 不含该 flag 时解析后剥除 → desktop 关闭 pathPrepend 下发。
+  mcpPathPrepend: z.boolean().optional(),
 });
 export const zcodeProtocolErrorCodes = {
   sessionUnavailable: -32004,
@@ -633,6 +636,10 @@ export const zcodeProtocolMcpServerSchema = z.union([
       isolation: z.enum(["session", "workspace"]).optional(),
       protocolVersion: z.enum(["legacy", "auto", "2026-07-28"]).optional(),
       timeoutMs: z.number().int().positive().optional(),
+      // specs/agent-runtimes.md §2.1（C1）：stdio PATH 前插目录列表；元素非空、列表非空，
+      // ~ 展开与绝对路径校验属于 CLI 运行时职责，协议层原样透传。additive-optional：
+      // 旧 CLI 不认识该键，下发前由 desktop capability 门剥除（§2.4）。
+      pathPrepend: z.array(z.string().min(1)).min(1).optional(),
     })
     .strict(),
   z

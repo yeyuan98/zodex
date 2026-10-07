@@ -7,6 +7,7 @@ import {
 /* oxlint-disable eslint(max-lines) -- Zodex Protocol transport、通知 wiring 和 app-facing session 方法必须共享同一个 client/emitter 上下文。 */
 import { randomUUID } from "node:crypto";
 import { ensureIndependentPlanSupport } from "./independentPlanSupport.js";
+import { gateMcpServersPathPrepend } from "./mcpPathPrependSupport.js";
 import { isUserInputBackedPermissionToolName } from "./permissionToolNames.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -3152,6 +3153,10 @@ export function createZCodeAgentService(
     async createSession(params: ZCodeAgentCreateSessionParams) {
       const startedAt = Date.now();
       const client = await getClient(params);
+      // specs/agent-runtimes.md §2.4（C1）：旧 CLI 的 strict schema 不认 pathPrepend，
+      // 未上报 mcpPathPrepend flag 前必须剥除，否则整次 session/create 被 -32602 硬拒。
+      // 门控结果同时覆盖首发与兼容重试两条 buildSessionCreateParams 路径。
+      const mcpServers = await gateMcpServersPathPrepend(client, params.mcpServers);
       const sessionTraceId = params.sessionTraceId;
       logger.info(sessionTraceId, "开始请求 Zodex Protocol session/create", {
         hasInitialModel: params.model !== undefined,
@@ -3169,7 +3174,12 @@ export function createZCodeAgentService(
       try {
         const snapshot = await client.request(
           zcodeProtocolMethods.sessionCreate,
-          buildSessionCreateParams({ ...params, offPeakToolEnabled, dynamicWorkflowEnabled }),
+          buildSessionCreateParams({
+            ...params,
+            mcpServers,
+            offPeakToolEnabled,
+            dynamicWorkflowEnabled,
+          }),
           zcodeSessionStateSnapshotSchema,
           sessionTraceId ? { trace: { traceId: sessionTraceId } } : undefined,
         );
@@ -3210,7 +3220,7 @@ export function createZCodeAgentService(
         const snapshot = await client.request(
           zcodeProtocolMethods.sessionCreate,
           buildSessionCreateParams(
-            { ...params, offPeakToolEnabled, dynamicWorkflowEnabled },
+            { ...params, mcpServers, offPeakToolEnabled, dynamicWorkflowEnabled },
             new Set(compatFields),
           ),
           zcodeSessionStateSnapshotSchema,
@@ -3261,6 +3271,9 @@ export function createZCodeAgentService(
     async resumeSession(params: ZCodeAgentResumeSessionParams) {
       const startedAt = Date.now();
       const client = await getClient(params);
+      // 与 createSession 同一 capability 门（spec §2.4）：冷恢复重建 runtime 的
+      // mcpServers 下行同样必须先剥除旧 CLI 不认识的 pathPrepend。
+      const mcpServers = await gateMcpServersPathPrepend(client, params.mcpServers);
       const cachedTraceId = getSessionTraceId(params);
       const offPeakToolEnabled = isOffPeakToolSupported(params);
       // 冷恢复同样按 Host 的灰度判定下发，否则恢复出来的会话会丢掉工作流工具簇。
@@ -3276,7 +3289,12 @@ export function createZCodeAgentService(
       try {
         const snapshot = await client.request(
           zcodeProtocolMethods.sessionResume,
-          buildSessionResumeParams({ ...params, offPeakToolEnabled, dynamicWorkflowEnabled }),
+          buildSessionResumeParams({
+            ...params,
+            mcpServers,
+            offPeakToolEnabled,
+            dynamicWorkflowEnabled,
+          }),
           zcodeSessionStateSnapshotSchema,
         );
         const sessionTraceId = rememberSessionTrace(params, snapshot) ?? cachedTraceId;
@@ -3313,7 +3331,7 @@ export function createZCodeAgentService(
         const snapshot = await client.request(
           zcodeProtocolMethods.sessionResume,
           buildSessionResumeParams(
-            { ...params, offPeakToolEnabled, dynamicWorkflowEnabled },
+            { ...params, mcpServers, offPeakToolEnabled, dynamicWorkflowEnabled },
             new Set(compatFields),
           ),
           zcodeSessionStateSnapshotSchema,
@@ -3526,13 +3544,15 @@ export function createZCodeAgentService(
     async listMcpServerStatuses(params: ZCodeAgentListMcpServerStatusesParams) {
       const requestMcpList = async (options?: { omitMcpServers?: boolean; omitMode?: boolean }) => {
         const client = await getMcpStatusClient();
+        // 与 session create/resume 同一 capability 门（spec §2.4）：mcp/list 走隔离
+        // 控制面进程，但该进程与 chat/plugin 泳道共用同一 app-server 入口（运行时
+        // capabilities handler 无 lane 裁剪），这里同样按连接上报决定是否携带。
+        const mcpServers = await gateMcpServersPathPrepend(client, params.mcpServers);
         return client.request(
           zcodeProtocolMethods.mcpList,
           {
             workspace: buildWorkspaceRef(params),
-            ...(params.mcpServers !== undefined && !options?.omitMcpServers
-              ? { mcpServers: params.mcpServers }
-              : {}),
+            ...(params.mcpServers !== undefined && !options?.omitMcpServers ? { mcpServers } : {}),
             ...(params.mode !== undefined && !options?.omitMode ? { mode: params.mode } : {}),
           },
           zcodeMcpListResultSchema,

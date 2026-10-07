@@ -1,6 +1,8 @@
 /* eslint-disable max-lines -- zcode-cli 配置 schema 需要集中维护文件解析和 provider 继承，拆散会让配置语义更难对齐。 */
+import { homedir } from "node:os";
 import { z } from "zod";
 import type { RuntimeConfigPatch } from "@zcode/contracts";
+import { validatePathPrepend } from "../mcp/path-prepend.js";
 
 const stringRecordSchema = z.record(z.string(), z.string());
 const positiveNumberSchema = z.number().finite().positive();
@@ -79,8 +81,23 @@ const mcpStdioServerSchema = z
     args: z.array(z.string()).optional(),
     cwd: z.string().min(1).optional(),
     env: stringRecordSchema.optional(),
+    // specs/agent-runtimes.md §2.1/§2.2 层(1)（C1 pathPrepend）：spawn 时前插到 PATH
+    // 最左侧的目录列表；superRefine 校验展开后绝对，非法 → 整 server 按既有
+    // per-server invalid 机制丢弃 + 点名 pathPrepend/绝对路径的 warning 诊断。
+    pathPrepend: z.array(z.string().min(1)).min(1).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((server, ctx) => {
+    if (!server.pathPrepend) return;
+    const validation = validatePathPrepend(server.pathPrepend, homedir());
+    if (!validation.ok) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["pathPrepend"],
+        message: `pathPrepend 元素必须是展开 ~ 后的绝对路径（absolute path after ~ expansion），非法元素：${validation.invalidElement}`,
+      });
+    }
+  });
 
 const mcpHttpServerSchema = z
   .object({

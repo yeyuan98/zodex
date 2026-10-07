@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { delimiter, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   Client,
@@ -33,6 +34,11 @@ import type {
 } from "@zcode/contracts";
 import { normalizeMcpToolDescriptor } from "./descriptor.js";
 import type { McpServerFailureKind } from "@zcode/shared";
+import {
+  applyPathPrependToEnv,
+  McpPathPrependInvalidError,
+  validatePathPrepend,
+} from "./path-prepend.js";
 import {
   buildMcpStdioEnv,
   createMcpTransportFetch,
@@ -994,6 +1000,12 @@ class NodeMcpAdapter implements McpPort {
       const negotiationFailureKind = isProtocolNegotiationFailure(error)
         ? ("protocol_negotiation_failed" as const)
         : undefined;
+      // spec §2.2 层(3)（C1）：pathPrepend 展开后非绝对（createTransport 防御腿抛出）
+      // → 仅该 server 失败并归类 config_invalid，会话其余 server 不受影响。
+      const pathPrependFailureKind =
+        config.type === "stdio" && error instanceof McpPathPrependInvalidError
+          ? ("config_invalid" as const)
+          : undefined;
       return this.failConnection({
         client,
         config,
@@ -1005,7 +1017,7 @@ class NodeMcpAdapter implements McpPort {
         name,
         startedAt,
         transport,
-        failureKind: negotiationFailureKind ?? failureKind,
+        failureKind: negotiationFailureKind ?? pathPrependFailureKind ?? failureKind,
       });
     }
   }
@@ -1153,6 +1165,15 @@ class NodeMcpAdapter implements McpPort {
     workingDirectory?: string,
   ): Promise<{ transport: McpTransport }> {
     if (config.type === "stdio") {
+      // specs/agent-runtimes.md §2.2 层(3)（传输防御腿）：配置装载腿漏掉的相对元素在
+      // spawn 前最后拦截——仅令该 server 失败（错误沿 openServerConnection 既有
+      // per-server 失败路径归类 config_invalid），禁止 -32602 整请求硬拒。
+      const pathPrependValidation = config.pathPrepend
+        ? validatePathPrepend(config.pathPrepend, homedir())
+        : undefined;
+      if (pathPrependValidation && !pathPrependValidation.ok) {
+        throw new McpPathPrependInvalidError(pathPrependValidation.invalidElement);
+      }
       return {
         transport: new ProcessTreeStdioClientTransport({
           command: config.command,
@@ -1160,10 +1181,17 @@ class NodeMcpAdapter implements McpPort {
           cwd: config.cwd
             ? resolve(workingDirectory ?? this.workingDirectory ?? process.cwd(), config.cwd)
             : (workingDirectory ?? this.workingDirectory),
-          env: {
-            ...buildMcpStdioEnv({ env: this.env, network: this.network }),
-            ...config.env,
-          },
+          // specs/agent-runtimes.md §2.5 L4→L5（C1）：pathPrepend 前插必须在
+          // `...config.env` spread 之后应用——「pathPrepend 最优先」不变量：即使
+          // server 显式用 env.PATH 整串替换，前插目录仍然胜出。
+          env: applyPathPrependToEnv(
+            {
+              ...buildMcpStdioEnv({ env: this.env, network: this.network }),
+              ...config.env,
+            },
+            config.pathPrepend,
+            { homeDir: homedir(), pathSeparator: delimiter },
+          ),
           stderr: "pipe",
         }),
       };

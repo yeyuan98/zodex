@@ -670,7 +670,11 @@ export class ZCodeProtocolAgentServer {
       case zcodeProtocolMethods.processChildProcesses:
         return listChildProcesses(this.context.deps.mcpTelemetry?.listProcesses() ?? []);
       case zcodeProtocolMethods.runtimeCapabilities:
-        return { independentPlanState: true };
+        // mcpPathPrepend（specs/agent-runtimes.md §2.4，C1）：本 CLI 的 strict 协议
+        // schema 已接受 stdio mcpServers 的 pathPrepend 字段；desktop 据此 flag 决定
+        // 是否在三个下发点携带该字段。本 handler 是所有进程泳道（chat/plugin/mcp-status
+        // 隔离进程）共用的同一 app-server 入口分发，无按 lane 裁剪。
+        return { independentPlanState: true, mcpPathPrepend: true };
       case zcodeProtocolMethods.pluginsMarketplaceAdd:
         return await this.withPluginOperationSignal(request, (signal) =>
           addPluginMarketplace(this.context, request.params, signal),
