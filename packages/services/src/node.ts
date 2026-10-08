@@ -232,6 +232,14 @@ export type {
   LocalRuntimeUpdateCheck,
 } from "./runtime-tools/local-runtime/service.js";
 export type { LocalRuntimeKind } from "./runtime-tools/local-runtime/shared.js";
+// W6：desktop main 启动期 GC（§4.6 GC 重试归属）+ Bash 腿合并辅助（agent spawn 缝）。
+export { runLocalRuntimeStartupGc } from "./runtime-tools/local-runtime/startup-gc.js";
+export type { LocalRuntimeStartupGcResult } from "./runtime-tools/local-runtime/startup-gc.js";
+export {
+  buildAppRuntimeBashAppend,
+  mergeAppRuntimeBashAppendIntoEnv,
+  resolveAppRuntimeBashAppendFromDisk,
+} from "./runtime-tools/local-runtime/bash-append.js";
 
 // 定时任务管理与 scheduler 共用同一套 node-only 存储和 cron 语义。
 export {

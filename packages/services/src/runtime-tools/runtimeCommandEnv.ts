@@ -1,6 +1,12 @@
 import { existsSync } from "node:fs";
 import { delimiter } from "node:path";
 import { buildZCodeToolEnvPassthroughEnv, sanitizeZCodeRuntimeEnvInPlace } from "@zcode/shared";
+import {
+  buildAppRuntimeBashAppend,
+  mergeAppRuntimeBashAppendIntoEnv,
+  resolveAppRuntimeBashAppendFromDisk,
+  type AppRuntimeBashAppendInput,
+} from "./local-runtime/bash-append.js";
 import { appendPathEntries, buildRuntimeToolEnvPatch } from "./runtimeToolResolver.js";
 import {
   buildShellBootstrapPath,
@@ -158,6 +164,13 @@ export function buildRuntimeProcessEnvPatch(
   options: {
     platform?: NodeJS.Platform;
     windowsNodePaths?: readonly string[];
+    /**
+     * app 级运行时 Bash 腿（specs/agent-runtimes.md §2.5）注入缝：
+     * - undefined（缺省）→ 从磁盘解析（<config>/.runtime 与 A2′ 写入同源）；
+     * - null → 显式禁用；
+     * - 对象 → 直接采用（测试/调用方注入，binDirExists 等全由该输入决定）。
+     */
+    appRuntimeBashAppend?: AppRuntimeBashAppendInput | null;
   } = {},
 ): Record<string, string> {
   const platform = options.platform ?? process.platform;
@@ -204,6 +217,28 @@ export function buildRuntimeProcessEnvPatch(
     const nextPath = appendPathEntries(pathBase, runtimeToolPathEntries);
     if (nextPath) {
       envPatch.PATH = nextPath;
+    }
+  }
+
+  // specs/agent-runtimes.md §2.5（Bash 工具腿：app 级 host 侧追加）：app 运行时
+  // 在场时向最终 PATH 尾部追加版本化 bin 目录 + 镜像缺省填空；缺席（null）= patch
+  // 不变（fail-closed 回落现状）。注入缝见 options.appRuntimeBashAppend。追加的
+  // PATH 基线 = 本 patch 已解析的最终 PATH（envPatch.PATH ?? pathBase）。
+  const appRuntimeAppend =
+    options.appRuntimeBashAppend === null
+      ? null
+      : options.appRuntimeBashAppend !== undefined
+        ? buildAppRuntimeBashAppend(normalizedBaseEnv, options.appRuntimeBashAppend)
+        : resolveAppRuntimeBashAppendFromDisk(normalizedBaseEnv, { platform });
+  if (appRuntimeAppend) {
+    const mergeBase: Record<string, string> = { ...envPatch };
+    const pathBaseForAppend = envPatch.PATH ?? pathBase ?? "";
+    if (pathBaseForAppend) {
+      mergeBase.PATH = pathBaseForAppend;
+    }
+    const merged = mergeAppRuntimeBashAppendIntoEnv(mergeBase, appRuntimeAppend, { platform });
+    for (const [key, value] of Object.entries(merged)) {
+      envPatch[key] = value;
     }
   }
 
