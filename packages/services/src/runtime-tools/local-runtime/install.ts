@@ -150,6 +150,10 @@ function mergeRuntimeJsonWithProbe(
     ...(previous?.overrides ? { overrides: previous.overrides } : {}),
     measurements: [...preservedMeasurements, ...probe.measurements],
     pinned: previous?.pinned ?? { node: "", uv: "" },
+    // F5 MAJOR-5（§4.7 useMirrors schema）：本字面量逐字段构造 runtime.json——
+    // 遗漏 useMirrors 会把 OFF 静默翻回缺省 true（探测合并即翻开关）。仅在场时
+    // 保留（缺席 = true 现行为，不主动补写）。
+    ...(previous?.useMirrors !== undefined ? { useMirrors: previous.useMirrors } : {}),
   };
 }
 
@@ -177,6 +181,15 @@ async function ensureRuntimeJsonState(
   const jsonPath = resolveRuntimeJsonPath(deps);
   const existing = readAppRuntimeJson(jsonPath);
   const nowMs = (deps.now ?? Date.now)();
+  // F5（§4.7 OFF 全链「安装跳过探测轮」）：OFF（useMirrors === false；缺席 =
+  // true 现行为）时 install 跳过探测——安装选路全走 origin-only 梯次（P4a
+  // 投影），探测决策无意义；TTL 过期/force 也不例外。runtime.json 原样返回
+  // 不重写（合并位点缺席即 MAJOR-5 翻开关风险的最小暴露面）；runtime.json
+  // 缺席/损坏时读端 treat-as-absent → 缺席 = true → 照常探测（OFF+缺席在
+  // install 缝不可达：OFF 状态本身只持久于 runtime.json）。
+  if (existing?.useMirrors === false) {
+    return existing;
+  }
   const slots = existing
     ? resolveReprobeSlots(existing, { nowMs, force: options.forceReprobe })
     : [...APP_RUNTIME_ARTIFACT_CLASSES];

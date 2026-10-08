@@ -85,7 +85,11 @@ export interface LocalRuntimeService {
   status(): LocalRuntimeStatusSnapshot;
   setMirrorOverride(artifactClass: AppRuntimeArtifactClass, candidateId: string): Promise<void>;
   clearMirrorOverride(artifactClass: AppRuntimeArtifactClass): Promise<void>;
-  /** 显式 refresh 探测（只作用于无 override 位）并持久化，返回排名快照。 */
+  /**
+   * 显式 refresh 探测（只作用于无 override 位）并持久化，返回排名快照。
+   * F5（§4.7 MINOR-6）：useMirrors === false（OFF）时 = 纯展示腿——只更新
+   * measurements/快照与日志，不写 decisions/overrides（开关状态原样保留）。
+   */
   probeMirrors(options?: { readonly force?: boolean }): Promise<LocalRuntimeProbeSnapshot>;
 }
 
@@ -219,8 +223,26 @@ export class LocalRuntimeServiceImpl implements LocalRuntimeService {
   async probeMirrors(
     options: { readonly force?: boolean } = {},
   ): Promise<LocalRuntimeProbeSnapshot> {
+    // F5（§4.7 手动 Probe = 纯展示腿，MINOR-6）：OFF（useMirrors === false）下
+    // 手动 Probe 只更新 measurements/快照与日志，**不写 decisions/overrides**
+    // （否则违背「仅信息展示」；ON 行为不变——照常持久化）。内部调用方
+    // （ensureRuntimeJsonForOverride，B 边缘）保持持久语义，走 persist 变体。
+    const existing = readAppRuntimeJson(this.resolveJsonPath());
+    return this.probeMirrorsInternal(options, existing, existing?.useMirrors !== false);
+  }
+
+  /**
+   * 探测轮实现（公共展示腿与内部持久腿共用）：persistDecisions = true 时照常
+   * 写 decisions 并刷新 probedAt（现行为）；false（OFF 展示腿）时 decisions/
+   * overrides/probedAt 原样保留（决策新鲜度时钟不因纯展示探测被拨快——ON 恢复
+   * 后 TTL 判定仍以真实决策轮为准），仅 measurements 更新。
+   */
+  private async probeMirrorsInternal(
+    options: { readonly force?: boolean },
+    existing: AppRuntimeJson | null,
+    persistDecisions: boolean,
+  ): Promise<LocalRuntimeProbeSnapshot> {
     const jsonPath = this.resolveJsonPath();
-    const existing = readAppRuntimeJson(jsonPath);
     const nowMs = (this.deps.now ?? Date.now)();
     const slots = existing
       ? resolveReprobeSlots(existing, { nowMs, force: options.force ?? true })
@@ -277,7 +299,10 @@ export class LocalRuntimeServiceImpl implements LocalRuntimeService {
     for (const [index, artifactClass] of slots.entries()) {
       const result = settled[index];
       if (result === undefined || result.status !== "fulfilled") continue;
-      decisions[artifactClass] = result.value.outcome.winner;
+      // OFF 展示腿不写 decisions（§4.7 MINOR-6）：探测 winner 只进快照/measurements。
+      if (persistDecisions) {
+        decisions[artifactClass] = result.value.outcome.winner;
+      }
       measurements.push(...result.value.measurements.map((entry) => ({ ...entry, artifactClass })));
       perClass.push({
         artifactClass,
@@ -294,12 +319,18 @@ export class LocalRuntimeServiceImpl implements LocalRuntimeService {
     // 每轮探测一行汇总（§4.7 日志通道：不逐候选刷屏）。
     this.logger.info(undefined, `probe round: ${summary.join(" ")}`);
     const merged: AppRuntimeJson = {
-      probedAt: new Date(nowMs).toISOString(),
+      // OFF 展示腿不拨快决策新鲜度时钟：probedAt 语义 = 最近一次**持久化决策**轮。
+      probedAt: persistDecisions
+        ? new Date(nowMs).toISOString()
+        : (existing?.probedAt ?? new Date(nowMs).toISOString()),
       ttlDays: existing?.ttlDays ?? 7,
       decisions: decisions as AppRuntimeDecisions,
       ...(existing?.overrides ? { overrides: existing.overrides } : {}),
       measurements,
       pinned: existing?.pinned ?? { node: "", uv: "" },
+      // F5 MAJOR-5（§4.7 useMirrors schema）：合并字面量逐字段构造——遗漏该字段
+      // 会把 OFF 静默翻回缺省 true。仅在场时保留（缺席 = true 现行为）。
+      ...(existing?.useMirrors !== undefined ? { useMirrors: existing.useMirrors } : {}),
     };
     writeAppRuntimeJson(jsonPath, merged);
     return { perClass };
@@ -310,7 +341,10 @@ export class LocalRuntimeServiceImpl implements LocalRuntimeService {
     const jsonPath = this.resolveJsonPath();
     const existing = readAppRuntimeJson(jsonPath);
     if (existing) return existing;
-    await this.probeMirrors({ force: true });
+    // B 边缘（§4.7/F5）：runtime.json 缺席 + 用户设 override 时允许探测建立
+    // decisions 载体——保持持久语义（OFF 投影下惰性、ON 后生效，不翻开关）；
+    // 缺席 = useMirrors 缺省 true，与公共展示腿的 OFF 判定不冲突。
+    await this.probeMirrorsInternal({ force: true }, null, true);
     const created = readAppRuntimeJson(jsonPath);
     if (!created) {
       throw new InvalidMirrorOverrideError("runtime.json 建立失败（探测轮未落盘）");
