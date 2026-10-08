@@ -316,6 +316,13 @@ export interface DownloadArtifactOptions {
     readonly bytes: number;
     readonly totalBytes: number | null;
   }) => void;
+  /**
+   * F1 梯次末位候选豁免速度下限（specs/agent-runtimes.md §4.7 MINOR-5c，alpha.3）：
+   * true 时仅豁免【速度下限】——闲置看门狗（8s 无新 chunk）与 DOWNLOAD_TIMEOUT_MS
+   * 总上限仍照常生效。旗标由安装编排按梯次位置传入（末位元素）；独立调用下载函数
+   * 不豁免（缺省 false），慢速涓流照旧被下限处死让位梯次。
+   */
+  readonly exemptSpeedFloor?: boolean;
 }
 
 /** 速度窗口积分用：一次 chunk 到达（时刻 = 流 yield 处，pre-sink-write——MINOR-15）。 */
@@ -333,7 +340,8 @@ interface ChunkArrivalRecord {
  * < 256KB/s）→ abort 该候选，让既有梯次推进；失速 abort 经由同一 AbortController，
  * 抛出的 ArtifactDownloadError 文案可区分失速类型并携带统计（累计字节/时长/窗口速度，
  * §4.7 观测——install 侧后续落 warn，本层先由错误文案承载）。
- * 梯次末位候选豁免速度下限（MINOR-5c）归安装编排（后续 phase），本函数不感知梯次。
+ * 梯次末位候选豁免速度下限（MINOR-5c）经 options.exemptSpeedFloor 由安装编排按
+ * 梯次位置传入；本函数仍不感知梯次，仅按旗标跳过速度下限评估。
  *
  * 半写文件清理归调用方（install 编排持有下载 tmp 路径的所有权）。
  *
@@ -402,6 +410,10 @@ async function runArtifactDownload(
   // 速度下限评估：宽限（自首 chunk 到达起 15s）内不罚 TCP 慢启动；此后窗口平均速度
   // 低于下限 → abort（评估时机①新 chunk 到达 / ②看门狗定时器触发，§4.7）。
   const evaluateSpeedFloor = (now: number): void => {
+    // 末位候选豁免（§4.7 MINOR-5c）：OFF 直连 origin 的慢速真实下载不被下限处死
+    // （慢好过没有）——仅此一项豁免；闲置看门狗与 DOWNLOAD_TIMEOUT_MS 总上限在
+    // 本函数外照常生效。旗标由安装编排按梯次位置传入，独立调用缺省不豁免。
+    if (options.exemptSpeedFloor === true) return;
     if (firstChunkAt === null || now - firstChunkAt < DOWNLOAD_SPEED_GRACE_MS) return;
     const snapshot = windowSpeedAt(now);
     if (snapshot === null || snapshot.bytesPerSec >= DOWNLOAD_SPEED_FLOOR_BYTES_PER_SEC) return;

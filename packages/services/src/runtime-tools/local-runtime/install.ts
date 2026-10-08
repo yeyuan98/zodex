@@ -40,13 +40,19 @@ import {
   buildNodeArtifactFileName,
   buildUvArtifactFileName,
   buildUvTriple,
+  fetchNodeShasumsText,
+  fetchUvReleaseMetadata,
   resolveLatestNodeVersion,
   resolveLatestUvVersion,
+  type UvReleaseMetadata,
 } from "./upstream.js";
+import type { NodeChecksumAnchor } from "./verify.js";
 import {
   buildCandidateLadder,
   downloadAndVerifyCandidate,
   smokeTestVersion,
+  type CandidateAttemptContext,
+  type NodeShasumsPrefetchEntry,
 } from "./download-verify.js";
 import {
   LocalRuntimeInstallError,
@@ -218,16 +224,48 @@ export async function installRuntime(
   }
   const artifactClass = kindArtifactClass(kind);
   const ladder = buildCandidateLadder(artifactClass, json);
+  // F3 校验锚点前置（§4.2，alpha.3；plan §9 NIT-1 预取位置）：noop 早退【之后】、
+  // 梯次循环之前——noop 安装不得取任何新东西。先取校验值再下载 tarball，锚点
+  // 不可达不再浪费已完成下载（§2o path-6：npmmirror 28MB tarball 下载后被锚点
+  // 20s 取败丢弃）。node 双锚 SHASUMS per-anchor 预取、候选间复用（每锚点每安装
+  // 尝试至多取一次）；uv digest（api.github.com 恒定锚点、不随传输候选变）每安装
+  // 尝试一次——消除「gh-proxy 下载成功却被第二次 digest 取败毁掉整次安装」（§1.3.2）。
+  const nodeShasumsPrefetch = new Map<NodeChecksumAnchor, NodeShasumsPrefetchEntry>();
+  let uvReleaseMetadata: UvReleaseMetadata | undefined;
+  if (kind === "node") {
+    // 锚点对内确定性顺序：先 npmmirror 再 nodejs.org（§4.7 tuna 路径同序）。预取
+    // 失败不在此处判死：缓存如实标记不可达，由各候选按单锚失败语义处置（锚点对
+    // 候选单锚败 = 该候选跳过下载、梯次继续；tuna 双锚皆败 = §4.7 typed 中止）。
+    for (const anchor of ["npmmirror", "nodejs.org"] as const) {
+      nodeShasumsPrefetch.set(
+        anchor,
+        await fetchNodeShasumsText(anchor, version, fetchOptionsFor(deps)),
+      );
+    }
+  } else {
+    // uv：digest 锚点（api.github.com）不可达/限流 = typed 快速失败（≤
+    // METADATA_FETCH_TIMEOUT_MS，不降级为无校验，§4.2 不变量）——直接传播出
+    // installRuntime，不进梯次。
+    uvReleaseMetadata = await fetchUvReleaseMetadata(version, fetchOptionsFor(deps));
+  }
   let lastError = "no candidate attempted";
   let succeeded: { candidate: string; downloadFilePath: string } | null = null;
-  for (const candidate of ladder.candidates) {
+  for (const [candidateIndex, candidate] of ladder.candidates.entries()) {
     logger.info(undefined, `download: kind=${kind} version=${version} candidate=${candidate}`);
+    // F1 末位候选豁免速度下限（§4.7 MINOR-5c）：豁免由安装编排按梯次位置传入
+    // （仅末位元素）——慢速真实下载不被 256KB/s 下限处死（OFF 直连 origin 时
+    // 「慢好过没有」）；闲置看门狗与 DOWNLOAD_TIMEOUT_MS 总上限仍管。
+    const attempt: CandidateAttemptContext = {
+      exemptSpeedFloor: candidateIndex === ladder.candidates.length - 1,
+      ...(kind === "node" ? { nodeShasumsPrefetch } : { uvReleaseMetadata }),
+    };
     const outcome = await downloadAndVerifyCandidate(
       kind,
       candidate,
       version,
       deps,
       options.onProgress,
+      attempt,
     );
     if (outcome.ok && outcome.downloadFilePath) {
       succeeded = { candidate, downloadFilePath: outcome.downloadFilePath };
