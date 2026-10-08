@@ -2314,6 +2314,7 @@ const enUS: Record<string, string> = {
   "settings.mcp.runtime.checkUpdateFailed": "Failed to check for runtime updates. Try again later.",
   "settings.mcp.runtime.upToDate": "Up to date",
   "settings.mcp.runtime.updateAvailable": "Update available: {version}",
+  "settings.mcp.runtime.updateTo": "Update to {version}",
   "settings.mcp.runtime.reverify": "Re-verify",
   "settings.mcp.runtime.reverifyFailed": "Runtime verification failed. Try again later.",
   "settings.mcp.runtime.lastVerifyOk": "Last verify: {version} passed",
@@ -2321,7 +2322,7 @@ const enUS: Record<string, string> = {
   "settings.mcp.runtime.remove": "Remove",
   "settings.mcp.runtime.removeConfirmTitle": "Remove the {kind} runtime?",
   "settings.mcp.runtime.removeConfirmDescription":
-    "This deletes the installed runtime directory and the mirror decision record on this machine. Running sessions fall back on their next task. Remove it?",
+    "This deletes the installed runtime directory and clears the version pin on this machine; mirror decisions and overrides are kept (they still feed mirror env defaults). Running sessions fall back on their next task. Remove it?",
   "settings.mcp.runtime.removeConfirmAction": "Remove",
   "settings.mcp.runtime.actionFailed": "Runtime action failed. Try again.",
   "settings.mcp.runtime.mirrorSection": "Mirrors",

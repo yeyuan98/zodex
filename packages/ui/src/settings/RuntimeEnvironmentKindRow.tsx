@@ -74,6 +74,17 @@ export function RuntimeEnvironmentKindRow({
       <div className="flex flex-wrap items-center gap-2">
         {installed ? (
           <>
+            {updateCheck?.updateAvailable ? (
+              // [ulw] MAJOR-1：更新入口——检查更新发现新版本时渲染「更新到 {version}」，
+              // 复用与安装相同的 onInstall/store action（install 编排 dir→runtime.json→
+              // CURRENT→GC 自带同版 no-op 门，直接指向新版本即完成更新）。
+              <Button type="button" variant="default" size="xs" onClick={onInstall} disabled={busy}>
+                {intl.formatMessage(
+                  { id: "settings.mcp.runtime.updateTo" },
+                  { version: updateCheck.latest },
+                )}
+              </Button>
+            ) : null}
             <Button
               type="button"
               variant="outline"

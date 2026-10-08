@@ -2203,6 +2203,7 @@ const zhCN: Record<string, string> = {
   "settings.mcp.runtime.checkUpdateFailed": "检查运行时更新失败，请稍后重试。",
   "settings.mcp.runtime.upToDate": "已是最新版本",
   "settings.mcp.runtime.updateAvailable": "可更新到 {version}",
+  "settings.mcp.runtime.updateTo": "更新到 {version}",
   "settings.mcp.runtime.reverify": "重新验证",
   "settings.mcp.runtime.reverifyFailed": "运行时验证失败，请稍后重试。",
   "settings.mcp.runtime.lastVerifyOk": "最近验证：{version} 通过",
@@ -2210,7 +2211,7 @@ const zhCN: Record<string, string> = {
   "settings.mcp.runtime.remove": "删除",
   "settings.mcp.runtime.removeConfirmTitle": "删除 {kind} 运行时？",
   "settings.mcp.runtime.removeConfirmDescription":
-    "将删除本机已安装的运行时目录与镜像决策记录；运行中的会话在下一任务生效回退。确定删除吗？",
+    "将删除本机已安装的运行时目录并清空版本钉住记录；镜像决策与覆盖设置保留（仍供镜像缺省填空使用）。运行中的会话在下一任务生效回退。确定删除吗？",
   "settings.mcp.runtime.removeConfirmAction": "删除",
   "settings.mcp.runtime.actionFailed": "运行时操作失败，请重试。",
   "settings.mcp.runtime.mirrorSection": "镜像源",

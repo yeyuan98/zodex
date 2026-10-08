@@ -4,11 +4,13 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  applyAppRuntimeLayerToEnv,
   applyAppRuntimePrependToEnv,
   applyMirrorEnvDefaults,
   readAppRuntimeCurrent,
   resolveAppRuntimeBinDir,
   resolveAppRuntimeRoot,
+  type AppRuntimeFsAccessor,
 } from "../src/mcp/app-runtime-prepend.ts";
 import { applyPathPrependToEnv } from "../src/mcp/path-prepend.ts";
 
@@ -229,4 +231,163 @@ test("镜像缺省填空：键已存在（同形小写）→ 不覆盖", () => {
     { npmRegistry: "https://registry.npmmirror.com" },
   );
   assert.equal(next.npm_config_registry, "https://custom.example.com", "同形键已存在时不覆盖");
+});
+
+// [ulw] MINOR-6 seam 红测：L3 编排（applyAppRuntimeLayerToEnv）经注入 fs 消费
+// runtime.json——overrides 胜 decisions；缺失/损坏 → 不填空、不抛错；并按
+// mcp/index.ts createTransport 的组合形制钉 §2.5 L4 结构性覆盖（...config.env
+// spread 后到即胜、显式 env.PATH 整串替换）。
+
+function fakeFs(
+  files: Readonly<Record<string, string>>,
+  dirs: readonly string[],
+): AppRuntimeFsAccessor {
+  const dirSet = new Set(dirs);
+  return {
+    readTextFile: (path) => {
+      const content = files[path];
+      if (content === undefined) throw new Error(`ENOENT: ${path}`);
+      return content;
+    },
+    statDirectory: (path) => dirSet.has(path),
+    exists: (path) => Object.prototype.hasOwnProperty.call(files, path) || dirSet.has(path),
+  };
+}
+
+const L3_BASE = join("/", "data-base");
+const L3_ROOT = join(L3_BASE, ".zcode", ".runtime");
+const L3_ENV = { ZCODE_DATA_BASE_DIR: L3_BASE };
+
+function l3LayerJson(overrides?: Record<string, string>, decisions?: Record<string, string>) {
+  return JSON.stringify({
+    probedAt: "2026-10-08T00:00:00.000Z",
+    ttlDays: 7,
+    decisions: {
+      nodeDist: "nodejs.org",
+      uvRelease: "github.com",
+      pypiIndex: "pypi.org",
+      npmRegistry: "registry.npmjs.org",
+      pbsMirror: "registry.npmmirror.com",
+      ...decisions,
+    },
+    ...(overrides ? { overrides } : {}),
+    measurements: [],
+    pinned: { node: "v22.14.0", uv: "" },
+  });
+}
+
+const L3_INSTALLED_FS = () =>
+  fakeFs({ [join(L3_ROOT, "node", "CURRENT")]: "v22.14.0\n" }, [join(L3_ROOT, "node", "v22.14.0")]);
+
+test("MINOR-6：runtime.json overrides.npmRegistry → 填空值胜过 decisions", () => {
+  const fs = fakeFs(
+    {
+      [join(L3_ROOT, "node", "CURRENT")]: "v22.14.0\n",
+      [join(L3_ROOT, "runtime.json")]: l3LayerJson({ npmRegistry: "registry.npmmirror.com" }),
+    },
+    [join(L3_ROOT, "node", "v22.14.0")],
+  );
+  const env = applyAppRuntimeLayerToEnv(
+    { PATH: "/usr/bin" },
+    {
+      env: L3_ENV,
+      homeDir: HOME,
+      platform: "linux",
+      fs,
+    },
+  );
+  assert.equal(
+    env.npm_config_registry,
+    "https://registry.npmmirror.com",
+    "填空值 = effective decision（override ?? probed，§4.7），override 胜出",
+  );
+  assert.equal(
+    env.PATH,
+    `${join(L3_ROOT, "node", "v22.14.0", "bin")}:/usr/bin`,
+    "CURRENT 有效 → app bin 目录前插（L3 > L2）",
+  );
+});
+
+test("MINOR-6：runtime.json 缺席 → 不填空、不抛错（前插仍按 CURRENT 进行）", () => {
+  const env = applyAppRuntimeLayerToEnv(
+    { PATH: "/usr/bin" },
+    {
+      env: L3_ENV,
+      homeDir: HOME,
+      platform: "linux",
+      fs: L3_INSTALLED_FS(),
+    },
+  );
+  assert.equal(env.npm_config_registry, undefined, "runtime.json 缺席 → 镜像填空缺席");
+  assert.equal(env.UV_DEFAULT_INDEX, undefined, "不猜、不填默认镜像");
+  assert.equal(
+    env.PATH,
+    `${join(L3_ROOT, "node", "v22.14.0", "bin")}:/usr/bin`,
+    "前插与 runtime.json 无关，照常进行",
+  );
+});
+
+test("MINOR-6：runtime.json 损坏 → 不填空、不抛错", () => {
+  const fs = fakeFs(
+    {
+      [join(L3_ROOT, "node", "CURRENT")]: "v22.14.0\n",
+      [join(L3_ROOT, "runtime.json")]: "not-json{",
+    },
+    [join(L3_ROOT, "node", "v22.14.0")],
+  );
+  const env = applyAppRuntimeLayerToEnv(
+    { PATH: "/usr/bin" },
+    {
+      env: L3_ENV,
+      homeDir: HOME,
+      platform: "linux",
+      fs,
+    },
+  );
+  assert.equal(env.npm_config_registry, undefined, "损坏 = treat-as-absent，不猜");
+  assert.equal(
+    env.PATH,
+    `${join(L3_ROOT, "node", "v22.14.0", "bin")}:/usr/bin`,
+    "损坏不影响 CURRENT 前插（两读腿独立容错）",
+  );
+});
+
+test("MINOR-6 seam：L3 填空后 ...config.env spread 覆盖填空键 + env.PATH 整串替换（§2.5 L4）", () => {
+  const fs = fakeFs(
+    {
+      [join(L3_ROOT, "node", "CURRENT")]: "v22.14.0\n",
+      [join(L3_ROOT, "runtime.json")]: l3LayerJson({ npmRegistry: "registry.npmmirror.com" }),
+    },
+    [join(L3_ROOT, "node", "v22.14.0")],
+  );
+  // mcp/index.ts createTransport 组合形制（无 pathPrepend 时 L5 为 no-op）：
+  // applyPathPrependToEnv({ ...applyAppRuntimeLayerToEnv(l2), ...config.env }, pathPrepend, ...)
+  const afterL3 = applyAppRuntimeLayerToEnv(
+    { PATH: "/usr/bin" },
+    {
+      env: L3_ENV,
+      homeDir: HOME,
+      platform: "linux",
+      fs,
+    },
+  );
+  assert.equal(afterL3.npm_config_registry, "https://registry.npmmirror.com", "L3 后填空在场");
+  const configEnv = {
+    npm_config_registry: "https://custom.example.com",
+    PATH: "/explicit/path",
+  };
+  const finalEnv = applyPathPrependToEnv({ ...afterL3, ...configEnv }, undefined, {
+    homeDir: HOME,
+    pathSeparator: POSIX_DELIMITER,
+  });
+  assert.equal(
+    finalEnv.npm_config_registry,
+    "https://custom.example.com",
+    "config.env 键后到即胜（L4 结构性覆盖，§2.5）",
+  );
+  assert.equal(
+    finalEnv.PATH,
+    "/explicit/path",
+    "显式 env.PATH = 整串替换（L3/L2 段被消灭——既有逃逸口语义）",
+  );
 });
