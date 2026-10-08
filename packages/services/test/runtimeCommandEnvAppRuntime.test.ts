@@ -65,8 +65,10 @@ test("Bash 腿：node 与 uv 均在场 → 两组 bin 目录都在追加段（�
     "node 版本化 bin 目录须在追加段（追加段内 node/uv 相对序不作约束）",
   );
   assert.ok(
-    result?.pathAppend.includes(join(ROOT, "uv", "0.8.6", "bin")),
-    "uv 版本化 bin 目录（uvx 与 uv 同目录）须在追加段",
+    // spec §4.3：uv unix 剥掉 uv-<triple>/ 顶层后平铺于 v<ver>/（uvx 与 uv 同
+    // 目录）——W1 初稿误写 /bin 形态，与安装布局/技能矛盾，按 spec 修正。
+    result?.pathAppend.includes(join(ROOT, "uv", "0.8.6")),
+    "uv 版本化 bin 目录（v<ver>/ 平铺，uvx 与 uv 同目录）须在追加段",
   );
 });
 

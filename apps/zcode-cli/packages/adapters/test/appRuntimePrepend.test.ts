@@ -7,6 +7,7 @@ import {
   applyAppRuntimePrependToEnv,
   applyMirrorEnvDefaults,
   readAppRuntimeCurrent,
+  resolveAppRuntimeBinDir,
   resolveAppRuntimeRoot,
 } from "../src/mcp/app-runtime-prepend.ts";
 import { applyPathPrependToEnv } from "../src/mcp/path-prepend.ts";
@@ -108,6 +109,30 @@ test("CURRENT 读取：悬空指针（指向已 GC 目录）→ null", async () 
   } finally {
     await sandbox.dispose();
   }
+});
+
+test("bin 目录解析：node unix 取 bin/、uv 两平台平铺于 v<ver>/（spec §4.3）", () => {
+  const root = join("/", "opt", "runtime");
+  assert.equal(
+    resolveAppRuntimeBinDir(root, "node", "v22.14.0", "linux"),
+    join(root, "node", "v22.14.0", "bin"),
+    "node unix 保持 bin/ 子目录",
+  );
+  assert.equal(
+    resolveAppRuntimeBinDir(root, "node", "v22.14.0", "win32"),
+    join(root, "node", "v22.14.0"),
+    "node win 平铺",
+  );
+  assert.equal(
+    resolveAppRuntimeBinDir(root, "uv", "0.8.6", "linux"),
+    join(root, "uv", "0.8.6"),
+    "uv unix 平铺（剥 uv-<triple>/ 顶层后 uvx 与 uv 同目录，勿用 /bin 形态）",
+  );
+  assert.equal(
+    resolveAppRuntimeBinDir(root, "uv", "0.8.6", "win32"),
+    join(root, "uv", "0.8.6"),
+    "uv win 平铺",
+  );
 });
 
 test("L3 前插：app bin 目录前插到 PATH 最左（L3 > L2），POSIX 分隔符", () => {

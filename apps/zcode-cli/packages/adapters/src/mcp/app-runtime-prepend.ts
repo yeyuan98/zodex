@@ -138,7 +138,11 @@ export function applyMirrorEnvDefaults(
   return next;
 }
 
-/** 版本化 bin 目录：win 平铺（node.exe/uv.exe 直接在版本目录）；unix 取 `bin/` 子目录。 */
+/**
+ * 版本化 bin 目录（spec §4.3 布局）：node unix 保持 `bin/` 子目录、win 平铺；
+ * uv 在两平台均平铺于 `v<ver>/`（unix 剥掉 `uv-<triple>/` 顶层后 uvx 与 uv
+ * 同目录——与 S1 技能/W5 安装布局一致，勿改成 `/bin` 形态）。
+ */
 export function resolveAppRuntimeBinDir(
   root: string,
   kind: AppRuntimeKind,
@@ -146,6 +150,9 @@ export function resolveAppRuntimeBinDir(
   platform: NodeJS.Platform = process.platform,
 ): string {
   const versionDir = join(root, kind, version);
+  if (kind === "uv") {
+    return versionDir;
+  }
   return platform === "win32" ? versionDir : join(versionDir, "bin");
 }
 

@@ -42,7 +42,11 @@ export interface AppRuntimeBashAppendResult {
   readonly envFill: Readonly<Record<string, string>>;
 }
 
-/** 版本化 bin 目录：win 平铺；unix 取 `bin/` 子目录（红测契约）。 */
+/**
+ * 版本化 bin 目录（spec §4.3 布局）：node unix 取 `bin/` 子目录、win 平铺；
+ * uv 两平台均平铺于 `v<ver>/`（unix 剥 `uv-<triple>/` 顶层后 uvx 与 uv 同
+ * 目录——与安装布局/S1 技能一致）。
+ */
 function resolveBashAppendBinDir(
   root: string,
   kind: "node" | "uv",
@@ -50,6 +54,9 @@ function resolveBashAppendBinDir(
   platform: NodeJS.Platform,
 ): string {
   const versionDir = join(root, kind, version);
+  if (kind === "uv") {
+    return versionDir;
+  }
   return platform === "win32" ? versionDir : join(versionDir, "bin");
 }
 
