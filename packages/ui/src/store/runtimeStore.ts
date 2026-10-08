@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { logger } from "@/logger.js";
 
 // ============================================================
 // 设置页 MCP 区「运行时环境」卡（alpha.2 A2′/D2）的 renderer store
@@ -9,8 +10,7 @@ import { create } from "zustand";
 // × 候选延迟排名）+ 操作（安装/检查更新/重新验证/删除）+ 镜像切换（写 overrides）。
 // 服务经 module-level DI 注入（mcpStore 的 setMcpStorePlatform 先例）；卡经
 // useBaseWorkspaceServices()（本机全局事实源）取数，状态不进 TUI 局部态。
-//
-// TODO(W6)：当前为 W1 红测桩——store 初始态 + no-op action，零行为。
+// 运行时 = 机器全局（非 workspace-scoped），无 workspace-key 守卫。
 
 export type RuntimeArtifactClass =
   | "nodeDist"
@@ -65,6 +65,7 @@ interface RuntimeCardState {
   readonly status: RuntimeStatusSnapshot | null;
   readonly installing: RuntimeKind | null;
   readonly progress: readonly RuntimeProgressEvent[];
+  readonly error: string | null;
   /** 镜像切换：写 overrides（override 优先于探测决策，§4.7）。 */
   setMirrorOverride(artifactClass: RuntimeArtifactClass, candidate: string): Promise<void>;
   clearMirrorOverride(artifactClass: RuntimeArtifactClass): Promise<void>;
@@ -73,14 +74,109 @@ interface RuntimeCardState {
   removeRuntime(kind: RuntimeKind): Promise<void>;
 }
 
-export const useRuntimeStore = create<RuntimeCardState>()(() => ({
+function appendProgress(
+  progress: readonly RuntimeProgressEvent[],
+  event: RuntimeProgressEvent,
+): readonly RuntimeProgressEvent[] {
+  // 进度事件有界（最近 200 条），防长安装流无限增长。
+  return [...progress, event].slice(-200);
+}
+
+export const useRuntimeStore = create<RuntimeCardState>()((set, get) => ({
   status: null,
   installing: null,
   progress: [],
-  // TODO(W6)：接线服务调用、进度事件与错误呈现。
-  setMirrorOverride: async () => {},
-  clearMirrorOverride: async () => {},
-  refreshStatus: async () => {},
-  installRuntime: async () => {},
-  removeRuntime: async () => {},
+  error: null,
+
+  setMirrorOverride: async (artifactClass, candidate) => {
+    const service = runtimeStoreService;
+    if (!service) {
+      logger.warn("[runtimeStore] setMirrorOverride without service seam");
+      return;
+    }
+    try {
+      await service.setMirrorOverride(artifactClass, candidate);
+      set({ error: null });
+    } catch (error) {
+      set({ error: String(error) });
+      throw error;
+    }
+    await get().refreshStatus();
+  },
+
+  clearMirrorOverride: async (artifactClass) => {
+    const service = runtimeStoreService;
+    if (!service) {
+      logger.warn("[runtimeStore] clearMirrorOverride without service seam");
+      return;
+    }
+    try {
+      await service.setMirrorOverride(artifactClass, null);
+      set({ error: null });
+    } catch (error) {
+      set({ error: String(error) });
+      throw error;
+    }
+    await get().refreshStatus();
+  },
+
+  refreshStatus: async () => {
+    const service = runtimeStoreService;
+    if (!service) {
+      return;
+    }
+    try {
+      const status = await service.getRuntimeStatus();
+      set({ status, error: null });
+    } catch (error) {
+      // 状态读取失败不清空已有快照（陈旧好过空白），只记错误供卡内呈现。
+      set({ error: String(error) });
+    }
+  },
+
+  installRuntime: async (kind) => {
+    const service = runtimeStoreService;
+    if (!service) {
+      logger.warn("[runtimeStore] installRuntime without service seam");
+      return;
+    }
+    if (get().installing) {
+      return;
+    }
+    set((state) => ({
+      installing: kind,
+      progress: appendProgress(state.progress, { kind, phase: "start", atMs: Date.now() }),
+      error: null,
+    }));
+    try {
+      await service.installRuntime(kind);
+      set((state) => ({
+        progress: appendProgress(state.progress, { kind, phase: "done", atMs: Date.now() }),
+      }));
+    } catch (error) {
+      set((state) => ({
+        progress: appendProgress(state.progress, { kind, phase: "failed", atMs: Date.now() }),
+        error: String(error),
+      }));
+    } finally {
+      set({ installing: null });
+      await get().refreshStatus();
+    }
+  },
+
+  removeRuntime: async (kind) => {
+    const service = runtimeStoreService;
+    if (!service) {
+      logger.warn("[runtimeStore] removeRuntime without service seam");
+      return;
+    }
+    try {
+      await service.removeRuntime(kind);
+      set({ error: null });
+    } catch (error) {
+      set({ error: String(error) });
+      throw error;
+    }
+    await get().refreshStatus();
+  },
 }));

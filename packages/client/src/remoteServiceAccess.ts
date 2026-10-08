@@ -35,6 +35,7 @@ import {
   IHooksService,
   IMemoryService,
   ISettingsSyncService,
+  ILocalRuntimeService,
   IPromptAttachmentTransferService,
   IWindowControllerService,
   type IServiceAccessor,
@@ -86,6 +87,8 @@ export class RemoteServiceAccess implements IServiceAccessor {
   readonly hooksService: IHooksService;
   readonly memoryService: IMemoryService;
   readonly settingsSyncService: ISettingsSyncService;
+  /** app 级本地运行时（A2′ 运行时环境卡）；仅 desktop local host 注册，可选面。 */
+  readonly localRuntimeService?: ILocalRuntimeService;
   readonly promptAttachmentTransferService: IPromptAttachmentTransferService;
 
   constructor(channelClient: IChannelClient) {
@@ -197,6 +200,11 @@ export class RemoteServiceAccess implements IServiceAccessor {
     );
     this.settingsSyncService = ProxyChannel.toService<ISettingsSyncService>(
       channelClient.getChannel(ISettingsSyncService.channelName),
+    );
+    // A2′ 运行时环境卡（specs/agent-runtimes.md §4.6/§4.7）：仅 desktop local host
+    // 注册该 channel；远端连接上代理调用会失败，卡只经 base services 取用本机 host。
+    this.localRuntimeService = ProxyChannel.toService<ILocalRuntimeService>(
+      channelClient.getChannel(ILocalRuntimeService.channelName),
     );
     // P2：feedbackService 代理随内置反馈中心删除；反馈不再走 RPC 服务通道。
     this.promptAttachmentTransferService = ProxyChannel.toService<IPromptAttachmentTransferService>(

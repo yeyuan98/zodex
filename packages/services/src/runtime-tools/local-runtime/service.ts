@@ -161,6 +161,46 @@ export class LocalRuntimeServiceImpl implements LocalRuntimeService {
       undefined,
       `mirror override set: ${artifactClass}=${candidateId}（后续下载/填空走新源；下一 spawn 生效）`,
     );
+    // D2：切换写 override 后立即重验该类连通（刷新 measurements 供卡内排名展示）；
+    // 探测轮自身会跳过 override 位，故单独探测该类。重探失败只 warn——override 已
+    // 落盘，不因瞬时网络回滚用户选择。
+    try {
+      await this.refreshMirrorMeasurementsForClass(artifactClass);
+    } catch (error) {
+      this.logger.warn(
+        undefined,
+        `mirror override reprobe failed: ${artifactClass} (${String(error)})`,
+      );
+    }
+  }
+
+  /** 单类重探（仅刷新 measurements；decisions/overrides 不动）。 */
+  private async refreshMirrorMeasurementsForClass(
+    artifactClass: AppRuntimeArtifactClass,
+  ): Promise<void> {
+    const jsonPath = this.resolveJsonPath();
+    const json = readAppRuntimeJson(jsonPath);
+    if (!json) return;
+    const probeVersion =
+      artifactClass === "nodeDist"
+        ? json.pinned.node || NODE_KNOWN_GOOD_PROBE_TAG
+        : artifactClass === "uvRelease"
+          ? json.pinned.uv || UV_KNOWN_GOOD_PROBE_TAG
+          : "";
+    const result = await probeArtifactClass(
+      artifactClass,
+      probeVersion,
+      this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {},
+    );
+    const measurements = json.measurements
+      .filter((entry) => entry.artifactClass !== artifactClass)
+      .concat(result.measurements.map((entry) => ({ ...entry, artifactClass })));
+    writeAppRuntimeJson(jsonPath, { ...json, measurements });
+    // 每轮探测一行汇总（§4.7 日志通道）。
+    this.logger.info(
+      undefined,
+      `mirror override reprobe: ${artifactClass} alive=${result.measurements.filter((entry) => entry.ok).length}/${result.measurements.length}`,
+    );
   }
 
   async clearMirrorOverride(artifactClass: AppRuntimeArtifactClass): Promise<void> {

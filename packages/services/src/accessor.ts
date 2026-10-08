@@ -33,6 +33,7 @@ import type { ICommandsService } from "./commands/commands.js";
 import type { IHooksService } from "./hooks/hooks.js";
 import type { IMemoryService } from "./memory/memory.js";
 import type { ISettingsSyncService } from "./settings-sync/settingsSync.js";
+import type { ILocalRuntimeService } from "./runtime-tools/local-runtime/port.js";
 import type { IPromptAttachmentTransferService } from "./prompt-attachment-transfer/promptAttachmentTransfer.js";
 import type { IWindowControllerService } from "./window-controller/windowController.js";
 import type { IOnboardingRecordService } from "./onboarding/onboardingRecord.js";
@@ -82,5 +83,11 @@ export interface IServiceAccessor {
   readonly hooksService: IHooksService;
   readonly memoryService: IMemoryService;
   readonly settingsSyncService: ISettingsSyncService;
+  /**
+   * app 级本地运行时（A2′「运行时环境」卡）：仅 desktop local host 注册；
+   * 远端 host / 测试 double 可不提供。卡必须经 base/local workspace services 取用
+   * （本机全局事实源），不得按 workspace 路由。
+   */
+  readonly localRuntimeService?: ILocalRuntimeService;
   readonly promptAttachmentTransferService: IPromptAttachmentTransferService;
 }
