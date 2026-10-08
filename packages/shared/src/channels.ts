@@ -129,6 +129,12 @@ export const ServiceChannels = {
   Memory: "memory",
   /** 首次启动设置同步服务 */
   SettingsSync: "settings-sync",
+  /**
+   * app 级本地运行时（node/uv）生命周期与镜像管理服务（specs/agent-runtimes.md
+   * §4.6/§4.7 A2′）。仅 desktop local host 注册；卡经 base/local workspace services
+   * 消费（本机全局事实源，绝不 workspace-scoped）。
+   */
+  LocalRuntime: "local-runtime",
   /** Bots 远程聊天控制服务 */
   Bots: "bots",
   /**

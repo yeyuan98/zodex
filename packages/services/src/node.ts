@@ -212,6 +212,34 @@ export {
   normalizeRuntimeProcessEnv,
   prepareRuntimeProcessEnvPatch,
 } from "./runtime-tools/runtimeCommandEnv.js";
+// A2′ 本地运行时下载器（alpha.2 specs/agent-runtimes.md §4.6/§4.7）：node-only
+// （fetch/fs/child_process）；浏览器入口（src/index.ts）不得导出——W6 UI 卡经
+// 服务 seam 消费，桌面 host 组装注册归 W6。
+export {
+  createLocalRuntimeService,
+  InvalidMirrorOverrideError,
+  LocalRuntimeServiceImpl,
+} from "./runtime-tools/local-runtime/service.js";
+export type {
+  LocalRuntimeInstallOptions,
+  LocalRuntimeInstallResult,
+  LocalRuntimeProbeSnapshot,
+  LocalRuntimeProgressEvent,
+  LocalRuntimeReverifyResult,
+  LocalRuntimeService,
+  LocalRuntimeServiceOptions,
+  LocalRuntimeStatusSnapshot,
+  LocalRuntimeUpdateCheck,
+} from "./runtime-tools/local-runtime/service.js";
+export type { LocalRuntimeKind } from "./runtime-tools/local-runtime/shared.js";
+// W6：desktop main 启动期 GC（§4.6 GC 重试归属）+ Bash 腿合并辅助（agent spawn 缝）。
+export { runLocalRuntimeStartupGc } from "./runtime-tools/local-runtime/startup-gc.js";
+export type { LocalRuntimeStartupGcResult } from "./runtime-tools/local-runtime/startup-gc.js";
+export {
+  buildAppRuntimeBashAppend,
+  mergeAppRuntimeBashAppendIntoEnv,
+  resolveAppRuntimeBashAppendFromDisk,
+} from "./runtime-tools/local-runtime/bash-append.js";
 
 // 定时任务管理与 scheduler 共用同一套 node-only 存储和 cron 语义。
 export {
@@ -267,6 +295,14 @@ import {
   type BotWorkspaceFileV4Forwarder,
 } from "./bots/contract.node.js";
 import { createBotsShareFileExecutor, type BotShareFileForwarder } from "./bots/contract.node.js";
+// A2′ 运行时环境卡（W6 注册）：W5 下载器实现 + 候选表 + browser-safe 端口 descriptor。
+import { createLocalRuntimeService } from "./runtime-tools/local-runtime/service.js";
+import { MIRROR_CANDIDATE_TABLES } from "./runtime-tools/local-runtime/probe.js";
+import {
+  APP_RUNTIME_ARTIFACT_CLASSES,
+  type AppRuntimeArtifactClass,
+} from "./runtime-tools/local-runtime/runtime-json.js";
+import { ILocalRuntimeService } from "./runtime-tools/local-runtime/port.js";
 import { IFileWatcherService } from "./fileWatcher/fileWatcher.js";
 import { IUsageStatsService } from "./usage-stats/usageStats.js";
 // P5 D-P5.4：IClientScenesService 已随 endpoint web / clientScenes 链删除。
@@ -1386,6 +1422,37 @@ export function createLocalServices(options: {
   const subagentsService = createSubagentsService({
     isDesktopRuntime: true,
   });
+  // specs/agent-runtimes.md §4.6/§4.7（A2′「运行时环境」卡）：app 级本地运行时服务，
+  // 本机全局事实源（不 workspace-scoped）。下载/探测 fetch 走 hostApiNetworkTransport
+  // ——复用设置页 httpProxy/noProxy/CA 出口（3.14.4 bots egress 同一先例 seam），
+  // 不新增第二条网络路径。
+  const localRuntimeServiceBase = createLocalRuntimeService({
+    fetchImpl: (input, init) => hostApiNetworkTransport.fetch(input, init),
+  });
+  const localRuntimeService: ILocalRuntimeService = {
+    install: (kind) => localRuntimeServiceBase.install(kind),
+    checkUpdate: (kind) => localRuntimeServiceBase.checkUpdate(kind),
+    remove: (kind) => localRuntimeServiceBase.remove(kind),
+    reverify: (kind) => localRuntimeServiceBase.reverify(kind),
+    status: async () => localRuntimeServiceBase.status(),
+    setMirrorOverride: (artifactClass, candidateId) =>
+      localRuntimeServiceBase.setMirrorOverride(artifactClass, candidateId),
+    clearMirrorOverride: (artifactClass) =>
+      localRuntimeServiceBase.clearMirrorOverride(artifactClass),
+    probeMirrors: (options) => localRuntimeServiceBase.probeMirrors(options),
+    listMirrorCandidates: async () =>
+      Object.fromEntries(
+        APP_RUNTIME_ARTIFACT_CLASSES.map((artifactClass) => [
+          artifactClass,
+          MIRROR_CANDIDATE_TABLES[artifactClass].map((spec) => ({
+            id: spec.id,
+            isOrigin: spec.isOrigin,
+          })),
+        ]),
+      ) as unknown as Readonly<
+        Record<AppRuntimeArtifactClass, readonly { id: string; isOrigin: boolean }[]>
+      >,
+  };
   // 只要当前进程已经装配 Provider Runtime，就由该 Environment 自己的 Selection View
   // 决定执行就绪状态。Desktop-attached remote 也读取远端自己的 Config Facts。
   const modelSelectionReadinessSource = providerRuntime.modelSelection;
@@ -2199,6 +2266,8 @@ export function createLocalServices(options: {
     .register(ISkillsService, skillsService)
     .register(ISkillSyncService, createSkillSyncService())
     .register(IMcpSyncService, mcpSyncService)
+    // 运行时环境卡（A2′）：window-scoped local host 组装注册（mcp-sync/settings 同形）。
+    .register(ILocalRuntimeService, localRuntimeService)
     // 合并 MCP/Plugin Management 服务装配时误删了 plugin-sync 注册，
     // RemoteServiceAccess 仍会请求该频道，导致本地候选枚举超时、远端同步无法开始。
     .register(IPluginSyncService, pluginSyncService)

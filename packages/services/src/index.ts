@@ -241,6 +241,20 @@ export { createOffPeakInteractionPolicy } from "./session/offPeakInteractionPoli
 export { ISkillsService } from "./skills/skills.js";
 export { ISkillSyncService } from "./skill-sync/skillSync.js";
 export { IMcpSyncService } from "./mcp-sync/mcpSync.js";
+// app 级本地运行时服务端口（browser-safe：type-only 引用 node 实现侧类型）。
+export { ILocalRuntimeService } from "./runtime-tools/local-runtime/port.js";
+export type {
+  LocalRuntimeArtifactClassId,
+  LocalRuntimeKindId,
+  LocalRuntimeMirrorCandidateInfo,
+} from "./runtime-tools/local-runtime/port.js";
+export type {
+  LocalRuntimeInstallResult,
+  LocalRuntimeProbeSnapshot,
+  LocalRuntimeReverifyResult,
+  LocalRuntimeStatusSnapshot,
+  LocalRuntimeUpdateCheck,
+} from "./runtime-tools/local-runtime/port.js";
 export { IPluginSyncService } from "./plugin-sync/pluginSync.js";
 export {
   ICuaPermissionService,

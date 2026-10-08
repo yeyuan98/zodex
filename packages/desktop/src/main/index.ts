@@ -47,6 +47,7 @@ import {
   captureLoginShellEnvSnapshot,
   getConversationWorkspaceDir,
   normalizeRuntimeProcessEnv,
+  runLocalRuntimeStartupGc,
   setDataBaseDir,
 } from "@zcode/services/node";
 import {
@@ -1774,6 +1775,14 @@ app.whenReady().then(async () => {
   } catch {
     // 读取失败不影响启动，使用默认 homedir
   }
+
+  // specs/agent-runtimes.md §4.6（GC 重试归属）+ §4.3：app 级运行时启动期维护——
+  // 清理 CURRENT.tmp* 残留 + GC 无引用且过宽限期的版本目录（Windows 文件锁 =
+  // rename-probe 保留、下次启动重试）。在 setDataBaseDir 之后按最终 <config> 扫描；
+  // 失败只 warn、绝不阻断启动。
+  void runLocalRuntimeStartupGc().catch((error) => {
+    logger.warn("[local-runtime] startup gc failed:", error);
+  });
 
   // scheduler 也会打开 tasks-index；等 Host 完成统一准备，避免在启动页出现前抢先迁移。
   configureDatabaseStartupQuit(() => {

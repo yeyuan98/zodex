@@ -2302,6 +2302,44 @@ const enUS: Record<string, string> = {
   "settings.plugins.remoteSync.selectionCount": "{selected}/{total} selected",
   "settings.plugins.remoteSync.noSelection": "Select at least one missing plugin.",
   "settings.mcp.remoteContext": "Current remote workspace: {target}",
+  "settings.mcp.runtime.title": "Runtime Environment",
+  "settings.mcp.runtime.description":
+    "Manage the machine-level Node.js / uv runtimes used by the agent (install, update, verify, and mirror switching).",
+  "settings.mcp.runtime.node": "Node.js",
+  "settings.mcp.runtime.uv": "uv",
+  "settings.mcp.runtime.notInstalled": "Not installed",
+  "settings.mcp.runtime.install": "Install",
+  "settings.mcp.runtime.installing": "Installing the {kind} runtime…",
+  "settings.mcp.runtime.checkUpdate": "Check update",
+  "settings.mcp.runtime.checkUpdateFailed": "Failed to check for runtime updates. Try again later.",
+  "settings.mcp.runtime.upToDate": "Up to date",
+  "settings.mcp.runtime.updateAvailable": "Update available: {version}",
+  "settings.mcp.runtime.updateTo": "Update to {version}",
+  "settings.mcp.runtime.reverify": "Re-verify",
+  "settings.mcp.runtime.reverifyFailed": "Runtime verification failed. Try again later.",
+  "settings.mcp.runtime.lastVerifyOk": "Last verify: {version} passed",
+  "settings.mcp.runtime.lastVerifyFailed": "Last verify: failed",
+  "settings.mcp.runtime.remove": "Remove",
+  "settings.mcp.runtime.removeConfirmTitle": "Remove the {kind} runtime?",
+  "settings.mcp.runtime.removeConfirmDescription":
+    "This deletes the installed runtime directory and clears the version pin on this machine; mirror decisions and overrides are kept (they still feed mirror env defaults). Running sessions fall back on their next task. Remove it?",
+  "settings.mcp.runtime.removeConfirmAction": "Remove",
+  "settings.mcp.runtime.actionFailed": "Runtime action failed. Try again.",
+  "settings.mcp.runtime.mirrorSection": "Mirrors",
+  "settings.mcp.runtime.mirrorNote":
+    "After switching, subsequent downloads and mirror defaults use the new source starting with the next task; explicit server env always wins.",
+  "settings.mcp.runtime.mirror.nodeDist": "Node distribution",
+  "settings.mcp.runtime.mirror.uvRelease": "uv releases",
+  "settings.mcp.runtime.mirror.npmRegistry": "npm registry",
+  "settings.mcp.runtime.mirror.pypiIndex": "PyPI index",
+  "settings.mcp.runtime.mirror.pbsMirror": "Python build source",
+  "settings.mcp.runtime.mirrorAuto": "Auto (probed)",
+  "settings.mcp.runtime.mirrorCurrent": "Current: {candidate}",
+  "settings.mcp.runtime.mirrorSwitchFailed": "Mirror switch failed. Try again.",
+  "settings.mcp.runtime.probeLatency": "{code} · {latency}ms",
+  "settings.mcp.runtime.probeFailed": "unreachable",
+  "settings.mcp.runtime.probeEmpty":
+    "No probe data yet (generated after install or a mirror switch).",
   "settings.mcp.plugin.active": "Built-in",
   "settings.mcp.plugin.activeDescription":
     "This MCP server is provided by an enabled plugin and is managed by that plugin.",
@@ -2338,7 +2376,7 @@ const enUS: Record<string, string> = {
   "settings.mcp.failure.config_invalid":
     "The MCP configuration is invalid. Check the server settings.",
   "settings.mcp.failure.runtime_unavailable":
-    "The MCP runtime is unavailable: the runtime required to start this server (e.g. Node.js/uv) is missing. Ask the agent to install a workspace-level runtime via the zcode-workspace-runtimes skill, then retry.",
+    "The MCP runtime is unavailable: the runtime required to start this server (e.g. Node.js/uv) is missing. Ask the agent to install a workspace-level runtime via the zcode-workspace-runtimes skill, or install one for this machine in Settings → MCP → Runtime Environment, then retry.",
   "settings.mcp.failure.process_start_failed": "The MCP process failed to start.",
   "settings.mcp.failure.network_unreachable":
     "Unable to connect to the MCP server. Check the network, proxy, and server URL.",

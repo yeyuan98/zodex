@@ -35,6 +35,10 @@ import type { ZCodeAgentPresentationSurface } from "./zcodeAgentPresentationSurf
 import { shouldSpawnInDetachedProcessGroup } from "../process/processTreeTerminator.js";
 import type { RuntimeProcessLifecycleReporter } from "../process/runtimeProcessLifecycle.js";
 import { buildAgentWorkspaceIdentityEnv } from "../runtime-tools/agentProxyEnv.js";
+import {
+  mergeAppRuntimeBashAppendIntoEnv,
+  resolveAppRuntimeBashAppendFromDisk,
+} from "../runtime-tools/local-runtime/bash-append.js";
 
 export interface ZCodeAgentCommand {
   /** 本地配套 CLI bundle 的存储专用 Worker 入口；远端/自定义命令不推断能力。 */
@@ -1011,6 +1015,27 @@ export class ZCodeAgentProcessManager {
     // app 以本地开发方式启动时，让 agent 子进程也带上 ZCODE_RUNTIME_ENV=development；
     // 不再传 NODE_ENV，避免用户 shell/runtime 变量影响 ZCode 运行模式或泄漏到 Bash 工具。
     const runtimeEnv = resolveZCodeRuntimeEnv(process.env);
+    // specs/agent-runtimes.md §2.5（Bash 腿）+ §9 残留（池化新鲜度）：agent 进程按
+    // workspaceKey 池化、buildRuntimeProcessEnvPatch 每 host 进程只算一次 → 安装/
+    // 换版/镜像切换后，若不在 agent spawn 缝重算，Bash 侧会陈旧到 host 重启。这里
+    // 每次 spawn 重新同步读 CURRENT + runtime.json（廉价小文件），重算 app-bin 追加段
+    // **与**镜像填空值两段；填空的存在性检查以含 spawnEnv/command.env 的合并视图为
+    // 基线（部署特定 env 保持最高优先级不被覆盖）。池内复用进程需回收/重连后反映
+    // 新环境（U5 验收措辞）。
+    const sanitizedSpawnBaseEnv = sanitizeZCodeRuntimeEnv(process.env);
+    const appRuntimeSpawnEnv = mergeAppRuntimeBashAppendIntoEnv(
+      {
+        ...sanitizedSpawnBaseEnv,
+        [ZCODE_RUNTIME_ENV_KEY]: runtimeEnv,
+        ...spawnEnv,
+        ...effectiveCommand.env,
+      },
+      resolveAppRuntimeBashAppendFromDisk({
+        ...sanitizedSpawnBaseEnv,
+        ...spawnEnv,
+        ...effectiveCommand.env,
+      }) ?? { pathAppend: [], envFill: {} },
+    );
     log("ZCode agent spawn preflight", {
       workspaceKey,
       spawnPreflight,
@@ -1022,9 +1047,10 @@ export class ZCodeAgentProcessManager {
       // 关闭时才能按进程树整体回收；Windows 保持非 detached，交给 taskkill /T 处理。
       detached: shouldSpawnInDetachedProcessGroup(),
       env: {
-        ...sanitizeZCodeRuntimeEnv(process.env),
+        ...sanitizedSpawnBaseEnv,
         [ZCODE_RUNTIME_ENV_KEY]: runtimeEnv,
         ...spawnEnv,
+        ...appRuntimeSpawnEnv,
         ...effectiveCommand.env,
         // 身份/隔离语义使用 workspaceIdentity；cwd 继续使用 workspacePath。
         ...buildAgentWorkspaceIdentityEnv(params.workspaceIdentity),

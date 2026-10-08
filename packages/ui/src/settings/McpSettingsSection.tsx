@@ -30,6 +30,7 @@ import { useConfirmDialog } from "@/hooks/useConfirmDialog.js";
 import { logger } from "@/logger.js";
 import { McpServerForm } from "@/settings/McpServerForm.js";
 import { McpServerList, McpStatusDot } from "@/settings/McpServerList.js";
+import { RuntimeEnvironmentCard } from "@/settings/RuntimeEnvironmentCard.js";
 import {
   formToConfig,
   type FormState,
@@ -1446,6 +1447,10 @@ export function McpSettingsSection({
           )}
         </div>
       ) : null}
+
+      {/* 运行时环境卡（specs/agent-runtimes.md §4.6/§4.7）：本机全局事实源，恒走
+          baseServices（激活远端 workspace 时也读本机 host，不随 workspace 路由）。 */}
+      <RuntimeEnvironmentCard service={baseServices.localRuntimeService} />
 
       {!mcpProjectionReady ? (
         <PluginLoadingState label={intl.formatMessage({ id: "common.loading" })} />

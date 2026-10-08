@@ -34,6 +34,7 @@ import type {
 } from "@zcode/contracts";
 import { normalizeMcpToolDescriptor } from "./descriptor.js";
 import type { McpServerFailureKind } from "@zcode/shared";
+import { applyAppRuntimeLayerToEnv } from "./app-runtime-prepend.js";
 import {
   applyPathPrependToEnv,
   McpPathPrependInvalidError,
@@ -1226,12 +1227,27 @@ class NodeMcpAdapter implements McpPort {
           cwd: config.cwd
             ? resolve(workingDirectory ?? this.workingDirectory ?? process.cwd(), config.cwd)
             : (workingDirectory ?? this.workingDirectory),
-          // specs/agent-runtimes.md §2.5 L4→L5（C1）：pathPrepend 前插必须在
-          // `...config.env` spread 之后应用——「pathPrepend 最优先」不变量：即使
-          // server 显式用 env.PATH 整串替换，前插目录仍然胜出。
+          // specs/agent-runtimes.md §2.5 五层解析表（C1 L5 + C3 L3）：
+          // - L3（app 级前插 + 镜像缺省填空）应用在 buildMcpStdioEnv（L2）输出之后、
+          //   `...config.env`（L4）spread 之前——config.env 键后到即胜（结构性覆盖）；
+          // - L5（pathPrepend）在 `...config.env` spread 之后应用——「pathPrepend 最优先」
+          //   不变量：即使 server 显式用 env.PATH 整串替换，前插目录仍然胜出。
+          // 最终序（无 L4）：L5 → L3 → L2；有 L4：L5 → L4。
           env: applyPathPrependToEnv(
             {
-              ...buildMcpStdioEnv({ env: this.env, network: this.network }),
+              ...applyAppRuntimeLayerToEnv(
+                buildMcpStdioEnv({ env: this.env, network: this.network }),
+                {
+                  env: this.env,
+                  logger: this.logger
+                    ? {
+                        warn: (message, details) => {
+                          this.logger?.warn(message, details);
+                        },
+                      }
+                    : undefined,
+                },
+              ),
               ...config.env,
             },
             config.pathPrepend,
