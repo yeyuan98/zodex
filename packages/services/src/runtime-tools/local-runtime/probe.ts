@@ -31,8 +31,8 @@ export const PROBE_TIMEOUT_MS = 5_000;
 /** Range GET 首段字节数（§4.1 探测路径「前 64KB」）。 */
 export const PROBE_RANGE_BYTES = 65_536;
 
-/** 首轮无钉版记录时的内置 known-good 探针 tag（§4.1 探针版本来源）。 */
-export const NODE_KNOWN_GOOD_PROBE_TAG = "v22.16.0";
+/** 首轮无钉版记录时的内置 known-good 探针 tag（§4.1 探针版本来源；S1 技能同值）。 */
+export const NODE_KNOWN_GOOD_PROBE_TAG = "v22.14.0";
 export const UV_KNOWN_GOOD_PROBE_TAG = "0.8.6";
 
 /** 单候选描述：id 即 runtime.json decisions/overrides 的取值域。 */
@@ -142,8 +142,12 @@ export const MIRROR_CANDIDATE_TABLES: Readonly<
 
 /** 全灭明确报错（§4.1 规则 4）：给出手工覆盖位提示，不静默选不可用源。 */
 export class AllProbeCandidatesDeadError extends Error {
+  /**
+   * 归属工件类。[ulw] NIT-10：raw 调用（rankMirrorCandidates）不知道类别，置
+   * `null`；真实类别由 probeArtifactClass 的重映射保证（其构造点持有 artifactClass）。
+   */
   constructor(
-    readonly artifactClass: AppRuntimeArtifactClass,
+    readonly artifactClass: AppRuntimeArtifactClass | null,
     message: string,
   ) {
     super(message);
@@ -161,8 +165,10 @@ export class AllProbeCandidatesDeadError extends Error {
 export function rankMirrorCandidates(measurements: readonly ProbeMeasurement[]): MirrorRankOutcome {
   const alive = measurements.filter((entry) => entry.ok);
   if (alive.length === 0) {
+    // [ulw] NIT-10：raw 调用不硬编码工件类（曾误写 nodeDist）——类别无关报错，
+    // 由 probeArtifactClass 携真实 artifactClass 重抛。
     throw new AllProbeCandidatesDeadError(
-      "nodeDist",
+      null,
       "probe: all mirror candidates failed; 手工覆盖位 = runtime.json overrides 字段（--base 语义）",
     );
   }
@@ -188,7 +194,8 @@ export function rankMirrorCandidates(measurements: readonly ProbeMeasurement[]):
   const tieBand = pool.filter((entry) => entry.latencyMs <= minLatencyMs * 1.1);
   const winner = tieBand[0];
   if (!winner) {
-    throw new AllProbeCandidatesDeadError("nodeDist", "probe: no alive candidate in tie band");
+    // [ulw] NIT-10：同上——raw 调用类别无关，重映射归 probeArtifactClass。
+    throw new AllProbeCandidatesDeadError(null, "probe: no alive candidate in tie band");
   }
   const reason = winner.latencyMs > minLatencyMs ? "tie-order" : baseReason;
   return { winner: winner.candidate, reason };

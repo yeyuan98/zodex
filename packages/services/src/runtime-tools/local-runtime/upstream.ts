@@ -78,9 +78,15 @@ async function fetchText(
     options.timeoutMs ?? METADATA_FETCH_TIMEOUT_MS,
   );
   try {
+    // [ulw] NIT-8：GitHub 匿名头（Accept/UA）只发给 api.github.com——发往
+    // nodejs.org/npmmirror 等镜像/发行站既无必要，也可能扰动其 CDN 缓存键。
+    const isGitHubApi = url.startsWith(GITHUB_API_BASE);
+    const headers = isGitHubApi
+      ? { ...GITHUB_ANONYMOUS_HEADERS, ...options.headers }
+      : { ...options.headers };
     const response = await fetchImpl(url, {
       signal: controller.signal,
-      headers: { ...GITHUB_ANONYMOUS_HEADERS, ...options.headers },
+      headers,
     });
     const text = await response.text();
     return { ok: response.ok, status: response.status, text };

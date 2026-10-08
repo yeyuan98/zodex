@@ -4,6 +4,7 @@
  * uv api.github.com digest）+ 冒烟（--version）。
  */
 import { execFile } from "node:child_process";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -19,12 +20,14 @@ import {
 } from "./upstream.js";
 import {
   NodeChecksumAnchorsUnavailableError,
+  ChecksumMismatchError,
   UvDigestSourceUnavailableError,
   assertNodeChecksumAnchorsAvailable,
   compareSha256Digest,
   parseShasums256,
   resolveExpectedSha256,
   resolveUvAssetDigest,
+  resolveUvDigestSource,
   selectNodeChecksumSource,
   type NodeChecksumAnchor,
 } from "./verify.js";
@@ -96,9 +99,19 @@ async function fetchNodeExpectedSha256(
     if (expected) return expected;
     // tuna 陈旧坑（§4.1）：探测命中但目标版本工件不存在 → 该候选按失败处理。
   }
-  // node 双锚点均不可达 = 明确报错（与 uv api.github.com 规则对称）；
+  if (candidateId === "tuna") {
+    // tuna 路径两锚点皆被真实尝试：双双不可达才升级为 typed 硬失败（§4.7，
+    // 与 uv api.github.com 规则对称）。
+    assertNodeChecksumAnchorsAvailable(anchorReachable);
+  } else if (!anchorReachable[primaryAnchor]) {
+    // [ulw] MINOR-3：锚点对候选（tarball 来自 nodejs.org/npmmirror）只尝试另一侧
+    // 单锚点——单锚点失败 = 该候选失败（梯次继续），不得误报「双锚点不可达」
+    // 中止安装（下载源本身可达，Western 用户单镜像被墙时仍可装）。
+    throw new LocalRuntimeInstallError(
+      `node 校验锚点 ${primaryAnchor} 不可达（候选 ${candidateId} 按失败处理，走梯次）`,
+    );
+  }
   // 任一可达但不含期望条目 = 版本不存在（候选失败，走梯次）。
-  assertNodeChecksumAnchorsAvailable(anchorReachable);
   throw new LocalRuntimeInstallError(
     `SHASUMS256.txt 不含期望工件 ${artifactFileName}（版本 ${version} 在校验源缺席）`,
   );
@@ -131,6 +144,7 @@ export async function downloadAndVerifyCandidate(
     resolveRuntimeRootDir(deps),
     `.download-${kind}-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
   );
+  let succeeded = false;
   try {
     const download = await downloadArtifactToFile(url, downloadPath, {
       ...fetchOptionsFor(deps),
@@ -152,18 +166,23 @@ export async function downloadAndVerifyCandidate(
       // uv digest 恒直连 api.github.com（§4.7）：不可达/限流由 upstream 抛 typed 错误，
       // 绝不降级为无校验、也不从 gh-proxy 系取校验值。
       const metadata = await fetchUvReleaseMetadata(version, fetchOptionsFor(deps));
+      // [ulw] NIT-11：digest 解析路由经 resolveUvDigestSource（锚点恒
+      // api.github.com；上行 fetchUvReleaseMetadata 已直连，不可达时已抛 typed 错）。
+      const { digestSource } = resolveUvDigestSource(true);
       expectedSha256 = resolveUvAssetDigest(metadata.assets, artifactFileName);
       if (!expectedSha256) {
         throw new LocalRuntimeInstallError(
-          `api.github.com release 资产摘要缺席：${artifactFileName}（不降级为无校验）`,
+          `uv 校验源 ${digestSource} release 资产摘要缺席：${artifactFileName}（不降级为无校验）`,
         );
       }
     }
     if (!compareSha256Digest(download.sha256Hex, expectedSha256)) {
-      throw new LocalRuntimeInstallError(
+      // [ulw] NIT-11：摘要不一致 = ChecksumMismatchError（候选级可恢复失败，梯次继续）。
+      throw new ChecksumMismatchError(
         `跨源校验失败：${artifactFileName} 来自 ${candidateId}，摘要与校验源不一致`,
       );
     }
+    succeeded = true;
     return { ok: true, downloadFilePath: downloadPath };
   } catch (error) {
     if (
@@ -176,6 +195,13 @@ export async function downloadAndVerifyCandidate(
       throw error;
     }
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  } finally {
+    // [ulw] MAJOR-2：暂存文件清理——可恢复失败（ok:false 返回）与锚点级 rethrow
+    // 都会留下半写文件，任何非成功退出必须删除，防 `.download-*` 残留在
+    // `<config>/.runtime` 根（成功路径由 install 编排在解压就位后清理）。
+    if (!succeeded) {
+      await rm(downloadPath, { force: true });
+    }
   }
 }
 

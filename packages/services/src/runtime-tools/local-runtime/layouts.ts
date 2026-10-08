@@ -93,6 +93,10 @@ export class ExtractionError extends Error {
 export interface ExtractArchiveOptions {
   readonly archivePath: string;
   readonly targetDir: string;
+  /** 归档形态（布局契约；成员穿越校验据此判定合法形状）。 */
+  readonly kind: RuntimeArchiveKind;
+  /** 预期顶层目录名（uv win 平铺 = ""）。 */
+  readonly topLevelDir: string;
   readonly stripComponents: number;
   readonly platform: NodeJS.Platform;
   /** 注入 execFile（测试用）；参数恒为数组形态，禁 shell 字符串拼接。 */
@@ -103,9 +107,28 @@ export interface ExtractArchiveOptions {
 }
 
 /**
+ * 解压前成员可接受性判定（[ulw] MINOR-5 布局契约接线）：顶层目录条目本身（尾 `/`
+ * 剥离后 == topLevelDir）= 合法容器；其余成员必须能经 mapArchiveMemberToTargetPath
+ * 映射出目标相对路径——`..` 段、绝对路径、意外顶层形状一律拒绝。
+ */
+function isAcceptableArchiveMember(options: {
+  readonly kind: RuntimeArchiveKind;
+  readonly memberPath: string;
+  readonly topLevelDir: string;
+}): boolean {
+  if (!options.memberPath || options.memberPath.includes("\0")) return false;
+  if (isAbsolute(options.memberPath)) return false;
+  const normalized = options.memberPath.replace(/^\.\//u, "").replace(/\/$/u, "");
+  if (options.topLevelDir !== "" && normalized === options.topLevelDir) return true;
+  return mapArchiveMemberToTargetPath(options) !== null;
+}
+
+/**
  * 解压执行器（§4.3：解压先落 tmp 临时目录再就位，成功后清理）：
- * tar -xf <archive> -C <tmpDir> [--strip-components N] → 校验非空 → rename 到目标。
- * 目标目录已存在 = 报错（install 编排保证新 v<ver>/ 唯一）。
+ * 1. `tar -tf` 全量列表 → 逐成员穿越校验（[ulw] MINOR-5：sha256 只保证字节完整性，
+ *    不保证成员路径形状；`..` 段/绝对路径/意外形状 = 拒绝整个归档，不解压）；
+ * 2. 校验通过才 `tar -xf <archive> -C <tmpDir> [--strip-components N]` → 校验非空 →
+ *    rename 到目标。目标目录已存在 = 报错（install 编排保证新 v<ver>/ 唯一）。
  */
 export async function extractRuntimeArchive(options: ExtractArchiveOptions): Promise<void> {
   const tool = resolveExtractionTool(options.archivePath, options.platform);
@@ -121,6 +144,27 @@ export async function extractRuntimeArchive(options: ExtractArchiveOptions): Pro
     ...(options.stripComponents > 0 ? ["--strip-components", String(options.stripComponents)] : []),
   ];
   try {
+    const listing = await runTool(tool, ["-tf", options.archivePath]);
+    const members = listing.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (members.length === 0) {
+      throw new ExtractionError(`archive listing empty: ${options.archivePath}`);
+    }
+    for (const member of members) {
+      if (
+        !isAcceptableArchiveMember({
+          kind: options.kind,
+          memberPath: member,
+          topLevelDir: options.topLevelDir,
+        })
+      ) {
+        throw new ExtractionError(
+          `archive member rejected by layout contract: ${member} (${options.archivePath})`,
+        );
+      }
+    }
     await runTool(tool, args);
     const extracted = await readdir(tmpExtractDir);
     if (extracted.length === 0) {

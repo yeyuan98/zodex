@@ -275,6 +275,9 @@ TTL（7d）/ 显式 refresh / 所选源下载硬失败（此时按 measurements 
   **禁止**回退扫描最高 `v<ver>`（会复活待 GC 版本）；启动时清理残留 `CURRENT.tmp*`。
 - Windows 用系统自带 tar.exe 解压 `.zip`/`.tar.xz`；解压先落 `tmp` 临时目录再就位，成功后
   清理。
+- **解压前成员穿越校验**：先 `tar -tf` 全量列表，逐成员按布局契约校验（`..` 段、绝对路径、
+  意外顶层形状 = 拒绝整个归档、不解压），通过后才 `-xf`——sha256 只保证字节完整性，不保证
+  成员路径形状（恶意/畸形归档防御腿）。
 
 ### 4.4 env 固化与 AGENTS.md 注记
 
@@ -295,13 +298,13 @@ TTL（7d）/ 显式 refresh / 所选源下载硬失败（此时按 measurements 
 
 ### 4.6 生命周期矩阵（收编 runtime-plan 1.5.3）
 
-| 操作    | ws 级（S1 技能，agent 执行）                                                                                                          | app 级（PR2 A2 设置卡，TS 下载器）                                                                                                                                                                                                                                                                                      |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| install | 探测→钉版→下载→跨源校验→解压到 `v<ver>/` →写 CURRENT→接线（AGENTS.md 块 + pathPrepend + 镜像 env）                                    | 探测（五类工件候选表，§4.1）→经上游版本解析（node dist `index.json` / uv GitHub API latest）→下载→跨源校验（§4.2 同一条不变量）→解压 `v<ver>/` →写 CURRENT→`--version` 冒烟。W5 采纳的实现顺序为 `--version` 冒烟门在 CURRENT 换指针**之前**（坏运行时永不成为 current；dir→runtime.json→CURRENT→GC 顺序不变量不变）    |
-| status  | runtime.json（版本/镜像/probedAt）；技能教读取与判读命令                                                                              | 卡片：已装版本（CURRENT）+可用版本（上游解析）+最近验证结果+探测摘要（五类 × 候选延迟排名）+镜像切换                                                                                                                                                                                                                    |
-| test    | 技能 Verify 节：`node --version` / `npm config get registry`（验镜像 env 生效）/ `uvx --version`；再触发 MCP 设置页 mcp/list 重探     | 「重新验证」按钮：重跑 `--version` 冒烟 + 刷新 MCP 状态列表（复用既有 mcp/list 重探）                                                                                                                                                                                                                                   |
-| update  | 重跑技能→新版本装进**新 `v<ver>/` 目录**→重写 CURRENT（rename 原子）→重写 pathPrepend/AGENTS.md 块/runtime.json→旧目录 best-effort GC | 「检查更新」：重解析上游 latest（node index.json / uv GitHub API）与 runtime.json `pinned` 比对→新版本目录就绪→**CURRENT 原子换指针**→旧目录 GC（Windows 文件锁 → 保留、下次启动重试 GC；运行中 MCP 进程 POSIX 下持旧 inode 自然续命，win 下旧目录留存至进程退出）。**运行时更新不随 app 版本**——上游发现任意时刻可进行 |
-| remove  | 技能 Teardown 节：删 `.zcode/.runtime/` + 摘除 AGENTS.md 标记块 + 清 MCP 条目 pathPrepend/镜像 env + 下一任务验证回落                 | 卡片「删除」：确认对话框→删目录与 runtime.json→解析回落（系统 PATH 或 ws 级）；运行中服务器说明（下一任务生效）                                                                                                                                                                                                         |
+| 操作    | ws 级（S1 技能，agent 执行）                                                                                                          | app 级（PR2 A2 设置卡，TS 下载器）                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| install | 探测→钉版→下载→跨源校验→解压到 `v<ver>/` →写 CURRENT→接线（AGENTS.md 块 + pathPrepend + 镜像 env）                                    | 探测（五类工件候选表，§4.1）→经上游版本解析（node dist `index.json` / uv GitHub API latest）→下载→跨源校验（§4.2 同一条不变量）→解压 `v<ver>/` →写 CURRENT→`--version` 冒烟。W5 采纳的实现顺序为 `--version` 冒烟门在 CURRENT 换指针**之前**（坏运行时永不成为 current；dir→runtime.json→CURRENT→GC 顺序不变量不变）                                                                                                                            |
+| status  | runtime.json（版本/镜像/probedAt）；技能教读取与判读命令                                                                              | 卡片：已装版本（CURRENT）+可用版本（上游解析）+最近验证结果+探测摘要（五类 × 候选延迟排名）+镜像切换                                                                                                                                                                                                                                                                                                                                            |
+| test    | 技能 Verify 节：`node --version` / `npm config get registry`（验镜像 env 生效）/ `uvx --version`；再触发 MCP 设置页 mcp/list 重探     | 「重新验证」按钮：重跑 `--version` 冒烟 + 刷新 MCP 状态列表（复用既有 mcp/list 重探）                                                                                                                                                                                                                                                                                                                                                           |
+| update  | 重跑技能→新版本装进**新 `v<ver>/` 目录**→重写 CURRENT（rename 原子）→重写 pathPrepend/AGENTS.md 块/runtime.json→旧目录 best-effort GC | 「检查更新」：重解析上游 latest（node index.json / uv GitHub API）与 runtime.json `pinned` 比对→新版本目录就绪→**CURRENT 原子换指针**→旧目录 GC（Windows 文件锁 → 保留、下次启动重试 GC；运行中 MCP 进程 POSIX 下持旧 inode 自然续命，win 下旧目录留存至进程退出）。**运行时更新不随 app 版本**——上游发现任意时刻可进行；检查发现新版本时卡内渲染「更新到 {version}」入口（复用 install 编排：dir→runtime.json→CURRENT→GC，no-op 门挡同版重装） |
+| remove  | 技能 Teardown 节：删 `.zcode/.runtime/` + 摘除 AGENTS.md 标记块 + 清 MCP 条目 pathPrepend/镜像 env + 下一任务验证回落                 | 卡片「删除」：确认对话框→删目录与清 `pinned`（镜像决策/覆盖保留，仍供 L3 缺省填空）→解析回落（系统 PATH 或 ws 级）；运行中服务器说明（下一任务生效）                                                                                                                                                                                                                                                                                            |
 
 原则：**版本化目录 + CURRENT 原子指针**让 update 永不出现半状态；删除与换版对运行中进程
 的影响 = POSIX inode 自然续命 / win 延迟 GC，均无强制重启要求（披露）。**GC 重试归属**：
@@ -323,13 +326,23 @@ npmRegistry, pbsMirror}, overrides: {…同形，用户切换项}, measurements:
 - **写读契约**：(i) runtime.json 写入 = tmp + rename 原子（L3 每 spawn 解析，半写 JSON
   不可见）；(ii) 读端容错与 CURRENT 同规——缺失/损坏 = treat-as-absent + warn，**不猜**；
   (iii) **更新顺序不变量**：新 `v<ver>/` 目录就绪 → 写 runtime.json（pinned）→ CURRENT
-  原子换指针 → 旧目录 GC（stale pinned 只影响卡片/检查更新显示，有界）；(iv) **override
-  源硬失败 = 明确报错 + 保留 override**，绝不静默回落到用户已弃用的源。
+  原子换指针 → 旧目录 GC（stale pinned 只影响卡片/检查更新显示，有界）。**finalize 写入 =
+  重读当前 runtime.json 只合并 `{pinned}`**（安装窗口内的 override 切换/显式探测写入不得被
+  安装起点的旧快照整串覆盖——丢失更新防护；读失败/缺席才回落安装起点快照）；
+  (iv) **override 源硬失败 = 明确报错 + 保留 override**，绝不静默回落到用户已弃用的源。
+- **measurements 合并 = 保留非本轮槽位**：探测轮只替换本轮实际重探的工件类槽位，未探测类
+  （如 override 位跳过的类）的既有记录保留（与卡内单类重探同形），不做整串替换。
+- **下载 tmp 清理**：候选下载暂存（`.download-*`）所有权在编排层——候选任何非成功退出
+  （可恢复失败换梯、锚点级 typed 硬失败、解压/冒烟抛出）都必须删除半写文件，不留残骸在
+  `<config>/.runtime` 根；仅成功路径保留到解压就位后清理。
 - **探测全五类工件**：install 相关（nodeDist/uvRelease）+ 填空相关（npmRegistry/pypiIndex/
   pbsMirror）——镜像切换与 L3 缺省填空依赖后三类。
 - **校验锚点**：tuna 永不作校验来源；node 双锚点（nodejs.org + npmmirror）均不可达 =
   明确报错，不降级为无校验（与 uv `api.github.com` 规则**对称**）；uv digest 恒直连
-  `api.github.com`，不可达 = 明确报错。
+  `api.github.com`，不可达 = 明确报错。**双锚点中止语义只适用于两锚点皆被真实尝试的
+  路径**（tuna tarball，锚点对内确定性先 npmmirror 再 nodejs.org）；锚点对候选（tarball
+  来自 nodejs.org/npmmirror）只尝试另一侧单锚点，其拉取失败 = **该候选失败**（梯次继续），
+  不得升级为「双锚点不可达」硬失败——下载源本身可达时不应因单个校验锚点阵亡而中止安装。
 - **GitHub API 匿名调用**：匿名限流（60 req/h）对偶发检查足够；命中限流 = 明确报错稍后
   重试。
 - **日志通道**：services 侧 `createServiceLogger`（info/warn/error；每轮探测一行汇总，

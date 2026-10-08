@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  extractRuntimeArchive,
   mapArchiveMemberToTargetPath,
   resolveExtractionTool,
 } from "../src/runtime-tools/local-runtime/layouts.js";
@@ -100,4 +104,116 @@ test("解压工具选择：unix 平台 .tar.xz = tar", () => {
     "tar",
     "unix 解 .tar.xz 用 tar",
   );
+});
+
+// [ulw] MINOR-5 红测：解压执行器必须先 `tar -tf` 全量列表 + 逐成员穿越校验
+// （`..` 段/绝对路径/意外顶层形状 = 拒绝整个归档），通过后才 `-xf`——
+// mapArchiveMemberToTargetPath 不再是死代码，安全不单独依赖 sha256+tar 默认。
+
+interface ToolCall {
+  readonly op: string;
+  readonly args: readonly string[];
+}
+
+function fakeRunTool(listing: string) {
+  const calls: ToolCall[] = [];
+  const runTool = async (
+    _command: string,
+    args: readonly string[],
+  ): Promise<{ stdout: string; stderr: string }> => {
+    calls.push({ op: args[0] ?? "", args });
+    if (args[0] === "-tf") {
+      return { stdout: listing, stderr: "" };
+    }
+    if (args[0] === "-xf") {
+      // 模拟解压落盘：向 -C 目录写一个条目（保证「非空」检查通过、rename 可行）。
+      const targetDirIndex = args.indexOf("-C");
+      const extractDir = args[targetDirIndex + 1] ?? "";
+      await mkdir(extractDir, { recursive: true });
+      await writeFile(join(extractDir, "node"), "fake-binary");
+      return { stdout: "", stderr: "" };
+    }
+    return { stdout: "", stderr: "" };
+  };
+  return { calls, runTool };
+}
+
+test("MINOR-5：恶意 `../` 成员 → 列表校验拒绝，不执行实际解压", async () => {
+  const base = await mkdtemp(join(tmpdir(), "zcode-layout-traversal-"));
+  try {
+    const { calls, runTool } = fakeRunTool(
+      "node-v22.14.0-linux-x64/bin/node\n../evil.sh\nnode-v22.14.0-linux-x64/bin/npm\n",
+    );
+    await assert.rejects(
+      extractRuntimeArchive({
+        archivePath: join(base, "fake.tar.xz"),
+        targetDir: join(base, "v22.14.0"),
+        kind: "node-unix-tar",
+        topLevelDir: "node-v22.14.0-linux-x64",
+        stripComponents: 1,
+        platform: "linux",
+        runTool,
+      }),
+      /evil\.sh|layout contract/u,
+      "含 `../` 成员的归档必须整体拒绝",
+    );
+    assert.equal(
+      calls.filter((call) => call.op === "-xf").length,
+      0,
+      "校验失败后不得执行实际解压（-xf）",
+    );
+    assert.ok(
+      calls.some((call) => call.op === "-tf"),
+      "解压前必须先 `tar -tf` 列表校验",
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("MINOR-5：绝对路径成员 → 同样拒绝（布局契约）", async () => {
+  const base = await mkdtemp(join(tmpdir(), "zcode-layout-absolute-"));
+  try {
+    const { calls, runTool } = fakeRunTool("node-v22.14.0-linux-x64/bin/node\n/etc/passwd\n");
+    await assert.rejects(
+      extractRuntimeArchive({
+        archivePath: join(base, "fake.tar.xz"),
+        targetDir: join(base, "v22.14.0"),
+        kind: "node-unix-tar",
+        topLevelDir: "node-v22.14.0-linux-x64",
+        stripComponents: 1,
+        platform: "linux",
+        runTool,
+      }),
+      /etc\/pass|layout contract/u,
+      "绝对路径成员 = 意外形状，整体拒绝",
+    );
+    assert.equal(calls.filter((call) => call.op === "-xf").length, 0, "不执行解压");
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("MINOR-5：合法列表（含顶层目录条目）→ 校验通过并执行解压", async () => {
+  const base = await mkdtemp(join(tmpdir(), "zcode-layout-legit-"));
+  try {
+    const { calls, runTool } = fakeRunTool(
+      "node-v22.14.0-linux-x64/\nnode-v22.14.0-linux-x64/bin/\nnode-v22.14.0-linux-x64/bin/node\n",
+    );
+    await extractRuntimeArchive({
+      archivePath: join(base, "fake.tar.xz"),
+      targetDir: join(base, "v22.14.0"),
+      kind: "node-unix-tar",
+      topLevelDir: "node-v22.14.0-linux-x64",
+      stripComponents: 1,
+      platform: "linux",
+      runTool,
+    });
+    assert.ok(
+      calls.some((call) => call.op === "-tf") && calls.some((call) => call.op === "-xf"),
+      "先列表校验后解压",
+    );
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
 });
