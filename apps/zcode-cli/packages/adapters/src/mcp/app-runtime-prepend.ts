@@ -10,6 +10,7 @@
  * fs 访问经 options 注入（prependRunningNodeDirectory 的 option-injection 形制）。
  */
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { resolveRuntimeMirrorEnvValues } from "@zcode/shared";
 
@@ -223,7 +224,8 @@ export function applyAppRuntimeLayerToEnv(
   const fs = options.fs ?? DEFAULT_APP_RUNTIME_FS_ACCESSOR;
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
-  const root = resolveAppRuntimeRoot(env, options.homeDir ?? "");
+  // homedir fallback 缺省在此解析（调用点不传也不会退化成相对路径根）。
+  const root = resolveAppRuntimeRoot(env, options.homeDir ?? homedir());
 
   const binDirs: string[] = [];
   for (const kind of ["node", "uv"] as const) {
