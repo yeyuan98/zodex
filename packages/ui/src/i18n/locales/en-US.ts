@@ -2340,6 +2340,12 @@ const enUS: Record<string, string> = {
   "settings.mcp.runtime.probeFailed": "unreachable",
   "settings.mcp.runtime.probeEmpty":
     "No probe data yet (generated after install or a mirror switch).",
+  "settings.mcp.runtime.useMirrors": "Use mirrors",
+  "settings.mcp.runtime.useMirrorsDescription":
+    "Probe and download prefer mirrors when on; off connects to official sources directly (mirror overrides are kept and apply again once back on).",
+  "settings.mcp.runtime.mirrorDetails": "Mirror details",
+  "settings.mcp.runtime.probeAction": "Probe",
+  "settings.mcp.runtime.retryInstall": "Retry installing {kind}",
   "settings.mcp.plugin.active": "Built-in",
   "settings.mcp.plugin.activeDescription":
     "This MCP server is provided by an enabled plugin and is managed by that plugin.",
