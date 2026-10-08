@@ -212,6 +212,26 @@ export {
   normalizeRuntimeProcessEnv,
   prepareRuntimeProcessEnvPatch,
 } from "./runtime-tools/runtimeCommandEnv.js";
+// A2′ 本地运行时下载器（alpha.2 specs/agent-runtimes.md §4.6/§4.7）：node-only
+// （fetch/fs/child_process）；浏览器入口（src/index.ts）不得导出——W6 UI 卡经
+// 服务 seam 消费，桌面 host 组装注册归 W6。
+export {
+  createLocalRuntimeService,
+  InvalidMirrorOverrideError,
+  LocalRuntimeServiceImpl,
+} from "./runtime-tools/local-runtime/service.js";
+export type {
+  LocalRuntimeInstallOptions,
+  LocalRuntimeInstallResult,
+  LocalRuntimeProbeSnapshot,
+  LocalRuntimeProgressEvent,
+  LocalRuntimeReverifyResult,
+  LocalRuntimeService,
+  LocalRuntimeServiceOptions,
+  LocalRuntimeStatusSnapshot,
+  LocalRuntimeUpdateCheck,
+} from "./runtime-tools/local-runtime/service.js";
+export type { LocalRuntimeKind } from "./runtime-tools/local-runtime/shared.js";
 
 // 定时任务管理与 scheduler 共用同一套 node-only 存储和 cron 语义。
 export {
