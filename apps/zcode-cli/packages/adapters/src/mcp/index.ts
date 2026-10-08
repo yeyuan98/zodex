@@ -1235,16 +1235,19 @@ class NodeMcpAdapter implements McpPort {
           // 最终序（无 L4）：L5 → L3 → L2；有 L4：L5 → L4。
           env: applyPathPrependToEnv(
             {
-              ...applyAppRuntimeLayerToEnv(buildMcpStdioEnv({ env: this.env, network: this.network }), {
-                env: this.env,
-                logger: this.logger
-                  ? {
-                      warn: (message, details) => {
-                        this.logger?.warn(message, details);
-                      },
-                    }
-                  : undefined,
-              }),
+              ...applyAppRuntimeLayerToEnv(
+                buildMcpStdioEnv({ env: this.env, network: this.network }),
+                {
+                  env: this.env,
+                  logger: this.logger
+                    ? {
+                        warn: (message, details) => {
+                          this.logger?.warn(message, details);
+                        },
+                      }
+                    : undefined,
+                },
+              ),
               ...config.env,
             },
             config.pathPrepend,
