@@ -1,6 +1,7 @@
 /**
  * specs/agent-runtimes.md §4.2（版本解析）/§4.6（install 行：上游版本解析）网络腿：
- * node dist index.json（origin 优先、npmmirror 同名文件兜底）、uv GitHub API
+ * node dist index.json（探测决策回填源序：origin 优先、npmmirror 同名文件兜底；
+ * F2 alpha.3 起 origin 探活死时先 npmmirror）、uv GitHub API
  * latest（匿名 + 自定义 UA，沿 adapters github-archive-source.ts:79 先例）、
  * 工件下载（流式 + AbortController 超时 + 进度回调）与 URL 构造。
  *
@@ -137,11 +138,28 @@ function parseLatestStableNodeVersion(indexJsonText: string): string | null {
   return entry?.version ?? null;
 }
 
+export interface NodeVersionResolutionOptions extends UpstreamFetchOptions {
+  /**
+   * F2 解析顺序回填（§4.2/§4.1，alpha.3）：探测轮 nodeDist 有效决策源
+   * （override ?? probed）。非 origin（nodejs.org 探活死或镜像胜出）时 index.json
+   * 先咨询 npmmirror 同名文件、origin 降为兜底——消除「探测已判死、解析仍先撞
+   * origin 挂起」的 CN ~20s 税（§2o：代码推导值，非 log 实测）。缺省/origin 决策
+   * 维持 origin 优先；npmmirror `latest-*` 目录陈旧禁用不变（仅 index.json 文件级
+   * 换序，兜底顺序仍是同两名文件）。
+   */
+  readonly preferredNodeDistCandidate?: string;
+}
+
 /** node 上游版本解析：origin `dist/index.json` 小文件 → npmmirror 同名文件兜底。 */
 export async function resolveLatestNodeVersion(
-  options: UpstreamFetchOptions = {},
+  options: NodeVersionResolutionOptions = {},
 ): Promise<string> {
-  for (const url of [`${NODE_DIST_ORIGIN}/index.json`, `${NODE_DIST_NPMMIRROR}/index.json`]) {
+  const indexUrls =
+    options.preferredNodeDistCandidate !== undefined &&
+    options.preferredNodeDistCandidate !== "nodejs.org"
+      ? [`${NODE_DIST_NPMMIRROR}/index.json`, `${NODE_DIST_ORIGIN}/index.json`]
+      : [`${NODE_DIST_ORIGIN}/index.json`, `${NODE_DIST_NPMMIRROR}/index.json`];
+  for (const url of indexUrls) {
     const result = await fetchText(url, options);
     if (!result.ok) continue;
     const version = parseLatestStableNodeVersion(result.text);

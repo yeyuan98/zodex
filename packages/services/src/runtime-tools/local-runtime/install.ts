@@ -68,33 +68,52 @@ interface ProbeRoundOutcome {
   readonly measurements: readonly AppRuntimeMirrorMeasurement[];
 }
 
-/** 探测轮：逐类探测 + 择优；日志粒度 = 每轮一行汇总（§4.7，不逐候选刷屏）。 */
+/** 探测轮：类间并行探测 + 择优；日志粒度 = 每轮一行汇总（§4.7，不逐候选刷屏）。 */
 async function runProbeRound(
   slots: readonly AppRuntimeArtifactClass[],
   json: AppRuntimeJson | null,
   deps: LocalRuntimeDeps,
 ): Promise<ProbeRoundOutcome> {
   const logger = resolveLogger(deps);
+  // F2 类间并行（§4.1，alpha.3）：五类 Promise.allSettled——探测轮 wall = max(类)
+  // ≈ ≤5s（原类间串行上限 5×5s=25s、§2o 取证实测 16.65s）。类内并行维持
+  // （probe.ts 不动）；S1 技能 curl 腿仍串行（双实现差异注记，行为等价仅 wall 不同）。
+  // 探针版本来源（§4.1）：上一轮钉住版本；首轮无记录用内置 known-good tag。
+  const probeVersionFor = (artifactClass: AppRuntimeArtifactClass): string =>
+    artifactClass === "nodeDist"
+      ? json?.pinned.node || NODE_KNOWN_GOOD_PROBE_TAG
+      : artifactClass === "uvRelease"
+        ? json?.pinned.uv || UV_KNOWN_GOOD_PROBE_TAG
+        : "";
+  const settled = await Promise.allSettled(
+    slots.map((artifactClass) =>
+      probeArtifactClass(artifactClass, probeVersionFor(artifactClass), fetchOptionsFor(deps)),
+    ),
+  );
+  // 并行化不改变失败语义：仍按 slots 顺序抛第一个 all-dead 类（与原串行逐类 await
+  // 的首失败即抛同形；F6 填充类降级归后续 phase，本相不扩语义）。
+  const firstRejected = settled.find(
+    (entry): entry is PromiseRejectedResult => entry.status === "rejected",
+  );
+  if (firstRejected !== undefined) {
+    throw firstRejected.reason;
+  }
   const decisions: Partial<Record<AppRuntimeArtifactClass, string>> = {};
   const measurements: AppRuntimeMirrorMeasurement[] = [];
   const summary: string[] = [];
-  for (const artifactClass of slots) {
-    // 探针版本来源（§4.1）：上一轮钉住版本；首轮无记录用内置 known-good tag。
-    const probeVersion =
-      artifactClass === "nodeDist"
-        ? json?.pinned.node || NODE_KNOWN_GOOD_PROBE_TAG
-        : artifactClass === "uvRelease"
-          ? json?.pinned.uv || UV_KNOWN_GOOD_PROBE_TAG
-          : "";
-    const result = await probeArtifactClass(artifactClass, probeVersion, fetchOptionsFor(deps));
-    decisions[artifactClass] = result.outcome.winner;
-    const winnerMeasurement = result.measurements.find(
-      (entry) => entry.candidate === result.outcome.winner,
+  // 汇总行按候选表类序确定性拼接（slots 源自 APP_RUNTIME_ARTIFACT_CLASSES 序）——
+  // 并行完成顺序不得影响输出（§9 (C)：`probe round:` 是 rig checklist 的 grep 锚点）。
+  for (const [index, artifactClass] of slots.entries()) {
+    const result = settled[index];
+    if (result === undefined || result.status !== "fulfilled") continue;
+    decisions[artifactClass] = result.value.outcome.winner;
+    const winnerMeasurement = result.value.measurements.find(
+      (entry) => entry.candidate === result.value.outcome.winner,
     );
     summary.push(
-      `${artifactClass}=${result.outcome.winner}${winnerMeasurement ? `(${winnerMeasurement.latencyMs}ms)` : ""}`,
+      `${artifactClass}=${result.value.outcome.winner}${winnerMeasurement ? `(${winnerMeasurement.latencyMs}ms)` : ""}`,
     );
-    measurements.push(...result.measurements.map((entry) => ({ ...entry, artifactClass })));
+    measurements.push(...result.value.measurements.map((entry) => ({ ...entry, artifactClass })));
   }
   logger.info(undefined, `probe round: ${summary.join(" ")}`);
   return { decisions, measurements };
@@ -179,7 +198,13 @@ export async function installRuntime(
   onProgressSafe(options.onProgress, { kind, phase: "resolve-version" });
   const version =
     kind === "node"
-      ? await resolveLatestNodeVersion(fetchOptionsFor(deps))
+      ? await resolveLatestNodeVersion({
+          ...fetchOptionsFor(deps),
+          // F2 解析顺序回填（§4.2，alpha.3）：探测轮已判定的 nodeDist 有效决策源
+          // 传入版本解析——origin（nodejs.org）探活死时先咨询 npmmirror index.json，
+          // 消除 CN 挂起 ~20s 税（§2o：代码推导值）。uv 恒 api.github.com（不变量）。
+          preferredNodeDistCandidate: resolveEffectiveDecisions(json).nodeDist,
+        })
       : await resolveLatestUvVersion(fetchOptionsFor(deps));
   if (readCurrentPointer(kindDir) === version) {
     logger.info(undefined, `install noop: kind=${kind} version=${version} already current`);
