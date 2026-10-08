@@ -82,7 +82,12 @@ export function buildCandidateLadder(
   const fallback = MIRROR_CANDIDATE_TABLES[artifactClass]
     .map((spec) => spec.id)
     .filter((id) => id !== primary && !ranked.includes(id));
-  return { candidates: [primary, ...ranked, ...fallback], isOverrideSlot: false };
+  // F6/MINOR-13（§4.7 填充类失败降级 + 类型涟漪）：decisions 值可选化——primary
+  // undefined（该类键删/缺键形态）不得进入 candidates（readonly string[]）：梯次
+  // 退为 ranked + 候选表 fallback（表序含 origin 兜底），不猜主选。
+  const candidates =
+    primary === undefined ? [...ranked, ...fallback] : [primary, ...ranked, ...fallback];
+  return { candidates, isOverrideSlot: false };
 }
 
 /** F3：node 单锚 SHASUMS 预取缓存条目（fetchNodeShasumsText 返回形；per-anchor）。 */

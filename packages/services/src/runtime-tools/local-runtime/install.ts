@@ -20,12 +20,14 @@ import { extractRuntimeArchive, resolveArchiveLayout } from "./layouts.js";
 import {
   APP_RUNTIME_ARTIFACT_CLASSES,
   applyOverrideSourceHardFailure,
+  isFillerRuntimeArtifactClass,
   readAppRuntimeJson,
   resolveEffectiveDecisions,
   resolveReprobeSlots,
   validateUpdateOrdering,
   writeAppRuntimeJson,
   type AppRuntimeArtifactClass,
+  type AppRuntimeDecisions,
   type AppRuntimeJson,
   type AppRuntimeMirrorMeasurement,
   type UpdateOrderingStep,
@@ -33,7 +35,7 @@ import {
 import {
   NODE_KNOWN_GOOD_PROBE_TAG,
   UV_KNOWN_GOOD_PROBE_TAG,
-  MIRROR_CANDIDATE_TABLES,
+  AllProbeCandidatesDeadError,
   probeArtifactClass,
 } from "./probe.js";
 import {
@@ -96,13 +98,22 @@ async function runProbeRound(
       probeArtifactClass(artifactClass, probeVersionFor(artifactClass), fetchOptionsFor(deps)),
     ),
   );
-  // 并行化不改变失败语义：仍按 slots 顺序抛第一个 all-dead 类（与原串行逐类 await
-  // 的首失败即抛同形；F6 填充类降级归后续 phase，本相不扩语义）。
-  const firstRejected = settled.find(
-    (entry): entry is PromiseRejectedResult => entry.status === "rejected",
-  );
-  if (firstRejected !== undefined) {
-    throw firstRejected.reason;
+  // F6（alpha.3，§4.1 规则 4 类域限定 + §4.7）：全灭报错仅适用**安装相关类**
+  // （nodeDist/uvRelease——all-dead = 中止安装，语义不变）；填充类
+  // （pypiIndex/npmRegistry/pbsMirror）all-dead = 降级（warn + decisions 键删，
+  // 下方处理），不在此抛。仍按 slots 顺序抛第一个不可降级拒绝（与原串行逐类
+  // await 的首失败即抛同形）；非 AllProbeCandidatesDeadError 的意外拒绝保守照旧
+  // loud（不吞未知异常）。
+  for (const [index, artifactClass] of slots.entries()) {
+    const result = settled[index];
+    if (result === undefined || result.status !== "rejected") continue;
+    if (
+      isFillerRuntimeArtifactClass(artifactClass) &&
+      result.reason instanceof AllProbeCandidatesDeadError
+    ) {
+      continue;
+    }
+    throw result.reason;
   }
   const decisions: Partial<Record<AppRuntimeArtifactClass, string>> = {};
   const measurements: AppRuntimeMirrorMeasurement[] = [];
@@ -111,15 +122,26 @@ async function runProbeRound(
   // 并行完成顺序不得影响输出（§9 (C)：`probe round:` 是 rig checklist 的 grep 锚点）。
   for (const [index, artifactClass] of slots.entries()) {
     const result = settled[index];
-    if (result === undefined || result.status !== "fulfilled") continue;
-    decisions[artifactClass] = result.value.outcome.winner;
-    const winnerMeasurement = result.value.measurements.find(
-      (entry) => entry.candidate === result.value.outcome.winner,
+    if (result === undefined) continue;
+    if (result.status === "fulfilled") {
+      decisions[artifactClass] = result.value.outcome.winner;
+      const winnerMeasurement = result.value.measurements.find(
+        (entry) => entry.candidate === result.value.outcome.winner,
+      );
+      summary.push(
+        `${artifactClass}=${result.value.outcome.winner}${winnerMeasurement ? `(${winnerMeasurement.latencyMs}ms)` : ""}`,
+      );
+      measurements.push(...result.value.measurements.map((entry) => ({ ...entry, artifactClass })));
+      continue;
+    }
+    // F6 填充类降级（§4.7 键删语义）：all-dead → 本类无 winner/measurements 回填
+    // （探测抛出即丢），decisions 不含该类键 = 不填空（不保 stale 镜像值）；汇总
+    // 行按类序占位标记；warn 一行/类（不逐候选刷屏）。
+    summary.push(`${artifactClass}=all-dead`);
+    logger.warn(
+      undefined,
+      `probe degrade: ${artifactClass} 所有候选探测失败——decisions 键删除（不填空，不保 stale 镜像值），安装照常；手工覆盖位 = runtime.json overrides 字段`,
     );
-    summary.push(
-      `${artifactClass}=${result.value.outcome.winner}${winnerMeasurement ? `(${winnerMeasurement.latencyMs}ms)` : ""}`,
-    );
-    measurements.push(...result.value.measurements.map((entry) => ({ ...entry, artifactClass })));
   }
   logger.info(undefined, `probe round: ${summary.join(" ")}`);
   return { decisions, measurements };
@@ -131,12 +153,18 @@ function mergeRuntimeJsonWithProbe(
   probedSlots: readonly AppRuntimeArtifactClass[],
   nowMs: number,
 ): AppRuntimeJson {
-  const defaultDecisions = Object.fromEntries(
-    APP_RUNTIME_ARTIFACT_CLASSES.map((artifactClass) => [
-      artifactClass,
-      MIRROR_CANDIDATE_TABLES[artifactClass][0]?.id ?? "",
-    ]),
-  ) as Record<AppRuntimeArtifactClass, string>;
+  // F6/MINOR-13（§4.7 键删语义）：本轮重探槽位的 decisions 旧值**显式删除**、
+  // 只回填 winner——填充类 all-dead 无 winner 回填 = 键缺席（键删 = 不填空，不保
+  // stale 镜像值）。原 defaultDecisions + spread 合并会把已删键复活回候选表
+  // origin id（MINOR-13 复活缺陷），故弃用 defaults 基底：未探测槽位只保留
+  // previous 在场值，缺席不猜默认。
+  const decisions: AppRuntimeDecisions = {};
+  for (const artifactClass of APP_RUNTIME_ARTIFACT_CLASSES) {
+    if (probedSlots.includes(artifactClass)) continue;
+    const preserved = previous?.decisions[artifactClass];
+    if (preserved !== undefined) decisions[artifactClass] = preserved;
+  }
+  Object.assign(decisions, probe.decisions);
   // [ulw] NIT-9：只替换本轮实际重探槽位的 measurements，保留未探测类（如 override
   // 位跳过的类）的既有记录——与 service.ts 单类重探同形，不做整串替换（整串替换会
   // 丢掉 override 类条目，卡内排名显示随之失真）。
@@ -146,7 +174,7 @@ function mergeRuntimeJsonWithProbe(
   return {
     probedAt: new Date(nowMs).toISOString(),
     ttlDays: previous?.ttlDays ?? 7,
-    decisions: { ...defaultDecisions, ...previous?.decisions, ...probe.decisions },
+    decisions,
     ...(previous?.overrides ? { overrides: previous.overrides } : {}),
     measurements: [...preservedMeasurements, ...probe.measurements],
     pinned: previous?.pinned ?? { node: "", uv: "" },
@@ -231,7 +259,11 @@ export async function installRuntime(
     return {
       kind,
       version,
-      candidate: effective[kindArtifactClass(kind)],
+      // F6/MINOR-13（§4.7 类型涟漪）：decisions 值可选化——kind 类（nodeDist/
+      // uvRelease，安装相关类）effective 正常恒在场（all-dead 已在探测轮中止，
+      // 见 runProbeRound 类域限定）；手改 runtime.json 缺键的边缘回退空串，保持
+      // LocalRuntimeInstallResult.candidate: string 契约不动（shared.ts 非本相白名单）。
+      candidate: effective[kindArtifactClass(kind)] ?? "",
       alreadyInstalled: true,
     };
   }

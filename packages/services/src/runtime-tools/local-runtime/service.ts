@@ -15,11 +15,13 @@ import { checkUpdateRuntime, removeRuntime, reverifyRuntime } from "./lifecycle.
 import {
   NODE_KNOWN_GOOD_PROBE_TAG,
   MIRROR_CANDIDATE_TABLES,
+  AllProbeCandidatesDeadError,
   UV_KNOWN_GOOD_PROBE_TAG,
   probeArtifactClass,
 } from "./probe.js";
 import {
   APP_RUNTIME_ARTIFACT_CLASSES,
+  isFillerRuntimeArtifactClass,
   readAppRuntimeJson,
   resolveEffectiveDecisions,
   resolveReprobeSlots,
@@ -286,34 +288,59 @@ export class LocalRuntimeServiceImpl implements LocalRuntimeService {
         );
       }),
     );
-    // 并行化不改变失败语义：仍按 slots 顺序抛第一个 all-dead 类（与原串行逐类 await
-    // 的首失败即抛同形）。
-    const firstRejected = settled.find(
-      (entry): entry is PromiseRejectedResult => entry.status === "rejected",
-    );
-    if (firstRejected !== undefined) {
-      throw firstRejected.reason;
+    // F6（alpha.3，§4.1 规则 4 类域限定 + §4.7）：全灭报错仅适用**安装相关类**
+    // （nodeDist/uvRelease——手动 Probe 撞上 all-dead 照旧 loud 抛出，语义不变）；
+    // 填充类 all-dead = 降级（warn + decisions 键删），与 install 探测轮
+    // （runProbeRound）两处同形。非 AllProbeCandidatesDeadError 的意外拒绝保守
+    // 照旧 loud；仍按 slots 顺序抛第一个不可降级拒绝。
+    for (const [index, artifactClass] of slots.entries()) {
+      const result = settled[index];
+      if (result === undefined || result.status !== "rejected") continue;
+      if (
+        isFillerRuntimeArtifactClass(artifactClass) &&
+        result.reason instanceof AllProbeCandidatesDeadError
+      ) {
+        continue;
+      }
+      throw result.reason;
     }
     // 汇总行按候选表类序确定性拼接（slots 源自 APP_RUNTIME_ARTIFACT_CLASSES 序）——
     // 并行完成顺序不得影响输出（§9 (C)：`probe round:` 是 rig checklist 的 grep 锚点）。
     for (const [index, artifactClass] of slots.entries()) {
       const result = settled[index];
-      if (result === undefined || result.status !== "fulfilled") continue;
-      // OFF 展示腿不写 decisions（§4.7 MINOR-6）：探测 winner 只进快照/measurements。
-      if (persistDecisions) {
-        decisions[artifactClass] = result.value.outcome.winner;
+      if (result === undefined) continue;
+      if (result.status === "fulfilled") {
+        // OFF 展示腿不写 decisions（§4.7 MINOR-6）：探测 winner 只进快照/measurements。
+        if (persistDecisions) {
+          decisions[artifactClass] = result.value.outcome.winner;
+        }
+        measurements.push(
+          ...result.value.measurements.map((entry) => ({ ...entry, artifactClass })),
+        );
+        perClass.push({
+          artifactClass,
+          winner: result.value.outcome.winner,
+          measurements: result.value.measurements,
+        });
+        const winnerMeasurement = result.value.measurements.find(
+          (entry) => entry.candidate === result.value.outcome.winner,
+        );
+        summary.push(
+          `${artifactClass}=${result.value.outcome.winner}${winnerMeasurement ? `(${winnerMeasurement.latencyMs}ms)` : ""}`,
+        );
+        continue;
       }
-      measurements.push(...result.value.measurements.map((entry) => ({ ...entry, artifactClass })));
-      perClass.push({
-        artifactClass,
-        winner: result.value.outcome.winner,
-        measurements: result.value.measurements,
-      });
-      const winnerMeasurement = result.value.measurements.find(
-        (entry) => entry.candidate === result.value.outcome.winner,
-      );
-      summary.push(
-        `${artifactClass}=${result.value.outcome.winner}${winnerMeasurement ? `(${winnerMeasurement.latencyMs}ms)` : ""}`,
+      // F6 填充类降级（§4.7 键删语义 + MINOR-13）：all-dead → **显式删除**该类
+      // decisions 键（不保 stale 镜像值；省略合并会复活已删键）；OFF 展示腿本就
+      // 不写 decisions，同样不复活；无 winner 无快照条目；汇总行按类序占位标记；
+      // warn 一行/类（不逐候选刷屏）。
+      if (persistDecisions) {
+        delete decisions[artifactClass];
+      }
+      summary.push(`${artifactClass}=all-dead`);
+      this.logger.warn(
+        undefined,
+        `probe degrade: ${artifactClass} 所有候选探测失败——decisions 键删除（不填空，不保 stale 镜像值）；手工覆盖位 = runtime.json overrides 字段`,
       );
     }
     // 每轮探测一行汇总（§4.7 日志通道：不逐候选刷屏）。
