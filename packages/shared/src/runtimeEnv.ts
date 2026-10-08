@@ -106,8 +106,13 @@ const NON_TOOL_PASSTHROUGH_RUNTIME_ENV_KEYS = [
   ZCODE_REMOTE_NO_PROXY_ENV_KEY,
 ] as const;
 
+// W1 红测发现（runtimeEnvSanitizePin.test.ts）：pnpm 的证书/代理族键走
+// `pnpm_config_<suffix>` 形态（如 pnpm_config_ca），旧模式的 `pnpm` 前缀只匹配
+// `pnpm_<suffix>`、漏剥该族——与 spec §2.5「仅剥 *_proxy/cafile/ca 族」语义冲突。
+// 这里加 `(?:_config)?` 可选段（additive）：npm_config_* / yarn_* / pnpm_* 旧匹配
+// 全部保持不变，仅补齐 pnpm_config_* 形态。
 const SANITIZED_PACKAGE_MANAGER_ENV_PATTERN =
-  /^(npm_config|yarn|pnpm)_(http_proxy|https_proxy|proxy|all_proxy|no_proxy|cafile|ca)$/i;
+  /^(npm_config|yarn|pnpm)(?:_config)?_(http_proxy|https_proxy|proxy|all_proxy|no_proxy|cafile|ca)$/i;
 
 export function normalizeZCodeRuntimeEnv(value: string | undefined): ZCodeRuntimeEnv | undefined {
   const normalized = value?.trim().toLowerCase();
