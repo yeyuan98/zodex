@@ -56,6 +56,19 @@ export class InvalidMirrorOverrideError extends Error {
   }
 }
 
+/**
+ * MINOR-6（§4.7/plan §2）：install 与 probeMirrors 共享 in-flight 守卫——两者
+ * 都会写 runtime.json（install 快照合并 vs probe 持久化），并发执行存在丢更新
+ * 竞态。第二个调用方被本错误显式拒绝（**不静默排队**），由 UI 层（W-B
+ * 双向禁用）保证用户不会看到该错误；服务级红测缺位，互斥的 UI 红测在 W-B 门。
+ */
+export class LocalRuntimeOperationInFlightError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LocalRuntimeOperationInFlightError";
+  }
+}
+
 export interface LocalRuntimeStatusSnapshot {
   readonly runtimeJson: AppRuntimeJson | null;
   readonly effectiveDecisions: AppRuntimeDecisions | null;
@@ -103,6 +116,17 @@ export class LocalRuntimeServiceImpl implements LocalRuntimeService {
   private readonly deps: LocalRuntimeDeps;
   private readonly logger: ServiceLogger;
 
+  /**
+   * MINOR-6（§4.7/plan §2）共享 in-flight 守卫：当前占位的公共入口（null = 空闲）。
+   * 只守卫**公共入口** install/probeMirrors（用户发起的安装 vs 用户发起的探测，
+   * 同 op 并发同样互斥）；内部腿一律不经守卫，杜绝自锁（reentrancy）：
+   * - install → installRuntime 的内部探测轮是模块级 ensureRuntimeJsonState/
+   *   runProbeRound，不重入本类公共方法；
+   * - setMirrorOverride → ensureRuntimeJsonForOverride 建载体走私有
+   *   probeMirrorsInternal（持久腿），不经过公共 probeMirrors。
+   */
+  private operationInFlight: "install" | "probeMirrors" | null = null;
+
   constructor(options: LocalRuntimeServiceOptions = {}) {
     this.deps = options;
     this.logger = options.logger ?? createServiceLogger("local-runtime");
@@ -116,11 +140,25 @@ export class LocalRuntimeServiceImpl implements LocalRuntimeService {
     return resolveRuntimeJsonPath(this.deps);
   }
 
-  install(
+  private assertNotInFlight(caller: "install" | "probeMirrors"): void {
+    if (this.operationInFlight === null) return;
+    throw new LocalRuntimeOperationInFlightError(
+      `local-runtime ${this.operationInFlight} 进行中，${caller} 被互斥拒绝（MINOR-6：防 runtime.json 写竞态，不排队）`,
+    );
+  }
+
+  async install(
     kind: "node" | "uv",
     options: LocalRuntimeInstallOptions = {},
   ): Promise<LocalRuntimeInstallResult> {
-    return installRuntime(kind, options, this.deps);
+    // MINOR-6：公共安装入口先占守卫（in-flight 期间 probeMirrors/再入 install 被拒）。
+    this.assertNotInFlight("install");
+    this.operationInFlight = "install";
+    try {
+      return await installRuntime(kind, options, this.deps);
+    } finally {
+      this.operationInFlight = null;
+    }
   }
 
   checkUpdate(kind: "node" | "uv"): Promise<LocalRuntimeUpdateCheck> {
@@ -229,8 +267,17 @@ export class LocalRuntimeServiceImpl implements LocalRuntimeService {
     // 手动 Probe 只更新 measurements/快照与日志，**不写 decisions/overrides**
     // （否则违背「仅信息展示」；ON 行为不变——照常持久化）。内部调用方
     // （ensureRuntimeJsonForOverride，B 边缘）保持持久语义，走 persist 变体。
-    const existing = readAppRuntimeJson(this.resolveJsonPath());
-    return this.probeMirrorsInternal(options, existing, existing?.useMirrors !== false);
+    // MINOR-6：公共探测入口先占守卫（in-flight 期间 install/再入 probe 被拒）；
+    // 内部持久腿 ensureRuntimeJsonForOverride→probeMirrorsInternal 不经此处，
+    // install 在飞时 setMirrorOverride 建载体不会撞锁。
+    this.assertNotInFlight("probeMirrors");
+    this.operationInFlight = "probeMirrors";
+    try {
+      const existing = readAppRuntimeJson(this.resolveJsonPath());
+      return await this.probeMirrorsInternal(options, existing, existing?.useMirrors !== false);
+    } finally {
+      this.operationInFlight = null;
+    }
   }
 
   /**
