@@ -137,7 +137,10 @@ function makeFailingInstallService(snapshot: RuntimeStatusSnapshot): RuntimeStor
 
 test("F4 错误常驻：refreshStatus 成功路径保留既有 error（红：今日无条件清空 :130）", async () => {
   resetStore();
-  setRuntimeStoreService(makeSpyService(SNAPSHOT));
+  // 计划 §10 后续缺陷修（P0′）：原测误将 makeSpyService 的 { calls, service } 包装
+  // 整体塞进 seam（缺 getRuntimeStatus → 任何实现都 TypeError 先红），改回姊妹测形制注入 spy.service。
+  const spy = makeSpyService(SNAPSHOT);
+  setRuntimeStoreService(spy.service);
   useRuntimeStore.setState({ error: "boom: previous install failed" });
   await useRuntimeStore.getState().refreshStatus();
   assert.equal(
