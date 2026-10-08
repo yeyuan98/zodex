@@ -1,5 +1,81 @@
 # Changelog
 
+## [3.16.0-alpha.2](https://github.com/yeyuan98/zodex/compare/v3.16.0-alpha.1...v3.16.0-alpha.2) (2026-10-08)
+
+### Features
+
+* **adapters:** C3 app 级 L3 前插 + 镜像缺省填空 + sanitize 钉测转绿 ([c2da4d4](https://github.com/yeyuan98/zodex/commit/c2da4d4382a6db50b85ee6dad7b6b8c6021e8c69))
+  * shared sanitize：包管理器 proxy/ca 族模式补 pnpm_config_<suffix> 形态（W1 红测发现 pnpm_config_ca 漏剥；additive，旧匹配不变）
+  * shared 新增 runtimeMirrorValues：镜像候选 id → 填空 URL 投影表（adapters/services 两腿共用，防双表漂移）
+  * adapters app-runtime-prepend 实现：<config> 根解析（ZCODE_DATA_BASE_DIR 优先 + homedir fallback）/CURRENT 容错读取（禁目录扫描回退）/PATH 前插（大小写不敏感键）/镜像填空（effective decision + 大小写不敏感存在性）/L3 编排（fs 注入、warn 通道注入）
+  * createTransport 缝接线：L3 应用在 buildMcpStdioEnv（L2）输出之后、config.env（L4）spread 之前；每 spawn 同步读 CURRENT + runtime.json，不跨 spawn 缓存
+
+* **services:** A2′ 本地运行时下载器核心（探测/校验/布局/CURRENT/runtime.json） ([d4ff551](https://github.com/yeyuan98/zodex/commit/d4ff551bd8a6c69ce17c998beb637789f8f7138f))
+  * probe.ts（§4.1）：五类工件候选表（nodeDist/uvRelease/pypiIndex/npmRegistry/pbsMirror）+ 每候选 Range-GET 首 64KB/AbortController 5s 探测编排 + 确定性择优纯函数（origin 存活 mirror 须 ≤0.6×origin 才胜；origin 死 → 存活最快；平局 ±10% → 候选表序；全灭 → typed 报错含手工覆盖位提示）；探针版本 = 上轮 pinned，首轮用内置 known-good tag
+  * verify.ts（§4.2/§4.7）：node tarball 自 X → SHASUMS256.txt 取 nodejs.org↔npmmirror 另一方（tuna 永不作校验来源）；双锚点均不可达 = typed 明确报错（不降级无校验）；uv digest 恒 api.github.com；SHASUMS256 解析 + timingSafeEqual 摘要比对 + GitHub asset digest 解析
+  * current.ts（§4.3/§4.6）：CURRENT tmp*→rename 原子写；读端容错（缺失/垃圾/悬空 → null，禁目录扫描回退）；GC 决策纯函数（未引用过宽限期 → remove；被引用/宽限期内 → keep；win 锁 → keep+retryLater）+ GC 执行器 + 启动清理 CURRENT.tmp* 残留
+  * layouts.ts（§4.3）：布局矩阵纯映射（node unix tar/win zip 剥 node-v<ver>-<os>-<arch>/ 顶层；uv unix 剥 uv-<triple>/、win zip 平铺；越界成员 → null）+ 工具选择（win tar.exe 兼 .zip/.tar.xz、unix tar）+ 解压执行器（execFile 数组参数、先落 tmp 目录再 rename 就位，无 shell 拼接）
+  * runtime-json.ts（§4.7）：app 级 runtime.json（<config>/.runtime/runtime.json，getDataBaseDir 同源）schema（probedAt/ttlDays=7/decisions/overrides/measurements/pinned）+ effective decision = override ?? probed + TTL/force 重探只作用于无 override 位 + tmp+rename 原子写 + 读端容错（缺失/损坏 → null）+ 更新顺序不变量（dir→runtime.json→CURRENT→GC）+ override 源硬失败 = 报错且原样保留
+  * upstream/download-verify/install/lifecycle/shared（§4.6/§4.7 编排）：install = 探测（每轮一行汇总日志）→ 上游版本解析（node dist index.json origin→npmmirror 兜底、滤非精确 vX.Y.Z；uv GitHub API latest 匿名 UA 先例、403 限流 typed 报错）→ 候选梯下载（次优顺位重试；校验锚点级硬失败 typed 直抛不进梯；override 位硬失败不回落）→ 跨源校验 → 解压 v<ver>/ → --version 冒烟门 → 写 runtime.json(pinned) → CURRENT 原子换指针 → 旧目录 GC（宽限 7d）；checkUpdate（上游 latest vs pinned）/remove/reverify 生命周期
+  * service.ts + node.ts：LocalRuntimeService 门面（install/checkUpdate/remove/reverify/status/setMirrorOverride/clearMirrorOverride/probeMirrors，依赖全可注入），仅经 src/node.ts 导出（浏览器入口零 node: 引用）；桌面 host 组装注册留 W6
+
+* **services:** Bash 腿 app 级追加 + agent spawn 缝重算 + desktop 启动 GC ([a53bcaf](https://github.com/yeyuan98/zodex/commit/a53bcaf667eccb9f156711abfcb94dac15c7b22e))
+  * bash-append 实现：app 运行时在场（CURRENT 有效 + bin 存在）→ 追加版本化 bin 目录（win 平铺 / unix bin/）+ 镜像缺省填空（大小写不敏感存在性）；缺席 → null（patch 不变）
+  * buildRuntimeProcessEnvPatch 增 appRuntimeBashAppend 注入缝（undefined=磁盘解析 / null=禁用 / 对象=直接采用），既有调用方零改动
+  * agent spawn 缝（zcodeAgentProcessManager.startClient）每次 spawn 重算 app-bin 追加段与镜像填空值两段（spec §9 池化新鲜度披露的落地：防安装/换版/镜像切换后 Bash 侧陈旧到 host 重启）
+  * 新增 runLocalRuntimeStartupGc：清理 CURRENT.tmp* 残留 + 无引用过宽限期版本目录 GC；Windows 文件锁 = rename-probe 保留 + 下次启动重试（含 .gc-* 崩溃孤儿清理）；desktop main whenReady 在 setDataBaseDir 后调用，失败仅 warn 不阻断启动
+
+* **ui:** 运行时环境卡 + LocalRuntimeService 注册 + i18n + C2 文案指路 ([cc4ce45](https://github.com/yeyuan98/zodex/commit/cc4ce454bb103aba513ddb84be0dc897f8107780))
+  * shared channels 新增 local-runtime 频道；services 新增 browser-safe 端口（ILocalRuntimeService）并在 createLocalServices 注册（window-scoped local host 组装，mcp-sync 同形）；下载/探测 fetch 走 hostApiNetworkTransport（复用设置页 httpProxy/noProxy/CA 出口，3.14.4 bots egress 先例 seam）
+  * setMirrorOverride 写 override 后立即重探该类连通（D2：切换 = 写 overrides + 该类重验；decisions/overrides 不动，仅刷新 measurements）
+  * runtimeStore 实现：setRuntimeStoreService DI seam + install/remove/refreshStatus/setMirrorOverride/clearMirrorOverride（clear 经服务 null 覆写）+ 进度事件（有界）+ 错误态；机器全局无 workspace-key 守卫
+  * RuntimeEnvironmentCard 落位 MCP 设置区（baseServices.localRuntimeService，本机全局事实源）：已装/可用/最近验证 + 五类工件 × 候选延迟排名 + 安装/检查更新/重新验证/删除（确认框）+ 镜像切换（auto ↔ 显式候选）；DESIGN.md 合规（text-ui-*、bg-card、font-mono 版本/URL、语义 token、a11y 文字+颜色双通道、桌面/移动响应式）；卡级生命周期事件走 logger.lifecycle
+  * i18n：settings.mcp.runtime.* 双语 33 键完全对齐；C2 文案 runtime_unavailable 双语同时指路 zcode-workspace-runtimes 技能与设置「运行时环境」卡（spec §3 记账兑现）
+  * specs/agent-runtimes.md §4.6 install 行补记 W5 采纳顺序：--version 冒烟门在 CURRENT 换指针之前（坏运行时永不成为 current；dir→runtime.json→CURRENT→GC 不变量不变）
+
+
+### Bug Fixes
+
+* [ulw] 评审折叠（services 运行时下载/安装腿） ([a3d4e79](https://github.com/yeyuan98/zodex/commit/a3d4e79b6abd13db78c02f8afe535a5e85c9c043))
+  * MAJOR-2 候选下载暂存清理：downloadAndVerifyCandidate 任何非成功退出（ok:false 返回或锚点级 rethrow）以 finally 删除 .download-* 半写文件；install 编排把 rm(targetDir)+解压纳入同一 try/finally，解压段任何抛出同样清理暂存（新增 localRuntimeDownloadVerify.test 钉失败后无残留）
+  * MINOR-3 单锚点早退：锚点对候选（tarball 自 nodejs.org/npmmirror）单锚点拉取失败 = 候选失败走梯次；typed 双锚点硬中止仅保留给 tuna 路径（两锚点皆真实尝试），Western 用户单镜像被墙不再永久卡死安装（补两向测试）
+  * MINOR-4 runtime.json 丢失更新：finalize 改为重读最新文件只合并 {pinned}（mergeRuntimeJsonAtFinalize），安装窗口内的 override 切换/显式探测写入不再被旧快照覆盖；读失败/缺席回落安装起点快照（新增 localRuntimeInstall.test 钉中途写入存活与二次 finalize 幂等）
+  * MINOR-5 穿越校验接线：extractRuntimeArchive 先 tar -tf 全量列表逐成员按布局契约校验（.. 段/绝对路径/意外形状拒绝整个归档）再 -xf，mapArchiveMemberToTargetPath 不再是死代码（补恶意 ../ 与绝对路径成员拒解压钉测）
+  * NIT-7 探针 known-good tag 对齐 S1 技能 v22.14.0（原 v22.16.0 与随附技能 SKILL.md 矛盾）
+  * NIT-9 install 探测轮合并保留非本轮槽位 measurements（对齐 service.ts 单类重探的保形合并，不再整串替换丢 override 类条目）
+  * NIT-10 rankMirrorCandidates 原始全灭错误类别无关化（artifactClass: null），真实类别由 probeArtifactClass 重映射保证，不再硬编码 nodeDist
+  * NIT-11 verify.ts 导出转诚实：摘要不一致改抛 ChecksumMismatchError；uv digest 解析路由经 resolveUvDigestSource（digestSource 进入缺席报错文案）
+  * spec §4.3/§4.6/§4.7 同步收编上述语义（解压前穿越校验/finalize 重读合并/measurements 保形/下载 tmp 清理/单锚点梯次语义）
+
+* [ulw] 评审折叠（更新入口/删除确认文案/adapter seam 钉测） ([391d9bb](https://github.com/yeyuan98/zodex/commit/391d9bb1cefdc96e0fb7aa76924ec33aa5241c24))
+  * MAJOR-1 更新路径不可达：运行时行在 installed 且 updateCheck.updateAvailable 时渲染「更新到 {version}」（settings.mcp.runtime.updateTo，zh/en 双语），复用同一 onInstall/store action——install 编排 dir→runtime.json→CURRENT→GC 自带同版 no-op 门，即点即更新
+  * MINOR-6 seam 契约钉测（adapters）：applyAppRuntimeLayerToEnv 注入 fs——runtime.json overrides.npmRegistry 填空胜 decisions；缺失/损坏 → 不填空不抛错；并按 mcp/index.ts createTransport 组合形制钉 §2.5 L4 结构性覆盖（...config.env 后到即胜 + 显式 env.PATH 整串替换）
+  * NIT-12 删除确认文案对齐现实：删除 = 运行时目录 + 清版本钉住；镜像决策/覆盖保留（removeRuntime 实际保留 decisions/overrides 供 L3 填空），zh+en 双语与 spec §4.6 remove 行同步改写
+
+* **adapters:** applyAppRuntimeLayerToEnv 缺省 homedir 在模块内解析 ([04346e3](https://github.com/yeyuan98/zodex/commit/04346e3d5c31a4cb3de8e7fe82e37597ce57611c))
+
+* uv 版本化 bin 目录按 spec §4.3 平铺于 v<ver>/（W1 红测初稿 /bin 形态与安装布局矛盾） ([c9ce47d](https://github.com/yeyuan98/zodex/commit/c9ce47d2b3bfd0f674463c1533ce61aaad917102))
+  * adapters resolveAppRuntimeBinDir 与 services resolveBashAppendBinDir 改为 kind 感知：node unix 取 bin/ 子目录、win 平铺；uv 两平台均平铺（unix 剥 uv-<triple>/ 顶层后 uvx 与 uv 同目录）
+  * 修正 runtimeCommandEnvAppRuntime.test 的 uv 期望路径（原断言与自身注释「uvx 与 uv 同目录」矛盾，与 W5 安装布局/S1 技能/spec §4.3 冲突，按 spec 修正并披露）
+  * 补 adapters 端 resolveAppRuntimeBinDir kind 感知钉测（此前 uv 零覆盖）
+
+
+### Documentation
+
+* **specs:** agent-runtimes alpha.2 修订——A2′ 上游直采契约收编 + A1 废除 ([3db3055](https://github.com/yeyuan98/zodex/commit/3db30558dc212e949c31e873c5a68fab1fe6fef2))
+  * Status 行补 alpha.2 in-progress 范围（A2′ 上游直采下载器 + 设置页「运行时环境」镜像管理卡 + C3；A1 自有资产整体废除——owner 裁定 2026-10-08，alpha2-plan §2.0）
+  * §4.2 删除「自有资产（PR2 A1）构建期烧录」段，app 级并回与 ws 级同一条跨源校验不变量（alpha2-plan §2.0/§3 W1）
+  * §4.1 日志通道子句修订：app 级 A2′ 走 services createServiceLogger（经 host log relay 生产落盘），renderer 卡片行 logger.lifecycle；探测日志粒度 = 每轮一行汇总（[ulw] v2 MAJOR-1a）
+  * §4.1 固化与复用补 app 级 runtime.json 扩展交叉引用 + 与 S1 ws 级 versions.node/uv 的 schema 分叉披露（[ulw] v2 MINOR-4）
+  * §4.6 install 行「经 runtime-manifest.json 解析」→「经上游版本解析（node dist index.json / uv GitHub API latest）」；status 行「可用版本（manifest）」→「可用版本（上游解析）」；update 行明确运行时更新不随 app 版本（[ulw] v2 MAJOR-1b）
+  * 新增 §4.7 A2′ 实现契约：services local-runtime/ 归属、runtime.json schema 与 overrides 语义、写读契约（tmp+rename 原子/读端容错/更新顺序不变量/override 硬失败保留）、探测全五类工件、校验锚点（tuna 永不作校验来源/node 双锚点对称规则/GitHub API 匿名限流）
+  * §2.5 新增 L3 实现契约：createTransport 应用点缝位、ZCODE_DATA_BASE_DIR 同源解析、每 spawn 同步读不缓存、CURRENT 容错禁目录扫描、镜像填空 effective decision（alpha2-plan D3）
+  * §8 补 alpha.2 红测批次清单（12 项，W1 先红 W5/W6 转绿）
+  * §9 残留补：GitHub 不可达对称约束、Bash 腿池化新鲜度、ZCODE_DATA_BASE_DIR shell-export 边角（披露不修）、dataBaseDir 生命周期中变更语义（alpha2-plan §6）
+
+* **specs:** agent-runtimes Status 翻转 SHIPPED in 3.16.0-alpha.1（rig T0-T9 PENDING） ([fd5ae2d](https://github.com/yeyuan98/zodex/commit/fd5ae2d51b0a1e28ef930ec4465e55bf07ba840f)), closes [#40]()
+  * Status 行 DRAFT→SHIPPED in 3.16.0-alpha.1（PR #40，release bb40344）
+
 ## [3.16.0-alpha.1](https://github.com/yeyuan98/zodex/compare/v3.16.0-alpha.0...v3.16.0-alpha.1) (2026-10-07)
 
 ### Features
