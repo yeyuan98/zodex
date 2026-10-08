@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildAppRuntimeBashAppend } from "../src/runtime-tools/local-runtime/bash-append.js";
+import {
+  buildAppRuntimeBashAppend,
+  resolveAppRuntimeBashAppendFromDisk,
+} from "../src/runtime-tools/local-runtime/bash-append.js";
 
 // specs/agent-runtimes.md §2.5（Bash 工具腿：app 级 host 侧追加）红测：W1 先红
 // （bash-append.ts 为零行为桩），W6 把 seam 接进 buildRuntimeProcessEnvPatch +
@@ -117,4 +122,85 @@ test("Bash 腿：CURRENT 有效但 bin 目录不存在（悬空/半装）→ nul
     },
   );
   assert.equal(result, null, "bin 目录不存在 = 运行时不在场，不得追加幽灵路径");
+});
+
+// specs/agent-runtimes.md §2.5/§4.7（alpha.3 F5/D1：OFF = 用官方源）红测：
+// runtime.json 带 useMirrors:false → Bash 腿填空填 origin 官方值
+// （registry.npmjs.org / pypi.org / origin PBS）——「不用镜像」=「用官方」而非
+// 「不填」；useMirrors:true（或字段缺席）→ 维持镜像决策（今绿钉）。
+// 计划锚点：../ZCode-runtime-alpha3-plan.md §2 F5 L3/Bash 填空同义 / §5 D1。
+
+function makeDiskSandbox(runtimeJsonText: string): { root: string; dispose: () => void } {
+  const root = mkdtempSync(join(tmpdir(), "zcode-bash-append-mirrors-"));
+  mkdirSync(join(root, "node", "v22.14.0", "bin"), { recursive: true });
+  writeFileSync(join(root, "node", "CURRENT"), "v22.14.0");
+  writeFileSync(join(root, "runtime.json"), runtimeJsonText);
+  return { root, dispose: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+function mirrorDecisionsRuntimeJson(useMirrors: boolean): string {
+  return `{
+  "probedAt": "2026-10-08T00:00:00.000Z",
+  "ttlDays": 7,
+  "decisions": {
+    "nodeDist": "npmmirror",
+    "uvRelease": "github.com",
+    "pypiIndex": "tuna",
+    "npmRegistry": "registry.npmmirror.com",
+    "pbsMirror": "registry.npmmirror.com"
+  },
+  "measurements": [],
+  "pinned": { "node": "v22.14.0", "uv": "" },
+  "useMirrors": ${useMirrors ? "true" : "false"}
+}`;
+}
+
+test("Bash 腿 OFF（D1）：useMirrors:false → 填官方源值而非镜像决策（红：今日填镜像值）", async () => {
+  const sandbox = makeDiskSandbox(mirrorDecisionsRuntimeJson(false));
+  try {
+    const result = resolveAppRuntimeBashAppendFromDisk(
+      { PATH: "/usr/bin" },
+      { runtimeRootDir: sandbox.root, platform: "linux" },
+    );
+    assert.notEqual(result, null, "运行时在场 → Bash 腿仍有追加段");
+    assert.equal(
+      result?.envFill.npm_config_registry,
+      "https://registry.npmjs.org",
+      "OFF → npm registry 填官方值 registry.npmjs.org（D1：不用镜像 = 用官方）",
+    );
+    assert.equal(
+      result?.envFill.UV_DEFAULT_INDEX,
+      "https://pypi.org/simple",
+      "OFF → PyPI 填官方值 pypi.org",
+    );
+    assert.equal(
+      result?.envFill.UV_PYTHON_INSTALL_MIRROR,
+      "https://github.com/astral-sh/python-build-standalone/releases/download",
+      "OFF → PBS 填 origin（github.com）值",
+    );
+  } finally {
+    sandbox.dispose();
+  }
+});
+
+test("Bash 腿 ON：useMirrors:true → 维持镜像决策填空（今绿钉）", async () => {
+  const sandbox = makeDiskSandbox(mirrorDecisionsRuntimeJson(true));
+  try {
+    const result = resolveAppRuntimeBashAppendFromDisk(
+      { PATH: "/usr/bin" },
+      { runtimeRootDir: sandbox.root, platform: "linux" },
+    );
+    assert.equal(
+      result?.envFill.npm_config_registry,
+      "https://registry.npmmirror.com",
+      "ON → 填空值 = effective decision（镜像决策照常生效）",
+    );
+    assert.equal(
+      result?.envFill.UV_DEFAULT_INDEX,
+      "https://pypi.tuna.tsinghua.edu.cn/simple",
+      "ON → PyPI 镜像决策照常",
+    );
+  } finally {
+    sandbox.dispose();
+  }
 });

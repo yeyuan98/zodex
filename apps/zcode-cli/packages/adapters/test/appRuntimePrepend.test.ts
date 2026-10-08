@@ -258,7 +258,11 @@ const L3_BASE = join("/", "data-base");
 const L3_ROOT = join(L3_BASE, ".zcode", ".runtime");
 const L3_ENV = { ZCODE_DATA_BASE_DIR: L3_BASE };
 
-function l3LayerJson(overrides?: Record<string, string>, decisions?: Record<string, string>) {
+function l3LayerJson(
+  overrides?: Record<string, string>,
+  decisions?: Record<string, string>,
+  useMirrors?: boolean,
+) {
   return JSON.stringify({
     probedAt: "2026-10-08T00:00:00.000Z",
     ttlDays: 7,
@@ -271,6 +275,7 @@ function l3LayerJson(overrides?: Record<string, string>, decisions?: Record<stri
       ...decisions,
     },
     ...(overrides ? { overrides } : {}),
+    ...(useMirrors !== undefined ? { useMirrors } : {}),
     measurements: [],
     pinned: { node: "v22.14.0", uv: "" },
   });
@@ -389,5 +394,87 @@ test("MINOR-6 seam：L3 填空后 ...config.env spread 覆盖填空键 + env.PAT
     finalEnv.PATH,
     "/explicit/path",
     "显式 env.PATH = 整串替换（L3/L2 段被消灭——既有逃逸口语义）",
+  );
+});
+
+// specs/agent-runtimes.md §2.5/§4.7（alpha.3 F5/D1：OFF = 用官方源）红测：
+// runtime.json 带 useMirrors:false → L3 镜像缺省填空填 origin 官方值
+// （registry.npmjs.org / pypi.org / origin PBS github.com）——「不用镜像」=「用
+// 官方」而非「不填」；useMirrors:true → 维持镜像决策（今绿钉）。adapters 侧
+// 独立解析器（不 import services）与 services bash-append 语义同义。
+// 计划锚点：../ZCode-runtime-alpha3-plan.md §2 F5 L3/Bash 填空同义 / §5 D1。
+
+test("F5/D1 OFF：useMirrors:false → L3 填空 = 官方源值（红：今日填镜像决策值）", () => {
+  const fs = fakeFs(
+    {
+      [join(L3_ROOT, "node", "CURRENT")]: "v22.14.0\n",
+      [join(L3_ROOT, "runtime.json")]: l3LayerJson(
+        undefined,
+        {
+          pypiIndex: "tuna",
+          npmRegistry: "registry.npmmirror.com",
+          pbsMirror: "registry.npmmirror.com",
+        },
+        false,
+      ),
+    },
+    [join(L3_ROOT, "node", "v22.14.0")],
+  );
+  const env = applyAppRuntimeLayerToEnv(
+    { PATH: "/usr/bin" },
+    {
+      env: L3_ENV,
+      homeDir: HOME,
+      platform: "linux",
+      fs,
+    },
+  );
+  assert.equal(
+    env.npm_config_registry,
+    "https://registry.npmjs.org",
+    "OFF → npm registry 填官方值 registry.npmjs.org（D1：不用镜像 = 用官方）",
+  );
+  assert.equal(env.UV_DEFAULT_INDEX, "https://pypi.org/simple", "OFF → PyPI 填官方值 pypi.org");
+  assert.equal(
+    env.UV_PYTHON_INSTALL_MIRROR,
+    "https://github.com/astral-sh/python-build-standalone/releases/download",
+    "OFF → PBS 填 origin（github.com）值",
+  );
+});
+
+test("F5/D1 ON：useMirrors:true → L3 填空维持镜像决策（今绿钉）", () => {
+  const fs = fakeFs(
+    {
+      [join(L3_ROOT, "node", "CURRENT")]: "v22.14.0\n",
+      [join(L3_ROOT, "runtime.json")]: l3LayerJson(
+        undefined,
+        {
+          pypiIndex: "tuna",
+          npmRegistry: "registry.npmmirror.com",
+          pbsMirror: "registry.npmmirror.com",
+        },
+        true,
+      ),
+    },
+    [join(L3_ROOT, "node", "v22.14.0")],
+  );
+  const env = applyAppRuntimeLayerToEnv(
+    { PATH: "/usr/bin" },
+    {
+      env: L3_ENV,
+      homeDir: HOME,
+      platform: "linux",
+      fs,
+    },
+  );
+  assert.equal(
+    env.npm_config_registry,
+    "https://registry.npmmirror.com",
+    "ON → 填空值 = effective decision（镜像决策照常生效）",
+  );
+  assert.equal(
+    env.UV_DEFAULT_INDEX,
+    "https://pypi.tuna.tsinghua.edu.cn/simple",
+    "ON → PyPI 镜像决策照常",
   );
 });
