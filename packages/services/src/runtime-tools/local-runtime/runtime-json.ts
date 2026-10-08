@@ -51,7 +51,27 @@ export interface AppRuntimeJson {
   readonly overrides?: Partial<AppRuntimeDecisions>;
   readonly measurements: readonly AppRuntimeMirrorMeasurement[];
   readonly pinned: { readonly node: string; readonly uv: string };
+  /**
+   * F5（alpha.3，§4.7）：全局镜像开关的唯一持久状态（卡内 Switch 写入）。
+   * additive 可选字段，**缺省 true = 现行为**；读端容错不猜——非布尔/缺席
+   * 一律按缺省 true 处理（投影判 `=== false`）。
+   */
+  readonly useMirrors?: boolean;
 }
+
+/**
+ * F5（alpha.3，§4.7 D1）：OFF 投影的全类 origin id（「不用镜像」=「用官方」）。
+ * 与 probe.ts MIRROR_CANDIDATE_TABLES 的 isOrigin 候选同源（id 即取值域）；
+ * 供 resolveEffectiveDecisions 唯一投影与 buildCandidateLadder origin-only
+ * 梯次（MAJOR-1）共用，避免双表漂移。
+ */
+export const APP_RUNTIME_ORIGIN_DECISIONS: Readonly<AppRuntimeDecisions> = {
+  nodeDist: "nodejs.org",
+  uvRelease: "github.com",
+  pypiIndex: "pypi.org",
+  npmRegistry: "registry.npmjs.org",
+  pbsMirror: "github.com",
+};
 
 /** `<config>/.runtime/runtime.json`（与 C3 L3 读取同源：getDataBaseDir/ZCODE_DATA_BASE_DIR 解析）。 */
 export function resolveAppRuntimeJsonPath(): string {
@@ -63,8 +83,19 @@ export function resolveAppRuntimeRootDir(): string {
   return join(getZCodeDataRootDir(), ".runtime");
 }
 
-/** effective decision = override ?? probed（§4.7）。 */
+/**
+ * effective decision = override ?? probed（§4.7）。
+ *
+ * F5（alpha.3，§4.7 投影唯一/D1）：`useMirrors === false`（显式 OFF；缺省/
+ * 非布尔 = true 现行为）→ **全类** effective = origin id，无视 decisions/
+ * overrides——下载选路、L3/Bash 填空、卡片显示全部消费本投影（单一事实源，
+ * 不出现「开关关了、下载还走镜像」的分裂）。overrides 被压制但**不删**
+ * （ON 恢复即生效；压制期间 override 源硬失败规则不武装）。
+ */
 export function resolveEffectiveDecisions(json: AppRuntimeJson): AppRuntimeDecisions {
+  if (json.useMirrors === false) {
+    return { ...APP_RUNTIME_ORIGIN_DECISIONS };
+  }
   return {
     nodeDist: json.overrides?.nodeDist ?? json.decisions.nodeDist,
     uvRelease: json.overrides?.uvRelease ?? json.decisions.uvRelease,

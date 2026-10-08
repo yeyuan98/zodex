@@ -36,6 +36,7 @@ import {
   type NodeChecksumAnchor,
 } from "./verify.js";
 import { MIRROR_CANDIDATE_TABLES } from "./probe.js";
+import { APP_RUNTIME_ORIGIN_DECISIONS } from "./runtime-json.js";
 import type { AppRuntimeArtifactClass, AppRuntimeJson } from "./runtime-json.js";
 import { resolveRuntimeBinaryRelativePath } from "./layouts.js";
 import {
@@ -50,11 +51,23 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-/** 候选梯（次优顺位重试，§4.1）：override 位只含 override 候选（硬失败不回落）。 */
+/**
+ * 候选梯（次优顺位重试，§4.1）：override 位只含 override 候选（硬失败不回落）。
+ *
+ * F5（alpha.3，§4.7 MAJOR-1 下载梯次同义）：消费 effective 投影的等价内部
+ * 逻辑——`useMirrors === false` → 梯次 = **origin-only**（仅 origin 候选；无
+ * 镜像主选、无镜像次选——同 override 槽位形制），且 `isOverrideSlot = false`：
+ * OFF 期间 overrides 被压制（记住但不删，ON 恢复即生效），压制期间 override
+ * 源硬失败规则**不武装**（§4.7 (iv) 的前提是 override 被咨询）。副作用 =
+ * origin 即梯次末位候选，安装编排的末位豁免速度下限旗标（MINOR-5c）落其上。
+ */
 export function buildCandidateLadder(
   artifactClass: AppRuntimeArtifactClass,
   json: AppRuntimeJson,
 ): { readonly candidates: readonly string[]; readonly isOverrideSlot: boolean } {
+  if (json.useMirrors === false) {
+    return { candidates: [APP_RUNTIME_ORIGIN_DECISIONS[artifactClass]], isOverrideSlot: false };
+  }
   const override = json.overrides?.[artifactClass];
   if (override !== undefined) {
     return { candidates: [override], isOverrideSlot: true };
