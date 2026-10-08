@@ -159,7 +159,21 @@ export function resolveAppRuntimeBinDir(
 interface AppRuntimeJsonShape {
   readonly decisions?: Record<string, unknown>;
   readonly overrides?: Record<string, unknown>;
+  readonly useMirrors?: unknown;
 }
+
+/**
+ * D1（alpha.3，§2.5/§4.7：OFF = 用官方）三个填空类的 origin id。adapters 不
+ * import services，故此处**刻意**按 services `runtime-json.ts` 的
+ * APP_RUNTIME_ORIGIN_DECISIONS 填空类子集本地镜像一份；origin id 即
+ * shared `RUNTIME_MIRROR_ENV_VALUES` 取值域内的键，经同一投影表得到官方 URL，
+ * 保证两腿行为同义（§2.5「adapters/Bash 双腿同义」）。
+ */
+const APP_RUNTIME_ORIGIN_FILL_IDS: Readonly<AppRuntimeMirrorDecision> = {
+  npmRegistry: "registry.npmjs.org",
+  pypiIndex: "pypi.org",
+  pbsMirror: "github.com",
+};
 
 function readEffectiveMirrorDecisionIds(
   root: string,
@@ -182,6 +196,14 @@ function readEffectiveMirrorDecisionIds(
     return { decision: {}, filePresent: true, parseFailed: true };
   }
   const shape = parsed as AppRuntimeJsonShape;
+  // D1（alpha.3，§2.5/§4.7）：useMirrors === false（显式 OFF；缺省/非布尔 =
+  // true 现行为，与 services 读端容错同义）→ 三个填空键无视 decisions/
+  // overrides 一律投影为 origin id——「不用镜像」=「用官方」而非「不填」。
+  // 投影落在 id 层，随后仍经 shared 取值表转官方 URL（与服务端 resolveEffectiveDecisions
+  // 的 OFF 投影同语义、双腿行为一致）。
+  if (shape.useMirrors === false) {
+    return { decision: { ...APP_RUNTIME_ORIGIN_FILL_IDS }, filePresent: true, parseFailed: false };
+  }
   // effective decision = override ?? probed（§4.7），只投影三个填空键。
   const project = (artifactClass: "npmRegistry" | "pypiIndex" | "pbsMirror") => {
     const override = shape.overrides?.[artifactClass];
