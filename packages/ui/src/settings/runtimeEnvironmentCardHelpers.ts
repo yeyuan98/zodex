@@ -88,6 +88,10 @@ export function makeRuntimeCardStoreService(service: ILocalRuntimeService) {
         available: { node: [] as const, uv: [] as const },
         lastVerify: { node: null, uv: null },
         probeRanking: buildProbeRanking(snapshot.runtimeJson?.measurements),
+        // F5（§4.7 useMirrors schema）：全局「使用镜像」开关的状态源——从服务
+        // runtimeJson.useMirrors 投影；仅显式 false 为 OFF，缺省/非布尔 = true
+        // （与服务侧 useMirrors === false 的 OFF 判定同义）。纯投影，开关本体 W-B。
+        useMirrors: snapshot.runtimeJson?.useMirrors !== false,
       };
     },
     setMirrorOverride: async (artifactClass: RuntimeArtifactClass, candidate: string | null) => {

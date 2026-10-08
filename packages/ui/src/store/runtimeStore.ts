@@ -34,6 +34,8 @@ export interface RuntimeStatusSnapshot {
   readonly available: { readonly node: readonly string[]; readonly uv: readonly string[] };
   readonly lastVerify: { readonly node: string | null; readonly uv: string | null };
   readonly probeRanking: Partial<Record<RuntimeArtifactClass, readonly RuntimeMirrorRankingRow[]>>;
+  /** F5（§4.7）：全局「使用镜像」开关投影（服务 runtimeJson.useMirrors；缺省 true）。 */
+  readonly useMirrors?: boolean;
 }
 
 /** 安装/删除流的进度事件（经 store 事件面向卡内进度呈现）。 */
@@ -94,9 +96,10 @@ export const useRuntimeStore = create<RuntimeCardState>()((set, get) => ({
       logger.warn("[runtimeStore] setMirrorOverride without service seam");
       return;
     }
+    // F4（§4.7）：error 只在新动作开始时清（install start 同形制），成功路径不清。
+    set({ error: null });
     try {
       await service.setMirrorOverride(artifactClass, candidate);
-      set({ error: null });
     } catch (error) {
       set({ error: String(error) });
       throw error;
@@ -110,9 +113,10 @@ export const useRuntimeStore = create<RuntimeCardState>()((set, get) => ({
       logger.warn("[runtimeStore] clearMirrorOverride without service seam");
       return;
     }
+    // F4（§4.7）：同上——新动作开始时才清 error。
+    set({ error: null });
     try {
       await service.setMirrorOverride(artifactClass, null);
-      set({ error: null });
     } catch (error) {
       set({ error: String(error) });
       throw error;
@@ -127,7 +131,9 @@ export const useRuntimeStore = create<RuntimeCardState>()((set, get) => ({
     }
     try {
       const status = await service.getRuntimeStatus();
-      set({ status, error: null });
+      // F4（§4.7 错误呈现契约）：成功刷新只写快照、保留既有 error——错误常驻
+      // 至下一动作开始（新动作 start 才清），不得让失败错误只存活一个异步 tick。
+      set({ status });
     } catch (error) {
       // 状态读取失败不清空已有快照（陈旧好过空白），只记错误供卡内呈现。
       set({ error: String(error) });
@@ -154,10 +160,15 @@ export const useRuntimeStore = create<RuntimeCardState>()((set, get) => ({
         progress: appendProgress(state.progress, { kind, phase: "done", atMs: Date.now() }),
       }));
     } catch (error) {
+      // F4/MINOR-14（§4.7 选定机制 = rethrow）：失败记账（progress/error）后必须
+      // rethrow——与 setMirrorOverride/removeRuntime 同形制；catch 吞掉会使卡侧
+      // .catch 成死代码（成败同日志 "install done" 的根因）。finally 的
+      // refreshStatus 照常执行，且其成功路径不再擦掉此处 error（见上 F4）。
       set((state) => ({
         progress: appendProgress(state.progress, { kind, phase: "failed", atMs: Date.now() }),
         error: String(error),
       }));
+      throw error;
     } finally {
       set({ installing: null });
       await get().refreshStatus();
@@ -170,9 +181,10 @@ export const useRuntimeStore = create<RuntimeCardState>()((set, get) => ({
       logger.warn("[runtimeStore] removeRuntime without service seam");
       return;
     }
+    // F4（§4.7）：同 setMirrorOverride——新动作开始时才清 error。
+    set({ error: null });
     try {
       await service.removeRuntime(kind);
-      set({ error: null });
     } catch (error) {
       set({ error: String(error) });
       throw error;
