@@ -1,5 +1,109 @@
 # Changelog
 
+## [3.16.0-alpha.3](https://github.com/yeyuan98/zodex/compare/v3.16.0-alpha.2...v3.16.0-alpha.3) (2026-10-08)
+
+### Features
+
+* **adapters,services:** D1 OFF 官方源填空双腿（P7a） ([5fe2635](https://github.com/yeyuan98/zodex/commit/5fe2635cb9171814443138d09d5c5472905f888b))
+  * adapters L3 腿：独立解析器补 OFF 分支——useMirrors === false（缺省/非布尔 = true）时三个填空键投影为 origin id（registry.npmjs.org/pypi.org/github.com），经 shared 取值表转官方 URL，不 import services
+  * services Bash 腿：OFF 已由 resolveEffectiveDecisions 投影承担（P4a NIT-8），本次仅补 D1/§2.5 澄清注释，行为不变
+  * 语义对齐 specs/agent-runtimes.md §2.5/§4.7：「不用镜像」=「用官方」而非「不填」，adapters/Bash 双腿行为同义
+
+* **services,ui:** useMirrors 写入链路（port setter + store action，W-B1） ([831d7e0](https://github.com/yeyuan98/zodex/commit/831d7e065dc8440b6132d71faaee96695d75f1b1))
+  * port.ts：ILocalRuntimeService 增 setUseMirrors（§4.7 F5 全局镜像开关唯一持久状态；可选方法——node.ts RPC 委托接线归 W-B2，强制必选先红非白名单文件）
+  * service.ts：字段级读改写（sibling 原样保留，writeAppRuntimeJson 原子落盘）；缺席/损坏 runtime.json 建最小合法载体，不触发网络探测（翻转即时）
+  * service.ts P6 互斥裁定：不占 operation 槽位（读改写全程同步）；probeMirrors 在飞时定向拒绝（探测合并以起点旧快照落盘会静默丢翻转）；install 放行（finalize 重读 fresh json，MINOR-4）
+  * runtimeStore.ts：setUseMirrors 动作——F4 契约（新动作开始清 error、失败记账并 rethrow），成功后 refreshStatus；seam 方法可选（helpers 适配接线归 W-B2）
+  * 新测试 ×2：services（sibling 保留/缺席载体/损坏载体/快照投影/探测互斥 ×5）+ ui（快乐路径/失败 rethrow/未接线 no-op ×3）
+
+* **services:** F1 下载失速看门狗（闲置/速度下限，P1） ([bf3e5c0](https://github.com/yeyuan98/zodex/commit/bf3e5c0b67b9f5a5ac783eb51cf273976496fc15))
+  * 闲置看门狗 DOWNLOAD_STALL_IDLE_MS=8s：首 chunk 后起表、连续无新 chunk 即 abort；首 chunk 前 TTFB 慢不误杀（MINOR-5b，由 10min 总超时管，绿钉维持）
+  * 速度下限：首 chunk 起 15s 宽限（TCP 慢启动不罚，MINOR-5a）后，10s 滑动窗口平均速度 < 256KB/s → abort；窗口积分与评估时机（新 chunk 到达 + 定时器触发）按 §4.7 A 项钉死，参数固定有名常量不做配置（D2）
+  * chunk 时间戳在流 yield 处取（pre-sink-write，MINOR-15）：磁盘 drain 背压不算网络闲置、不拖慢窗口速度
+  * 失速 abort 经既有 AbortController：错误文案区分 idle/speed 并携带累计字节/耗时/窗口速度（§4.7 观测，install 侧 warn 聚合归后续 phase）
+  * 失速拒绝不等 fs 关闭链：destroy 后台收 fd（调用方 rm 竞态由 libuv FILE_SHARE_DELETE 覆盖），成功与其余失败路径收尾语义与 HEAD 一致
+  * 返回 promise 预挂 no-op 拒绝 continuation：abort 触发的拒绝早于调用方挂接观察者时不误报 unhandledRejection
+
+* **services:** F2 探测类间并行 + 解析顺序回填（P2） ([dd78b1c](https://github.com/yeyuan98/zodex/commit/dd78b1c66b0776bf1b6adecd98fa7d71d6a16c8c))
+  * install.ts runProbeRound 与 service.ts probeMirrors 两处编排位类间 Promise.allSettled 并行：探测轮 wall = max(类) ≈ ≤5s（原类间串行上限 25s、§2o 取证实测 16.65s）；probe.ts 类内并行不动，S1 技能 curl 腿维持串行（双实现差异注记）
+  * 并行化后失败语义不变：仍按 slots 顺序抛第一个 all-dead 类（与原串行首失败即抛同形；F6 填充类降级归后续 phase）
+  * probe round: 汇总行按候选表类序确定性输出（§9 (C) rig grep 锚点），并行完成顺序不影响日志/measurements 顺序
+  * resolveLatestNodeVersion 新增 preferredNodeDistCandidate 选项（§4.2 解析顺序回填）：探测判定 nodeDist 有效决策非 origin 时 index.json 先咨询 npmmirror、origin 降兜底，消除 CN 挂起 ~20s 税（§2o 代码推导值）；install 编排传入 override ?? probed 决策，uv 恒 api.github.com 不变；lifecycle.ts 调用点签名兼容不改
+
+* **services:** F3 锚点前置 + digest 每尝试一次 + 末位候选豁免（P3） ([52148a7](https://github.com/yeyuan98/zodex/commit/52148a77b46ac06948b3dc73fe2ebdbd8f5b67b9))
+  * F3 顺序反转（§4.2）：downloadAndVerifyCandidate 先取校验值再下载 tarball——锚点不可达 = 候选失败且不发起下载（§2o path-6：28MB 下载被锚点 20s 取败丢弃）
+  * F3 双锚预取：install 在 noop 早退后预取 nodejs.org/npmmirror 两份 SHASUMS（per-anchor 缓存、候选间复用；跨源不变量逐字保留，单锚败 = 候选跳过下载、tuna 双锚败 = §4.7 typed 中止）
+  * F3 uv digest 每安装尝试一次：api.github.com 元数据梯次前取一次、候选间复用，不可达 = typed 快速失败不降级无校验
+  * F1 末位候选豁免速度下限（§4.7 MINOR-5c）：梯次位置旗标 exemptSpeedFloor 贯通 install→download-verify→upstream 看门狗，仅豁免速度下限（闲置看门狗与 10min 总上限仍管）；独立调用缺省不豁免
+  * 新增 localRuntimeStallExemption.test.ts：非末位涓流速度下限 abort / 末位同形涓流允许完成 / 末位停滞仍被闲置看门狗 abort；涓流总量压在 fs WriteStream 16KB highWaterMark 之下排除 drain 背压在全量套件并行下的假时钟脆弱性
+
+* **services:** F5 useMirrors 决策层（schema/投影/origin-only 梯次/overrides 压制，P4a） ([d68a892](https://github.com/yeyuan98/zodex/commit/d68a8923b79acc169eacac0fe7df63cb77240182))
+  * AppRuntimeJson 增可选 useMirrors?: boolean（§4.7 F5 additive；缺省/非布尔 = true 现行为，读端容错不猜）
+  * resolveEffectiveDecisions 投影唯一（§4.7/D1）：OFF → 全类 effective = origin id，无视 decisions/overrides；ON → override ?? probed 照常
+  * 新增 APP_RUNTIME_ORIGIN_DECISIONS origin id 表（与 probe.ts isOrigin 候选同源），投影与梯次共用防双表漂移
+  * buildCandidateLadder OFF 分支（§4.7 MAJOR-1 梯次同义）：origin-only 候选 + isOverrideSlot=false——overrides 压制但不删（ON 恢复即生效），压制期间 override 源硬失败规则不武装
+  * 新测试 localRuntimeUseMirrorsOffExemption.test.ts（§3 P4a SANCTION）：F1×F5 互作——OFF origin-only ⇒ origin 即末位 ⇒ 豁免速度下限武装，慢涓流完成而非下限处死 + 无豁免对照腿
+  * 披露：Bash 腿 OFF（runtimeCommandEnvAppRuntime）随投影提前转绿（计划 §10 NIT-8 预期）
+
+* **services:** F5 编排腿（OFF 跳探测/展示腿/MAJOR-5 合并保留，P4b） ([6e6a31f](https://github.com/yeyuan98/zodex/commit/6e6a31fc897265a2b06b2d921656cefed0878ed7))
+  * install 探测轮 OFF（useMirrors === false）整体跳过：决策无意义、origin-only 梯次照常（§4.7 探测跳过），runtime.json 原样返回不重写
+  * service.probeMirrors 拆公共展示腿/内部持久腿（probeMirrorsInternal + persistDecisions）：OFF 下只更新 measurements/快照/日志，不写 decisions/overrides 且不拨快 probedAt（§4.7 MINOR-6）
+  * ensureRuntimeJsonForOverride 保持持久语义走 persist 变体（B 边缘：runtime.json 缺席 + 设 override 时允许探测建立 decisions 载体，OFF 投影下惰性）
+  * mergeRuntimeJsonWithProbe（install）与 probeMirrors 合并字面量均保留 useMirrors 字段（MAJOR-5：逐字段构造丢字段 = OFF 静默翻回 true）；mergeRuntimeJsonAtFinalize 为 spread 基底结构性地保留，核实无需改
+
+* **services:** F6 填充类降级（all-dead 键删/defaults 不复活，P5） ([32d67f7](https://github.com/yeyuan98/zodex/commit/32d67f7d020c84ec7de6cd227fdb5161960ec528))
+  * AppRuntimeDecisions 可选化（Partial，MINOR-13 类型涟漪）：runtime-json.ts 新增 FILLER_RUNTIME_ARTIFACT_CLASSES 类域分域（§4.1 规则 4），APP_RUNTIME_ORIGIN_DECISIONS 显式全键 Record
+  * install 探测轮（runProbeRound）：填充类 all-dead = warn 一行/类 + decisions 无该类键，安装照常；安装相关类（nodeDist/uvRelease）all-dead 照旧中止（类域限定）
+  * mergeRuntimeJsonWithProbe 弃用 defaultDecisions 基底：重探槽位显式删旧值、只回填 winner——合并 defaults 不复活已删键（MINOR-13）
+  * service.probeMirrors 同形降级：填充类 all-dead = warn + 显式 delete decisions 键（OFF 展示腿同样不复活）；安装相关类照旧 loud；汇总行按类序补 all-dead 占位
+  * buildCandidateLadder：primary undefined 不进 candidates（梯次退为 ranked + 候选表兜底）；install noop candidate 回退空串保持 shared.ts 契约
+
+* **services:** F7 启动清扫 .download-* + install/probe 互斥守卫（P6） ([3e01c7f](https://github.com/yeyuan98/zodex/commit/3e01c7f6f983fc92df258dd47e676cb6b958de2c))
+  * F7（§4.6）：启动 GC 增扫 runtime 根下 `.download-*` 半写崩溃残留——mtime 超过 24h 宽限（DOWNLOAD_LEFTOVER_GC_GRACE_MS，对齐 VERSION_DIR_GC_GRACE_MS 形制）删除；宽限期内保留（不误删在飞安装暂存）；单项失败 warn 不阻断启动，CURRENT.tmp*/gc-* 孤儿清理行为不变
+  * MINOR-6（§4.7/plan §2）：LocalRuntimeServiceImpl 公共入口 install/probeMirrors 共享 in-flight 守卫（LocalRuntimeOperationInFlightError 显式拒绝第二调用方，不静默排队），消除 runtime.json 写竞态（install 快照合并 vs probe 持久化）
+  * 守卫只覆盖公共入口：install 内部探测轮（ensureRuntimeJsonState/runProbeRound）与 override 建载体（ensureRuntimeJsonForOverride→probeMirrorsInternal）均为模块级/私有路径，不经守卫，无自锁；服务级红测缺位由 W-B UI 红测门（披露）
+
+* **ui:** F4 store 错误呈现契约 + useMirrors 快照投影（P7b） ([8af75fe](https://github.com/yeyuan98/zodex/commit/8af75fe0efdff4fc7d5ac9714a230de730d6b141))
+  * refreshStatus 成功路径只写快照、保留既有 error（§4.7 F4：错误常驻至下一动作开始，不再存活一个异步 tick）
+  * installRuntime 失败记账（failed 进度 + error）后 rethrow（§4.7/MINOR-14 选定机制；finally refreshStatus 照常执行且不擦 error）
+  * setMirrorOverride/clearMirrorOverride/removeRuntime 对齐「新动作开始时才清 error」：clear 从成功路径移至动作 start（install 形制）
+  * RuntimeStatusSnapshot 增可选 useMirrors?: boolean；store 适配器从服务 runtimeJson.useMirrors 纯投影（仅显式 false 为 OFF，缺省/非布尔 = true，服务侧同义判定）；开关本体归 W-B
+  * 残余红披露：runtimeStore.test.ts:140 传 makeSpyService(SNAPSHOT)（={calls,service}）而非 spy.service，seam 无 getRuntimeStatus——该测在基线即以同源 TypeError 红（非 :130 清 error 所致），任何 store 实现不可满足；修复需 test-only 相（P0 形制，护栏 1 worker 只读测试）
+
+* **ui:** 运行时卡重构（全局镜像开关/折叠明细/Probe/错误常驻+重试，W-B2） ([59491b0](https://github.com/yeyuan98/zodex/commit/59491b0b6c2a8a0f77516e2d361ea58cd40f99b2))
+  * 卡顶常显全局「使用镜像」Switch：status.useMirrors 投影（缺省 ON），写入走 W-B1 store action，仅 probing 期间禁用
+  * 五类镜像明细（排名 + per-class Select）整体移入默认折叠面板；trigger 行 =「镜像明细」标题 + 手动 Probe 按钮
+  * store 新增 probeMirrors 动作：probing 状态迁移 + probeMirrors({force:true}) 委托 + refreshStatus 回流排名数据；失败 error 记账并 rethrow（F4 形制，P6 互斥文案常驻呈现）
+  * 双向互斥：probing 期间 node/uv 行 inert 冻结（含安装按钮）；installing 期间 Probe 禁用，服务侧 LocalRuntimeOperationInFlightError 兜底
+  * 错误段常驻（text-destructive）+ 安装失败旁「重试安装 {kind}」入口：store.lastFailedInstallKind 记账、复用同一 install action、新动作开始即清
+  * 安装生命周期日志区分 install done / install failed（首行原因），走 logger.lifecycle
+  * W-B1 偏差收口：port.setUseMirrors 翻必选 + node.ts RPC 委托 + helpers 适配器接线
+  * i18n 新增 useMirrors/useMirrorsDescription/mirrorDetails/probeAction/retryInstall（zh+en）
+  * 新测试 runtimeCardProbeAction.test.ts：probing 迁移/结果回流/错误 rethrow/重试记账/适配器委托/缺省 ON 投影
+
+
+### Bug Fixes
+
+* [ulw] 评审折叠（MINOR-1 翻转保留/MINOR-2 候选摘要/NIT-1 级别/NIT-3 稳定化） ([385a8e2](https://github.com/yeyuan98/zodex/commit/385a8e24cdebe631b42b5bff6f1132704552731d))
+  * MINOR-1：install 内部探测合并写前重读 fresh json、以其 useMirrors 为准（finalize 重读模式），探测窗口内 setUseMirrors 翻转不再被安装起点旧快照静默回退；SetUseMirrors 套件新增红→绿钉用例
+  * MINOR-2：install 梯次循环逐候选累积 `${candidate}: `${error}` 失败摘要并按梯次序 join 进最终 LocalRuntimeInstallError 文案（§4.7 各候选速度摘要）
+  * NIT-1：RuntimeEnvironmentCard 安装失败分流日志级别 info→warn（正文 rig grep 锚点不变）
+  * NIT-3：StallWatchdog TTFB 用例改自适应时钟驱动（driveClockUntilSettled，形制沿 UseMirrorsOffExemption），12 轮三文件合跑 0 失败
+
+
+### Documentation
+
+* **spec:** alpha.3 契约修订（F1-F7 + useMirrors 全链） ([0ab23be](https://github.com/yeyuan98/zodex/commit/0ab23be3e26b28f0f212b18217e1c7b3a1f8afe0))
+  * §2.5：L3/Bash 填空值经 useMirrors 投影——OFF 填官方值（D1「不用镜像」=「用官方」）
+  * §4.1：探测类间并行（app 级 TS 腿；S1 curl 腿不动注记）+ NIT-16 并发披露 + C 项汇总行确定性类序
+  * §4.1：重探触发补手动 Probe 腿 + OFF 跳过探测 + B 项边缘一句话；规则 4 补类域限定（安装相关类中止不变 / 填充类 all-dead = warn + 不填空、安装照常）
+  * §4.2：校验值先取再下载（顺序反转）+ node 双锚点预取（per-anchor 缓存、候选间复用、单锚预取失败 = 候选跳过下载）+ uv digest 每安装尝试一次（不可达 = 安装前快速失败 ≤20s）
+  * §4.6：status 卡面 = 全局「使用镜像」开关常显（默认 ON）+ 明细默认折叠 + 手动 Probe 纯展示（{httpCode} · {latencyMs}、双向互斥）；install 行补失速检测与 install done/failed 区分
+  * §4.7：useMirrors schema（additive 缺省 true）+ MAJOR-5 合并位点保留 + OFF 全链语义（投影唯一 / origin-only 梯次 MAJOR-1 / overrides 压制不删 / 探测跳过 / Probe 展示腿 MINOR-6）
+  * §4.7：F6 填充类键删语义（defaults 不得复活已删键 MINOR-13）+ F1 失速看门狗精确语义（A 项窗口度量钉死：IDLE 8s / GRACE 15s / FLOOR 256KB/s / WINDOW 10s、yield 处取时戳 MINOR-15、末位豁免）
+  * §4.7：F4 错误呈现契约（D 项：成功刷新保留 error、新动作才清、store rethrow 机制选定 MINOR-14、install failed 行 + 重试）
+  * Status 头注明 alpha.3 修订进行中（W1′ spec 先行，实现归 W-A/W-B）
+
 ## [3.16.0-alpha.2](https://github.com/yeyuan98/zodex/compare/v3.16.0-alpha.1...v3.16.0-alpha.2) (2026-10-08)
 
 ### Features
