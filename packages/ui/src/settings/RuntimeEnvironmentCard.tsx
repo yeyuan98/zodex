@@ -105,7 +105,8 @@ export function RuntimeEnvironmentCard({ service }: { service?: ILocalRuntimeSer
           // owner ③(8)/§4.6 F1：成败分流日志——store 自 P7b 起 rethrow，本 catch 为活代码；
           // 错误正文已入 store.error 常驻呈现，这里只补首行原因。
           const reason = String(error).split("\n")[0];
-          logger.lifecycle.info("[runtimeCard] install failed", { kind, reason });
+          // [ulw] NIT-1：失败分流日志级别 warn（正文 = rig grep 锚点，保持不变）。
+          logger.lifecycle.warn("[runtimeCard] install failed", { kind, reason });
         });
     },
     [installRuntime],

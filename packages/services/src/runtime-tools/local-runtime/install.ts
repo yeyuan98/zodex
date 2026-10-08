@@ -226,7 +226,15 @@ async function ensureRuntimeJsonState(
   }
   const probe = await runProbeRound(slots, existing, deps);
   const merged = mergeRuntimeJsonWithProbe(existing, probe, slots, nowMs);
-  writeAppRuntimeJson(jsonPath, merged);
+  // [ulw] MINOR-1（用户显式设置不得被内部探测合并静默回退）：探测窗口内
+  // setUseMirrors 的翻转已落盘 fresh json——合并写前重读，以 fresh 的 useMirrors
+  // 为准（finalize 重读模式同形，见 mergeRuntimeJsonAtFinalize）；fresh 缺席/
+  // 损坏时维持 merged 不主动补写（MAJOR-5 缺席语义）。
+  const freshUseMirrors = readAppRuntimeJson(jsonPath)?.useMirrors;
+  writeAppRuntimeJson(
+    jsonPath,
+    freshUseMirrors !== undefined ? { ...merged, useMirrors: freshUseMirrors } : merged,
+  );
   return merged;
 }
 
@@ -294,6 +302,11 @@ export async function installRuntime(
     uvReleaseMetadata = await fetchUvReleaseMetadata(version, fetchOptionsFor(deps));
   }
   let lastError = "no candidate attempted";
+  // [ulw] MINOR-2（§4.7 错误文案含各候选速度摘要）：逐候选累积
+  // `${candidate}: ${error}` 失败摘要（error 携带失速速度等诊断），最终错误
+  // 文案按梯次序拼接全部候选而非只留最后一条——用户可据此逐源判断并手工
+  // override（确定性：join 顺序 = 梯次顺序，不依赖完成顺序）。
+  const candidateFailures: string[] = [];
   let succeeded: { candidate: string; downloadFilePath: string } | null = null;
   for (const [candidateIndex, candidate] of ladder.candidates.entries()) {
     logger.info(undefined, `download: kind=${kind} version=${version} candidate=${candidate}`);
@@ -317,6 +330,7 @@ export async function installRuntime(
       break;
     }
     lastError = outcome.error ?? "unknown";
+    candidateFailures.push(`${candidate}: ${lastError}`);
     // 可恢复失败 = warn（§4.7 日志通道）：换次优顺位候选重试。
     logger.warn(
       undefined,
@@ -334,7 +348,7 @@ export async function installRuntime(
       throw new LocalRuntimeInstallError(`${failure.error}；底层错误：${lastError}`);
     }
     throw new LocalRuntimeInstallError(
-      `install failed: kind=${kind} version=${version}；全部候选失败；最后错误：${lastError}`,
+      `install failed: kind=${kind} version=${version}；全部候选失败；各候选摘要：${candidateFailures.join("；")}`,
     );
   }
   const artifactFileName =

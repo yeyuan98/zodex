@@ -181,6 +181,48 @@ test("W-B1 快照反映翻转：status() 的 runtimeJson.useMirrors 与 effectiv
   }
 });
 
+test("[ulw] MINOR-1 install 内部探测窗口翻转：探测合并写完成后 runtime.json 保留用户显式 useMirrors", async () => {
+  const sandbox = makeSandbox();
+  try {
+    const jsonPath = join(sandbox.root, "runtime.json");
+    writeAppRuntimeJson(jsonPath, richJson(true));
+    const gate = Promise.withResolvers<void>();
+    let probeRoundOpen = true;
+    const fetchImpl = (async () => {
+      // 门内（install 内部探测轮候选）挂起至 gate 放行并回 200；门关后
+      // （版本解析等后续腿）确定性失败——install 落定即代表探测合并写已完成。
+      if (!probeRoundOpen) throw new Error("网络不可用（探测后阶段）");
+      await gate.promise;
+      return new Response("", { status: 200 });
+    }) as typeof fetch;
+    const service = createLocalRuntimeService({
+      runtimeRootDir: sandbox.root,
+      fetchImpl,
+      logger: silentLogger(),
+      now: () => BASE_NOW,
+    });
+    const installing = service.install("node", { forceReprobe: true });
+    // macrotask 泵（形制沿上方互斥用例）：确保探测轮全部候选 fetch 已进门挂起。
+    for (let round = 0; round < 5; round += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    // 中窗翻转（P6 裁定：install 在飞时 setUseMirrors 放行）——落在探测合并写之前。
+    await service.setUseMirrors(false);
+    assert.equal(readAppRuntimeJson(jsonPath)?.useMirrors, false, "前置：翻转先于探测合并写落盘");
+    probeRoundOpen = false;
+    gate.resolve();
+    // install 后续腿（版本解析）fetch 确定性失败 → 拒绝即证明已越过合并写位点。
+    await assert.rejects(installing, /版本解析失败/u);
+    assert.equal(
+      readAppRuntimeJson(jsonPath)?.useMirrors,
+      false,
+      "[ulw] MINOR-1：安装起点旧快照的探测合并不得静默回退用户显式翻转的 useMirrors",
+    );
+  } finally {
+    sandbox.dispose();
+  }
+});
+
 test("W-B1 P6 互斥：probeMirrors 在飞时翻转被定向拒绝（探测合并以起点旧快照落盘会丢翻转）", async () => {
   const sandbox = makeSandbox();
   try {

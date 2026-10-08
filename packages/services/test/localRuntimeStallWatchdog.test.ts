@@ -176,6 +176,29 @@ test("F1 速度下限：15s 宽限后慢涓流（2KB/s ≪ 256KB/s）→ abort�
   }
 });
 
+/** [ulw] NIT-3（满载 flake 稳定化）：自适应驱动假想时钟直至下载落定，替代固定预算轮询（形制沿 UseMirrorsOffExemption）。 */
+async function driveClockUntilSettled(
+  t: test.MockTestContext,
+  downloading: Promise<{ readonly bytes: number }>,
+): Promise<{ readonly bytes: number } | null> {
+  for (let index = 0; index < 1200; index += 1) {
+    t.mock.timers.tick(50);
+    await flushLoop(2);
+    const settled = await Promise.race([
+      downloading.then(
+        (value) => value,
+        () => null,
+      ),
+      (async () => {
+        await flushLoop(1);
+        return null;
+      })(),
+    ]);
+    if (settled !== null) return settled;
+  }
+  return null;
+}
+
 test("F1 首 chunk 前不起表：10s 慢 TTFB 后送达 → 下载照常完成（今绿钉 guard：TTFB 由总超时管）", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
   const sandbox = makeSandbox();
@@ -197,18 +220,7 @@ test("F1 首 chunk 前不起表：10s 慢 TTFB 后送达 → 下载照常完成�
         fetchImpl,
       },
     );
-    let result: Awaited<typeof outcome> | null = null;
-    for (let index = 0; index < 200 && result === null; index += 1) {
-      t.mock.timers.tick(100);
-      await flushLoop(2);
-      result = await Promise.race([
-        outcome.then((value) => value),
-        (async () => {
-          await flushLoop(1);
-          return null;
-        })(),
-      ]);
-    }
+    const result = await driveClockUntilSettled(t, outcome);
     assert.ok(result !== null, "20s 假想时钟内慢 TTFB 下载必须完成（不 abort）");
     assert.equal(result.bytes, 2048, "慢 TTFB 但正常送达的下载不得被误杀");
   } finally {
