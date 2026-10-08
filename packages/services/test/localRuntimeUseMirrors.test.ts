@@ -193,13 +193,15 @@ test("F5 手动 Probe 展示腿（OFF）：不写 decisions/overrides 且 useMir
   const sandbox = makeSandbox();
   try {
     mkdirSync(join(sandbox.root, "node"), { recursive: true });
-    writeAppRuntimeJson(
-      join(sandbox.root, "runtime.json"),
-      baseJson({
-        useMirrors: false,
-        overrides: { npmRegistry: "registry.npmjs.org" },
-      }),
-    );
+    // 计划 §10 MAJOR-2：本例本地覆写哨兵 nodeDist=tuna（baseJson 默认 npmmirror 供 :107 绿钉依赖），否则「不写 decisions」永不可判。
+    const initialJson = baseJson({
+      useMirrors: false,
+      overrides: { npmRegistry: "registry.npmjs.org" },
+    });
+    writeAppRuntimeJson(join(sandbox.root, "runtime.json"), {
+      ...initialJson,
+      decisions: { ...initialJson.decisions, nodeDist: "tuna" },
+    });
     const log: string[] = [];
     const fetchImpl = (async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;

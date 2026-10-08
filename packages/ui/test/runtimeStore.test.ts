@@ -151,7 +151,11 @@ test("F4 错误常驻：refreshStatus 成功路径保留既有 error（红：今
 test("F4 错误常驻：install 失败 → error 存活 finally 的 refreshStatus（红：今日被成功刷新擦掉 = §2o 主诉）", async () => {
   resetStore();
   setRuntimeStoreService(makeFailingInstallService(SNAPSHOT));
-  await useRuntimeStore.getState().installRuntime("node");
+  // 计划 §10 MAJOR-1：本例断言 store 的 error 状态而非拒绝，吞掉 rethrow（rethrow 契约由下方姊妹测钉住）。
+  await useRuntimeStore
+    .getState()
+    .installRuntime("node")
+    .catch(() => undefined);
   assert.notEqual(
     useRuntimeStore.getState().error,
     null,
