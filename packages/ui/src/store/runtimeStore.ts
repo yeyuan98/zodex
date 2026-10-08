@@ -51,6 +51,12 @@ export interface RuntimeStoreService {
   setMirrorOverride(artifactClass: RuntimeArtifactClass, candidate: string | null): Promise<void>;
   installRuntime(kind: RuntimeKind): Promise<void>;
   removeRuntime(kind: RuntimeKind): Promise<void>;
+  /**
+   * F5/W-B1（§4.7）：「使用镜像」Switch 写 useMirrors。可选——helpers 适配器
+   * （makeRuntimeCardStoreService → ILocalRuntimeService.setUseMirrors）接线归
+   * W-B2 卡片腿；未接线时 store 动作 warn + no-op（与无 service 同形制）。
+   */
+  setUseMirrors?(useMirrors: boolean): Promise<void>;
 }
 
 let runtimeStoreService: RuntimeStoreService | null = null;
@@ -71,6 +77,8 @@ interface RuntimeCardState {
   /** 镜像切换：写 overrides（override 优先于探测决策，§4.7）。 */
   setMirrorOverride(artifactClass: RuntimeArtifactClass, candidate: string): Promise<void>;
   clearMirrorOverride(artifactClass: RuntimeArtifactClass): Promise<void>;
+  /** F5/W-B1（§4.7）：「使用镜像」Switch 写 useMirrors（全局开关唯一持久状态）。 */
+  setUseMirrors(useMirrors: boolean): Promise<void>;
   refreshStatus(): Promise<void>;
   installRuntime(kind: RuntimeKind): Promise<void>;
   removeRuntime(kind: RuntimeKind): Promise<void>;
@@ -117,6 +125,23 @@ export const useRuntimeStore = create<RuntimeCardState>()((set, get) => ({
     set({ error: null });
     try {
       await service.setMirrorOverride(artifactClass, null);
+    } catch (error) {
+      set({ error: String(error) });
+      throw error;
+    }
+    await get().refreshStatus();
+  },
+
+  setUseMirrors: async (useMirrors) => {
+    const service = runtimeStoreService;
+    if (!service?.setUseMirrors) {
+      logger.warn("[runtimeStore] setUseMirrors without service seam");
+      return;
+    }
+    // F4（§4.7）：同 setMirrorOverride——新动作开始时才清 error，失败 rethrow。
+    set({ error: null });
+    try {
+      await service.setUseMirrors(useMirrors);
     } catch (error) {
       set({ error: String(error) });
       throw error;

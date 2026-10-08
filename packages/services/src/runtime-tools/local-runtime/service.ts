@@ -101,6 +101,13 @@ export interface LocalRuntimeService {
   setMirrorOverride(artifactClass: AppRuntimeArtifactClass, candidateId: string): Promise<void>;
   clearMirrorOverride(artifactClass: AppRuntimeArtifactClass): Promise<void>;
   /**
+   * W-B1（§4.6/§4.7 F5）：卡内「使用镜像」Switch 的写入腿——useMirrors 是
+   * 全局镜像开关的唯一持久状态。字段级读改写（sibling 原样保留）；runtime.json
+   * 缺席/损坏（读端容错 null）时建最小合法载体，**不触发任何网络探测**（开关
+   * 翻转必须即时；ON 后探测在下次 install 自然发生）。
+   */
+  setUseMirrors(useMirrors: boolean): Promise<void>;
+  /**
    * 显式 refresh 探测（只作用于无 override 位）并持久化，返回排名快照。
    * F5（§4.7 MINOR-6）：useMirrors === false（OFF）时 = 纯展示腿——只更新
    * measurements/快照与日志，不写 decisions/overrides（开关状态原样保留）。
@@ -258,6 +265,52 @@ export class LocalRuntimeServiceImpl implements LocalRuntimeService {
       ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
     });
     this.logger.info(undefined, `mirror override cleared: ${artifactClass}（回落探测决策）`);
+  }
+
+  /**
+   * W-B1（§4.6/§4.7 F5）useMirrors 写入腿：字段级读改写（原子写经
+   * writeAppRuntimeJson tmp+rename；decisions/overrides/measurements/pinned/
+   * probedAt/ttlDays 全部 sibling 原样保留——MAJOR-5 逐字段构造教训的对偶面）。
+   *
+   * P6 互斥裁定：**不占 operation 槽位**——开关翻转是配置写而非 install/probe
+   * 操作，且读改写全程同步（无 await 缝，事件环内原子），占位也无窗口可言。
+   * 但**对 probeMirrors 在飞时定向拒绝**：probeMirrorsInternal 的最终合并以探测
+   * 起点的旧快照构造（保留的是旧 useMirrors，MAJOR-5），翻转落在探测窗口内会被
+   * 落盘覆盖（静默丢翻转，违背「OFF 下测了也不改变设置」）——按 MINOR-6 形制
+   * 显式抛 LocalRuntimeOperationInFlightError（不静默排队；探测墙钟 ≤5s，F2）。
+   * install 在飞时放行：finalize 合并重读 fresh json（MINOR-4）只并
+   * `{pinned}`，安装中翻转被保留（spec：Switch 常显，仅 Probe↔install 双向
+   * 互斥）。残留披露：install 内部探测轮（ensureRuntimeJsonState）同样以安装
+   * 起点快照为合并基底，该 ≤5s 窗口内的翻转可能被覆盖——修复需改 install.ts
+   * 合并基底（非本相白名单），按既有 MINOR-4 残留窗口同级披露。
+   */
+  async setUseMirrors(useMirrors: boolean): Promise<void> {
+    if (this.operationInFlight === "probeMirrors") {
+      throw new LocalRuntimeOperationInFlightError(
+        `local-runtime probeMirrors 进行中，setUseMirrors 被互斥拒绝（探测合并以起点旧快照落盘会丢本次翻转；MINOR-6：不静默排队）`,
+      );
+    }
+    const jsonPath = this.resolveJsonPath();
+    const existing = readAppRuntimeJson(jsonPath);
+    const nowMs = (this.deps.now ?? Date.now)();
+    // 缺席/损坏（读端容错 null，不猜）→ 建最小合法载体：decisions 全键缺席自 P5
+    // 起合法（填空不填 + 梯次回落候选表）；不跑探测轮（翻转即时；ON 后下次
+    // install 自然探测）。损坏文件的原字段按 treat-as-absent 丢弃。
+    const json: AppRuntimeJson = existing
+      ? { ...existing, useMirrors }
+      : {
+          probedAt: new Date(nowMs).toISOString(),
+          ttlDays: 7,
+          decisions: {},
+          measurements: [],
+          pinned: { node: "", uv: "" },
+          useMirrors,
+        };
+    writeAppRuntimeJson(jsonPath, json);
+    this.logger.info(
+      undefined,
+      `useMirrors set: ${useMirrors}（全局镜像开关；OFF = 全类 origin，下载/填空/显示同投影）`,
+    );
   }
 
   async probeMirrors(

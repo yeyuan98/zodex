@@ -45,6 +45,13 @@ export interface ILocalRuntimeService {
   listMirrorCandidates(): Promise<
     Readonly<Record<LocalRuntimeArtifactClassId, readonly LocalRuntimeMirrorCandidateInfo[]>>
   >;
+  /**
+   * 卡内「使用镜像」Switch 写 useMirrors（§4.7 F5：全局镜像开关的唯一持久
+   * 状态）。W-B1 声明为可选：node.ts 的 RPC 委托字面量与 helpers 适配器
+   * （均非本相白名单）尚未接线，接线归 W-B2 卡片腿；强制必选会先红非白名单
+   * 文件的 typecheck。
+   */
+  setUseMirrors?(useMirrors: boolean): Promise<void>;
 }
 
 export const ILocalRuntimeService = createServiceDescriptor<ILocalRuntimeService>(
