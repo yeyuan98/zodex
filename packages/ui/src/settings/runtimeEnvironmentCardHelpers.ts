@@ -40,6 +40,25 @@ export interface MirrorSelectionState {
   readonly overrides: Partial<Record<RuntimeArtifactClass, string>>;
 }
 
+/** listMirrorCandidates 的卡内状态形状（五类工件 → 候选表）。 */
+export type MirrorCandidateMap = Readonly<
+  Record<string, readonly { id: string; isOrigin: boolean }[]>
+>;
+
+/** MirrorSelectionState 的空态初始值（卡内 useState 种子）。 */
+export const EMPTY_MIRROR_SELECTION: MirrorSelectionState = { effective: {}, overrides: {} };
+
+/** owner ③(2)：服务快照 → 卡内镜像选择状态（effective + overrides 投影）。 */
+export function extractMirrorSelection(snapshot: {
+  readonly effectiveDecisions?: unknown;
+  readonly runtimeJson?: { readonly overrides?: unknown } | null;
+}): MirrorSelectionState {
+  return {
+    effective: (snapshot.effectiveDecisions ?? {}) as MirrorSelectionState["effective"],
+    overrides: (snapshot.runtimeJson?.overrides ?? {}) as MirrorSelectionState["overrides"],
+  };
+}
+
 export function buildProbeRanking(
   measurements:
     | readonly {
@@ -88,6 +107,10 @@ export function makeRuntimeCardStoreService(service: ILocalRuntimeService) {
         available: { node: [] as const, uv: [] as const },
         lastVerify: { node: null, uv: null },
         probeRanking: buildProbeRanking(snapshot.runtimeJson?.measurements),
+        // F5（§4.7 useMirrors schema）：全局「使用镜像」开关的状态源——从服务
+        // runtimeJson.useMirrors 投影；仅显式 false 为 OFF，缺省/非布尔 = true
+        // （与服务侧 useMirrors === false 的 OFF 判定同义）。纯投影，开关本体 W-B。
+        useMirrors: snapshot.runtimeJson?.useMirrors !== false,
       };
     },
     setMirrorOverride: async (artifactClass: RuntimeArtifactClass, candidate: string | null) => {
@@ -96,6 +119,16 @@ export function makeRuntimeCardStoreService(service: ILocalRuntimeService) {
         return;
       }
       await service.setMirrorOverride(artifactClass, candidate);
+    },
+    // W-B1 收口（§4.7 F5）：Switch 写入腿接线——port 的 setUseMirrors 已翻必选。
+    setUseMirrors: async (useMirrors: boolean) => {
+      await service.setUseMirrors(useMirrors);
+    },
+    // owner ③(4)/§4.6 F5：手动 Probe 委托（force 由 store 动作传入）——结果快照
+    // 不在此消费，经 refreshStatus → status().runtimeJson.measurements →
+    // buildProbeRanking 流入排名数据（纯展示腿，§4.7 MINOR-6）。
+    probeMirrors: async (options?: { readonly force?: boolean }) => {
+      await service.probeMirrors(options);
     },
     installRuntime: async (kind: RuntimeKind) => {
       await service.install(kind);

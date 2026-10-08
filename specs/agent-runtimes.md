@@ -16,6 +16,14 @@ A1（自有 release 资产）**整体废除**（owner 裁定 2026-10-08，`../ZC
 §2.0——运行时工件不经我们的发布渠道再分发，下载器直采上游）。本修订收编其语义边界
 （§2.5 L3、§4.2、§4.6、§9 残留表）并落定实现契约（§2.5 L3 实现契约、§4.7）。
 红测清单见 §8（alpha.2 批）。
+**alpha.3 修订进行中（2026-10-08，W1′ spec 先行；权威计划 =
+`../ZCode-runtime-alpha3-plan.md` v1.3）**：§2.5/§4.1/§4.2/§4.6/§4.7 按 F1-F7
+增补——F1 下载失速看门狗 / F2 探测类间并行 + 解析顺序回填 / F3 校验锚点前置
+（双锚预取 + uv digest 每尝试一次）/ F4 错误常驻 + install failed 行 / F5
+useMirrors 全链（投影/梯次/overrides 压制/探测跳过/手动 Probe 展示腿）/ F6
+填充类失败降级 / F7 `.download-*` 启动清扫。**实现未落地**（W-A services+
+adapters / W-B UI）；alpha.3 红测先行（services `localRuntime*.test.ts` 新批、
+ui `runtimeStore.test.ts` 扩展、adapters `appRuntimePrepend.test.ts` 扩展）。
 
 Owners:
 
@@ -186,7 +194,10 @@ L5 [C1/PR1] pathPrepend 目录前插（~ 展开后绝对路径）
     **禁止**回退扫描最高 `v<ver>` 目录。
   - **镜像缺省填空**：存在性检查在 **L2 输出 env** 上**大小写不敏感**进行；键已存在不覆盖；
     `config.env` 胜出由 L4 spread 顺序结构性达成；**填空值 = effective decision（§4.7
-    override ?? probed）**。
+    override ?? probed）再经 `useMirrors` 投影（§4.7）——OFF 时全类 effective = origin，
+    填 origin 官方值（registry.npmjs.org / pypi.org / origin PBS）**。D1 裁定：「不用
+    镜像」=「用官方」而非「不填」；adapters 独立解析器（L3 腿）与 services Bash 腿
+    （`buildRuntimeProcessEnvPatch` 的填空段）**各自加 useMirrors 分支、语义同义**。
 
 ## 3. C2 — `runtime_unavailable` producer（issue #27 的 UX 闭环，PR1）
 
@@ -229,6 +240,15 @@ host log relay 生产落盘），卡片/renderer 侧行 → `logger.lifecycle`�
 技能/下载器**内置 known-good tag**。探针只测传输延迟，不代表目标版本工件存在（tuna 陈旧行
 「命中须校验版本存在」语义保留——版本不存在 = 该候选按失败处理）。
 
+**类间并行（alpha.3，F2；仅 app 级 TS 腿）**：五类工件探测**类间并行**
+（`Promise.allSettled`；类内并行维持）——探测轮 wall = max(类) ≈ ≤5s（原串行上限
+25s）。install 的探测编排与 service 的 `probeMirrors`（手动 Probe 腿）**两处同形**
+（或抽共享实现）。**S1 技能 curl 腿不动**——双实现差异注记（ws 级仍串行探测，行为
+等价、仅 wall 不同）。并发披露（NIT-16）：类间并行使探测峰值并发 ~3 → ~13 个小
+Range GET（请求小、排名偏置不变）。**并行化后每轮探测一行汇总日志保持确定性类序
+输出**（`probe round: nodeDist=… uvRelease=… pypiIndex=… npmRegistry=…
+pbsMirror=…`，按候选表类序——rig checklist 的 grep 锚点，C 项）。
+
 **择优规则（确定性）**：
 
 1. origin 存活时，mirror/proxy 仅当 `latency(mirror) ≤ 0.6 × latency(origin)` 才胜出；
@@ -236,7 +256,10 @@ host log relay 生产落盘），卡片/renderer 侧行 → `logger.lifecycle`�
 2. origin 失败/超时 → 存活候选中最快者胜。
 3. 平局（±10%）→ 候选表顺序靠前者胜。
 4. 全灭 → 明确报错并给出手工 `--base <url>` 覆盖位（技能参数 / runtime.json 手改字段），
-   不静默选不可用源。
+   不静默选不可用源。**类域限定（alpha.3，F6）**：「全灭→报错」仅适用于**安装相关类**
+   （nodeDist/uvRelease——all-dead = 中止安装，语义不变）；**填充类**
+   （pypiIndex/npmRegistry/pbsMirror）all-dead = warn + **该类不填空**（decisions
+   键删，§4.7 F6 语义），**安装照常**（不连累安装）。
 
 **固化与复用**：结果写 `<rt>/runtime.json`（两级各自一份）：
 `{probedAt, ttlDays: 7, decisions: {nodeDist, uvRelease, pypiIndex, npmRegistry, pbsMirror},
@@ -245,7 +268,12 @@ measurements: [...]}`。**app 级 runtime.json = 本 schema 的扩展**（见 §
 披露**：S1 ws 级用 `versions.node/uv` + `manual` 决策旗标，app 级用 §4.7 扩展——两级文件
 互不相通、读者不相交（实证 L3 只读 app 级），无互操作义务。**重探触发** = probedAt 超
 TTL（7d）/ 显式 refresh / 所选源下载硬失败（此时按 measurements 中的次优顺位重试，全部
-失败才重新探测）。
+失败才重新探测）。**alpha.3 补（F5）**：显式 refresh 的手动 Probe 腿 = `probeMirrors`
+（`force:true` 为手动默认——现状即如此）；**OFF（`useMirrors:false`，§4.7）时 install
+跳过探测轮**（安装时决策无意义——投影已把全类 effective 钉在 origin）；OFF + 手动
+Probe = 纯展示腿（不写 decisions/overrides，§4.7）；**OFF + runtime.json 缺席 + 用户
+设 override 的边缘**：允许该次探测建立 decisions 载体（OFF 投影下惰性、ON 后生效，
+不翻开关——一句话边缘语义见 §4.7）。
 
 ### 4.2 版本解析与跨源校验
 
@@ -256,6 +284,18 @@ TTL（7d）/ 显式 refresh / 所选源下载硬失败（此时按 measurements 
   「nodejs.org ↔ npmmirror 中的另一方」（tuna **永不作校验来源**）；uv：GitHub API asset
   digest 恒直连 `api.github.com`（直连不可达 = 明确报错并提示稍后重试/走 ws 级技能，
   **不降级为无校验**）；gh-proxy 系内容**永不 pipe 进 shell**、永不作为校验来源。
+- **校验值先取、tarball 后下（alpha.3，F3 顺序反转注记）**：**先**取校验值**再**下载
+  tarball——校验锚点不可达不再浪费已完成的下载（alpha.2 为下载后取）。**node 双锚点
+  预取**：安装尝试开始时预取 nodejs.org 与 npmmirror 两份 SHASUMS256（**per-anchor
+  缓存，候选间复用**——每锚点每安装尝试至多取一次）；每候选按「tarball 来自 X → 用
+  另一侧锚点」选用缓存值（跨源不变量逐字保留，tuna 永不作校验源）。**单锚点预取失败
+  = 该候选跳过下载**（不升级为安装失败——与 §4.7 单锚失败语义同形：下载源本身可达时
+  不因单个校验锚点阵亡而中止安装）；tuna 候选两锚皆不可达 = §4.7 既有 typed 中止
+  语义不变（两锚皆被真实尝试）。
+- **uv digest 每安装尝试一次（alpha.3，F3）**：release 元数据（api.github.com——锚点
+  恒定，不随传输候选变）在梯次开始前取**一次**并缓存，候选间复用——消除「传输候选
+  下载成功却被第二次 digest 取败毁掉整次安装」。api.github.com 不可达 = **安装前快速
+  失败**（≤ `METADATA_FETCH_TIMEOUT_MS` 20s；不降级为无校验的不变量保留）。
 - **两级同一条不变量（alpha.2 起）**：app 级（A2′ 下载器）与 ws 级（S1 技能）使用**同一条**
   跨源校验不变量——本节上一条对两级均适用。原「自有资产（PR2 A1）校验锚点：构建期烧录
   sha256 进 app 资源」段随 A1 废除（owner 裁定 2026-10-08，plan §2.0）删除：运行时工件不经
@@ -298,13 +338,13 @@ TTL（7d）/ 显式 refresh / 所选源下载硬失败（此时按 measurements 
 
 ### 4.6 生命周期矩阵（收编 runtime-plan 1.5.3）
 
-| 操作    | ws 级（S1 技能，agent 执行）                                                                                                          | app 级（PR2 A2 设置卡，TS 下载器）                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| install | 探测→钉版→下载→跨源校验→解压到 `v<ver>/` →写 CURRENT→接线（AGENTS.md 块 + pathPrepend + 镜像 env）                                    | 探测（五类工件候选表，§4.1）→经上游版本解析（node dist `index.json` / uv GitHub API latest）→下载→跨源校验（§4.2 同一条不变量）→解压 `v<ver>/` →写 CURRENT→`--version` 冒烟。W5 采纳的实现顺序为 `--version` 冒烟门在 CURRENT 换指针**之前**（坏运行时永不成为 current；dir→runtime.json→CURRENT→GC 顺序不变量不变）                                                                                                                            |
-| status  | runtime.json（版本/镜像/probedAt）；技能教读取与判读命令                                                                              | 卡片：已装版本（CURRENT）+可用版本（上游解析）+最近验证结果+探测摘要（五类 × 候选延迟排名）+镜像切换                                                                                                                                                                                                                                                                                                                                            |
-| test    | 技能 Verify 节：`node --version` / `npm config get registry`（验镜像 env 生效）/ `uvx --version`；再触发 MCP 设置页 mcp/list 重探     | 「重新验证」按钮：重跑 `--version` 冒烟 + 刷新 MCP 状态列表（复用既有 mcp/list 重探）                                                                                                                                                                                                                                                                                                                                                           |
-| update  | 重跑技能→新版本装进**新 `v<ver>/` 目录**→重写 CURRENT（rename 原子）→重写 pathPrepend/AGENTS.md 块/runtime.json→旧目录 best-effort GC | 「检查更新」：重解析上游 latest（node index.json / uv GitHub API）与 runtime.json `pinned` 比对→新版本目录就绪→**CURRENT 原子换指针**→旧目录 GC（Windows 文件锁 → 保留、下次启动重试 GC；运行中 MCP 进程 POSIX 下持旧 inode 自然续命，win 下旧目录留存至进程退出）。**运行时更新不随 app 版本**——上游发现任意时刻可进行；检查发现新版本时卡内渲染「更新到 {version}」入口（复用 install 编排：dir→runtime.json→CURRENT→GC，no-op 门挡同版重装） |
-| remove  | 技能 Teardown 节：删 `.zcode/.runtime/` + 摘除 AGENTS.md 标记块 + 清 MCP 条目 pathPrepend/镜像 env + 下一任务验证回落                 | 卡片「删除」：确认对话框→删目录与清 `pinned`（镜像决策/覆盖保留，仍供 L3 缺省填空）→解析回落（系统 PATH 或 ws 级）；运行中服务器说明（下一任务生效）                                                                                                                                                                                                                                                                                            |
+| 操作    | ws 级（S1 技能，agent 执行）                                                                                                          | app 级（PR2 A2 设置卡，TS 下载器）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| install | 探测→钉版→下载→跨源校验→解压到 `v<ver>/` →写 CURRENT→接线（AGENTS.md 块 + pathPrepend + 镜像 env）                                    | 探测（五类工件候选表，§4.1）→经上游版本解析（node dist `index.json` / uv GitHub API latest）→下载→跨源校验（§4.2 同一条不变量）→解压 `v<ver>/` →写 CURRENT→`--version` 冒烟。W5 采纳的实现顺序为 `--version` 冒烟门在 CURRENT 换指针**之前**（坏运行时永不成为 current；dir→runtime.json→CURRENT→GC 顺序不变量不变）。**alpha.3 补（F1/F4）**：下载带**失速检测**（闲置看门狗 + 速度下限——坏候选 ~20-30s 放弃换梯次，梯次末位候选豁免速度下限；精确语义见 §4.7）；renderer 日志行区分 `install done` / `install failed`（含首行原因）；失败旁给重试入口 |
+| status  | runtime.json（版本/镜像/probedAt）；技能教读取与判读命令                                                                              | 卡片：已装版本（CURRENT）+可用版本（上游解析）+最近验证结果+探测摘要（五类 × 候选延迟排名）+镜像切换。**卡面行为（alpha.3，F5）**：顶部全局「使用镜像」开关**常显**（写 `useMirrors`，默认 ON——owner 确认）；现五类明细整体移入**默认折叠**面板（trigger 行 = 「镜像明细」标题 + 手动 **Probe** 按钮——per-candidate `{httpCode} · {latencyMs}` 快照**纯展示**，不写 decisions/overrides；探测期间 spinner；与安装**双向互斥**）                                                                                                                         |
+| test    | 技能 Verify 节：`node --version` / `npm config get registry`（验镜像 env 生效）/ `uvx --version`；再触发 MCP 设置页 mcp/list 重探     | 「重新验证」按钮：重跑 `--version` 冒烟 + 刷新 MCP 状态列表（复用既有 mcp/list 重探）                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| update  | 重跑技能→新版本装进**新 `v<ver>/` 目录**→重写 CURRENT（rename 原子）→重写 pathPrepend/AGENTS.md 块/runtime.json→旧目录 best-effort GC | 「检查更新」：重解析上游 latest（node index.json / uv GitHub API）与 runtime.json `pinned` 比对→新版本目录就绪→**CURRENT 原子换指针**→旧目录 GC（Windows 文件锁 → 保留、下次启动重试 GC；运行中 MCP 进程 POSIX 下持旧 inode 自然续命，win 下旧目录留存至进程退出）。**运行时更新不随 app 版本**——上游发现任意时刻可进行；检查发现新版本时卡内渲染「更新到 {version}」入口（复用 install 编排：dir→runtime.json→CURRENT→GC，no-op 门挡同版重装）                                                                                                         |
+| remove  | 技能 Teardown 节：删 `.zcode/.runtime/` + 摘除 AGENTS.md 标记块 + 清 MCP 条目 pathPrepend/镜像 env + 下一任务验证回落                 | 卡片「删除」：确认对话框→删目录与清 `pinned`（镜像决策/覆盖保留，仍供 L3 缺省填空）→解析回落（系统 PATH 或 ws 级）；运行中服务器说明（下一任务生效）                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 原则：**版本化目录 + CURRENT 原子指针**让 update 永不出现半状态；删除与换版对运行中进程
 的影响 = POSIX inode 自然续命 / win 延迟 GC，均无强制重启要求（披露）。**GC 重试归属**：
@@ -347,6 +387,67 @@ npmRegistry, pbsMirror}, overrides: {…同形，用户切换项}, measurements:
   重试。
 - **日志通道**：services 侧 `createServiceLogger`（info/warn/error；每轮探测一行汇总，
   经 host log relay 生产落盘），renderer 卡片行 `logger.lifecycle`（§4.1）。
+- **`useMirrors` schema（alpha.3，F5；additive）**：runtime.json 增可选字段
+  **`useMirrors?: boolean`，缺省 `true` = 现行为**——全局镜像开关的唯一持久状态
+  （卡内 Switch 写入；remote/CLI 面不新增环境变量）。**useMirrors 字段在所有
+  runtime.json 构造/合并位点保留（MAJOR-5）**：探测合并（install 探测轮
+  `mergeRuntimeJsonWithProbe`）、`probeMirrors` 合并字面量、finalize 合并基底——
+  任何一次逐字段构造遗漏该字段都会把 OFF 静默翻回默认 true（直接违反「OFF 下测了
+  也不改变设置」）。
+- **OFF 全链语义（alpha.3，F5；D1 = 「不用镜像」=「用官方」）**：
+  - **投影唯一**：`resolveEffectiveDecisions` 为唯一投影点——OFF 时**全类** effective
+    = origin id（nodeDist=nodejs.org / uvRelease=github.com / pypiIndex=pypi.org /
+    npmRegistry=registry.npmjs.org / pbsMirror=github.com）。下载选路、L3/Bash 填空、
+    卡片显示全部消费同一投影（单一事实源，不出现「开关关了、下载还走镜像」的分裂）。
+  - **下载梯次同义（MAJOR-1）**：`buildCandidateLadder` 消费 effective 投影——OFF 时
+    梯次 = **origin-only**（仅 origin 候选；无镜像主选、无镜像次选——同 override 槽位
+    形制）。
+  - **overrides 压制但不删**：OFF 期间 overrides 不生效（投影压制），ON 恢复即生效
+    （卡内注记）；压制期间 **override 源硬失败规则不武装**（(iv) 的前提是 override
+    被咨询）。
+  - **安装跳过探测轮**：OFF 时 install 跳过探测（安装时决策无意义，§4.1）。
+  - **手动 Probe = 纯展示腿（MINOR-6）**：OFF 下 `probeMirrors` 只更新 measurements/
+    快照与日志，**不写 decisions/overrides**（否则违背「仅信息展示」）；内部调用方
+    （如 override 写入前建立基线）保持持久语义。**OFF + runtime.json 缺席 + 用户设
+    override 的边缘（B 项）**：允许探测建立 decisions 载体（OFF 投影下惰性、ON 后
+    生效，不翻开关）。
+- **填充类失败降级（alpha.3，F6；MINOR-7/MINOR-13）**：decisions 值允许**缺席**
+  （**键删 = 不填空**）——填充类（pypiIndex/npmRegistry/pbsMirror）探测 all-dead 时
+  探测合并**删除该键**（不保 stale 镜像值）；**合并 defaults 不得复活已删键**
+  （`defaultDecisions` + spread 会复活 = 缺陷，须显式删除处理）。读端本就容错
+  （缺键 = 不填）；effective 投影对缺席 = undefined → L3/Bash 不填。类型涟漪（W-A）：
+  decisions 值可选化波及 `buildCandidateLadder` primary（undefined → 梯次其余/
+  origin 兜底）、install noop `candidate` 字段、service status 快照。
+- **下载失速看门狗精确语义（alpha.3，F1；A 项窗口度量钉死；D2 = 参数固定不做配置，
+  全部有名常量 + 注释依据，禁匿名魔数）**：
+  - **闲置看门狗** `DOWNLOAD_STALL_IDLE_MS = 8_000`：**收到首 chunk 后起表**，连续
+    8s 无新 chunk → abort 该候选下载（候选失败、既有梯次推进，不改编排）；**首 chunk
+    前不起表**（TTFB 慢 = CN→origin 常态，由既有 `DOWNLOAD_TIMEOUT_MS` 总超时管）。
+  - **速度下限** `DOWNLOAD_SPEED_GRACE_MS = 15_000` + `DOWNLOAD_SPEED_FLOOR_BYTES_PER_SEC
+= 256 * 1024` + `DOWNLOAD_SPEED_WINDOW_MS = 10_000`（滑动窗口长度）：**宽限自首
+    chunk 到达起算** 15s 内不限速（TCP 慢启动不罚，MINOR-5a）；此后按**滑动窗口**平均
+    速度 < 256KB/s → abort。**窗口度量精确定义**：以每次 chunk 到达时刻为界，回看不
+    超过 `DOWNLOAD_SPEED_WINDOW_MS`（10s）的区间，窗口速度 = 该区间内到达 chunk 的
+    字节总和 ÷ 区间实际跨度（回看起点 = max(首 chunk 时刻, 评估时刻 − 10s)）；
+    评估时机 = 每次新 chunk 到达与每次看门狗定时器触发（非累计平均）。
+  - **chunk 时间戳在流 yield 处取**（pre-sink-write）——磁盘 drain 背压不算网络闲置、
+    不拖慢窗口速度（MINOR-15）。
+  - **梯次末位候选豁免速度下限**（MINOR-5c）：最后一个候选仅受闲置看门狗 +
+    `DOWNLOAD_TIMEOUT_MS` 总上限管（OFF 直连 origin 时慢速真实下载不被下限处死）；
+    豁免由安装编排按梯次位置传入，独立调用下载函数不豁免。
+  - `DOWNLOAD_TIMEOUT_MS`（10min）总上限保留兜底。**观测**：每次失速 abort 落一条
+    warn（含累计字节/时长/窗口速度）；全部候选失速才失败（错误文案含各候选速度摘要）。
+- **错误呈现契约（alpha.3，F4；D 项/MINOR-14）**：`refreshStatus` **成功路径保留既有
+  error**（不无条件清空——alpha.2 缺陷：错误至多存活一个异步 tick）；**新动作开始时
+  才清**（install start 已如此）；status 读取失败只更新 error 不清快照。renderer 日志
+  行**区分成败**：`install done` / `install failed`（含首行原因）。**store
+  `installRuntime` 失败必须 rethrow**（选定机制 = **rethrow**——与
+  setMirrorOverride/removeRuntime 同形制；catch 吞掉使卡侧 `.catch` 成死代码 = 成败
+  同日志的根因）。失败旁提供**重试**入口（复用安装动作）。
+- **并行探测汇总行确定性类序（alpha.3，C 项）**：类间并行化后 install 与
+  `service.probeMirrors` 两处的 `probe round:` 汇总行按 §4.1 候选表类序确定性输出
+  （rig checklist 的 grep 锚点）。并发披露（NIT-16）：探测峰值并发 ~3 → ~13 个小
+  Range GET。
 
 ## 5. S2 — bundled skill `zcode-config-reference` 契约（alpha.0 落地；alpha.1 修正假等价）
 

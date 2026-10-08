@@ -31,7 +31,30 @@ export const APP_RUNTIME_ARTIFACT_CLASSES: readonly AppRuntimeArtifactClass[] = 
   "pbsMirror",
 ];
 
-export type AppRuntimeDecisions = Record<AppRuntimeArtifactClass, string>;
+/**
+ * F6（alpha.3，§4.7 填充类失败降级 + plan §9 MINOR-13 类型涟漪）：decisions 值允许
+ * **缺席**（键删 = 不填空，不保 stale 镜像值）——填充类探测 all-dead 时合并删除
+ * 该键；读端容错（缺键 = 不填），effective 投影对缺席 = undefined → L3/Bash 不填。
+ * Partial 形制与 overrides 同构（省略/delete 皆合法；spread 只携带在场键）。
+ */
+export type AppRuntimeDecisions = Partial<Record<AppRuntimeArtifactClass, string>>;
+
+/**
+ * F6（alpha.3，§4.1 规则 4 类域限定）：「全灭→报错」仅适用**安装相关类**
+ * （nodeDist/uvRelease——all-dead = 中止安装，语义不变）；**填充类**
+ * （pypiIndex/npmRegistry/pbsMirror）all-dead = warn + decisions 键删（§4.7
+ * F6 键删语义），安装照常（不连累安装）。install 探测轮（runProbeRound）与
+ * service.probeMirrors 两处同形消费本分域。
+ */
+export const FILLER_RUNTIME_ARTIFACT_CLASSES: readonly AppRuntimeArtifactClass[] = [
+  "pypiIndex",
+  "npmRegistry",
+  "pbsMirror",
+];
+
+export function isFillerRuntimeArtifactClass(artifactClass: AppRuntimeArtifactClass): boolean {
+  return FILLER_RUNTIME_ARTIFACT_CLASSES.includes(artifactClass);
+}
 
 export interface AppRuntimeMirrorMeasurement {
   readonly candidate: string;
@@ -51,7 +74,30 @@ export interface AppRuntimeJson {
   readonly overrides?: Partial<AppRuntimeDecisions>;
   readonly measurements: readonly AppRuntimeMirrorMeasurement[];
   readonly pinned: { readonly node: string; readonly uv: string };
+  /**
+   * F5（alpha.3，§4.7）：全局镜像开关的唯一持久状态（卡内 Switch 写入）。
+   * additive 可选字段，**缺省 true = 现行为**；读端容错不猜——非布尔/缺席
+   * 一律按缺省 true 处理（投影判 `=== false`）。
+   */
+  readonly useMirrors?: boolean;
 }
+
+/**
+ * F5（alpha.3，§4.7 D1）：OFF 投影的全类 origin id（「不用镜像」=「用官方」）。
+ * 与 probe.ts MIRROR_CANDIDATE_TABLES 的 isOrigin 候选同源（id 即取值域）；
+ * 供 resolveEffectiveDecisions 唯一投影与 buildCandidateLadder origin-only
+ * 梯次（MAJOR-1）共用，避免双表漂移。
+ *
+ * 注：显式标注全键在场的 Record（非 Partial<AppRuntimeDecisions>）——OFF 投影
+ * 与 origin-only 梯次的消费端需要 string（F6 键删语义不适用于本常量）。
+ */
+export const APP_RUNTIME_ORIGIN_DECISIONS: Readonly<Record<AppRuntimeArtifactClass, string>> = {
+  nodeDist: "nodejs.org",
+  uvRelease: "github.com",
+  pypiIndex: "pypi.org",
+  npmRegistry: "registry.npmjs.org",
+  pbsMirror: "github.com",
+};
 
 /** `<config>/.runtime/runtime.json`（与 C3 L3 读取同源：getDataBaseDir/ZCODE_DATA_BASE_DIR 解析）。 */
 export function resolveAppRuntimeJsonPath(): string {
@@ -63,8 +109,22 @@ export function resolveAppRuntimeRootDir(): string {
   return join(getZCodeDataRootDir(), ".runtime");
 }
 
-/** effective decision = override ?? probed（§4.7）。 */
+/**
+ * effective decision = override ?? probed（§4.7）。
+ *
+ * F5（alpha.3，§4.7 投影唯一/D1）：`useMirrors === false`（显式 OFF；缺省/
+ * 非布尔 = true 现行为）→ **全类** effective = origin id，无视 decisions/
+ * overrides——下载选路、L3/Bash 填空、卡片显示全部消费本投影（单一事实源，
+ * 不出现「开关关了、下载还走镜像」的分裂）。overrides 被压制但**不删**
+ * （ON 恢复即生效；压制期间 override 源硬失败规则不武装）。
+ *
+ * F6（alpha.3，§4.7）：probed 键缺席（填充类 all-dead 键删）= 原样透传 undefined
+ * （override ?? undefined = undefined）——读端容错缺键 = 不填，不猜默认镜像。
+ */
 export function resolveEffectiveDecisions(json: AppRuntimeJson): AppRuntimeDecisions {
+  if (json.useMirrors === false) {
+    return { ...APP_RUNTIME_ORIGIN_DECISIONS };
+  }
   return {
     nodeDist: json.overrides?.nodeDist ?? json.decisions.nodeDist,
     uvRelease: json.overrides?.uvRelease ?? json.decisions.uvRelease,

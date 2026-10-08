@@ -1439,6 +1439,9 @@ export function createLocalServices(options: {
       localRuntimeServiceBase.setMirrorOverride(artifactClass, candidateId),
     clearMirrorOverride: (artifactClass) =>
       localRuntimeServiceBase.clearMirrorOverride(artifactClass),
+    // W-B1 偏差收口（§4.7 F5）：卡内「使用镜像」Switch 的 RPC 委托字面量——
+    // port.ts 的 setUseMirrors 已翻为必选，此处接线补齐实现面。
+    setUseMirrors: (useMirrors) => localRuntimeServiceBase.setUseMirrors(useMirrors),
     probeMirrors: (options) => localRuntimeServiceBase.probeMirrors(options),
     listMirrorCandidates: async () =>
       Object.fromEntries(

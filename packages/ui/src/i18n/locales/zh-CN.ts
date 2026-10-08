@@ -2228,6 +2228,12 @@ const zhCN: Record<string, string> = {
   "settings.mcp.runtime.probeLatency": "{code} · {latency}ms",
   "settings.mcp.runtime.probeFailed": "不可用",
   "settings.mcp.runtime.probeEmpty": "暂无探测数据（安装或切换镜像后会生成）。",
+  "settings.mcp.runtime.useMirrors": "使用镜像",
+  "settings.mcp.runtime.useMirrorsDescription":
+    "开启后探测与下载优先走镜像源；关闭后直连官方源（镜像覆盖保留，重新开启后生效）。",
+  "settings.mcp.runtime.mirrorDetails": "镜像明细",
+  "settings.mcp.runtime.probeAction": "探测",
+  "settings.mcp.runtime.retryInstall": "重试安装 {kind}",
   "settings.mcp.plugin.active": "插件内置",
   "settings.mcp.plugin.activeDescription": "该 MCP 服务器由已启用插件提供，配置跟随插件管理。",
   "settings.mcp.plugin.connecting": "连接中",

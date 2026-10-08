@@ -110,6 +110,9 @@ export function resolveAppRuntimeBashAppendFromDisk(
   const root = deps.runtimeRootDir ?? resolveAppRuntimeRootDir();
   const platform = deps.platform ?? process.platform;
   const json = readAppRuntimeJson(join(root, "runtime.json"));
+  // D1（alpha.3，§2.5/§4.7）：OFF 投影由 resolveEffectiveDecisions 唯一承担——
+  // useMirrors === false 时 effective 已是 origin id，本腿经 shared 取值表填官方
+  // 值（与 adapters L3 腿行为同义）；ON（缺省/非布尔）维持镜像决策。
   const effective = json ? resolveEffectiveDecisions(json) : null;
   const decision = effective
     ? resolveRuntimeMirrorEnvValues({
